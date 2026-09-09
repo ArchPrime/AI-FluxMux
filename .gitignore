@@ -1,0 +1,45 @@
+# Build
+bin/
+obj/
+artifacts/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# App data and secrets — never ship a development config
+Logs/
+*.log
+fluxmux_config.json
+fluxmux_secrets.json
+.vscode/fluxmux_config.json
+.vscode/fluxmux_secrets.json
+.vscode/fluxmux*.bak
+.vscode/fluxmux*.old
+FluxMux_Startup_Error.log
+AI-FluxMux-could-not-start.txt
+
+# Models and local runtime
+*.gguf
+*.bin
+llama-server/
+
+# Design source that is not the app
+*.pln
+Assets/Logos/_preview_*.png
+
+# Leftovers that are not source
+Help-copy.html
+Help-copy_files/
+tmp_decompile/
+_cloud_duty_attach/
+_cloud_duty_probe.txt
+*.tmp
+*.cache
+.cache/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store

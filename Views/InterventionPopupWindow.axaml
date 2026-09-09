@@ -1,0 +1,127 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:FluxMux.Avalonia.ViewModels"
+        xmlns:views="using:FluxMux.Avalonia.Views"
+        x:Class="FluxMux.Avalonia.Views.InterventionPopupWindow"
+        x:DataType="vm:MainViewModel"
+        Title="AI-FluxMux — needs a decision"
+        Width="520"
+        MinWidth="420"
+        SizeToContent="Height"
+        CanResize="False"
+        Topmost="True"
+        ShowInTaskbar="True"
+        WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource FluxPaneBackground}"
+        Foreground="{DynamicResource FluxHeadingForeground}">
+
+    <Border Padding="14"
+            Background="{DynamicResource FluxCardBackground}"
+            BorderBrush="{DynamicResource FluxCardBorder}"
+            BorderThickness="1">
+        <StackPanel Spacing="12">
+            <TextBlock Text="AI-FluxMux needs a decision"
+                       FontSize="15"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource FluxHeadingForeground}" />
+
+            <Border IsVisible="{Binding CloudRecommendVisible}"
+                    Background="{DynamicResource FluxTintAmberBackground}"
+                    BorderBrush="{DynamicResource FluxTintAmberBorder}"
+                    BorderThickness="1"
+                    CornerRadius="4"
+                    Padding="10,8">
+                <StackPanel Spacing="10">
+                    <TextBlock views:MarkedText.Source="{Binding CloudRecommendText}"
+                               TextWrapping="Wrap"
+                               FontSize="12"
+                               Foreground="{DynamicResource FluxHeadingForeground}" />
+                    <TextBlock Text="{Binding RecoveryHarnessRelaunchHint}"
+                               TextWrapping="Wrap"
+                               FontSize="11"
+                               Opacity="0.88"
+                               Foreground="{DynamicResource FluxSecondaryForeground}"
+                               IsVisible="{Binding RecoveryHarnessRelaunchVisible}" />
+                    <WrapPanel>
+                        <Button Content="{Binding RecoveryWaitLongerLabel}"
+                                Margin="0,0,8,8"
+                                IsVisible="{Binding RecoveryWaitLongerVisible}"
+                                Command="{Binding ContinueWaitingRecoveryCommand}"
+                                ToolTip.Tip="Keep this Client-app turn open. llama-server keeps working. The same choices appear again if it stays quiet." />
+                        <Button Content="{Binding RecoveryResumeLabel}"
+                                Margin="0,0,8,8"
+                                Command="{Binding ResumeCurrentModelRecoveryCommand}"
+                                ToolTip.Tip="{Binding RecoveryResumeTooltip}" />
+                        <Button Content="{Binding RecoverySwitchLocalLabel}"
+                                Margin="0,0,8,8"
+                                IsVisible="{Binding RecoverySwitchLocalVisible}"
+                                Command="{Binding SwitchRecoveryLocalCommand}"
+                                ToolTip.Tip="{Binding RecoverySwitchLocalTooltip}" />
+                        <Button Content="{Binding RecoverySwitchCloudLabel}"
+                                Margin="0,0,8,8"
+                                IsVisible="{Binding RecoverySwitchCloudVisible}"
+                                Command="{Binding ApproveCloudRecommendCommand}"
+                                ToolTip.Tip="{Binding RecoverySwitchCloudTooltip}" />
+                    </WrapPanel>
+                </StackPanel>
+            </Border>
+
+            <Border IsVisible="{Binding LocalReloadRecommendVisible}"
+                    Background="{DynamicResource FluxTintBlueBackground}"
+                    BorderBrush="{DynamicResource FluxTintBlueBorder}"
+                    BorderThickness="1"
+                    CornerRadius="4"
+                    Padding="10,8"
+                    views:MarkedText.Tip="{Binding LocalReloadRecommendTooltip}">
+                <StackPanel Spacing="10">
+                    <TextBlock views:MarkedText.Source="{Binding LocalReloadRecommendText}"
+                               TextWrapping="Wrap"
+                               FontSize="12"
+                               Foreground="{DynamicResource FluxHeadingForeground}" />
+                    <WrapPanel>
+                        <Button Content="Compact"
+                                Margin="0,0,8,8"
+                                IsVisible="{Binding LocalReloadCompactVisible}"
+                                Command="{Binding CompactLocalReloadRecommendCommand}"
+                                ToolTip.Tip="Shorten older turns that AI-FluxMux forwards to the local model, but only when this chat is actually filling the loaded Context. The Client app still has the full chat." />
+                        <Button Content="Load suggested model profile"
+                                Margin="0,0,8,8"
+                                IsVisible="{Binding LocalReloadLoadVisible}"
+                                Command="{Binding ApproveLocalReloadRecommendCommand}"
+                                ToolTip.Tip="Unload the model profile that is running now and start the suggested model profile named in the note." />
+                        <Button Content="Keep current model profile"
+                                Margin="0,0,8,8"
+                                Command="{Binding DeclineLocalReloadRecommendCommand}"
+                                ToolTip.Tip="Keep the local model profile that is already loaded. Hide this suggestion for 15 minutes." />
+                    </WrapPanel>
+                </StackPanel>
+            </Border>
+
+            <StackPanel Spacing="8" IsVisible="{Binding RecoveryReplacementVisible}">
+                <TextBlock Text="Or choose a different model"
+                           FontSize="12"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource FluxHeadingForeground}" />
+                <ComboBox x:Name="RecoveryReplacementChooser"
+                          ItemsSource="{Binding RecoveryReplacementOptions}"
+                          SelectedItem="{Binding SelectedRecoveryReplacement}"
+                          HorizontalAlignment="Stretch">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate DataType="vm:RecoveryReplacementOption">
+                            <TextBlock Text="{Binding DisplayName}" TextWrapping="Wrap" />
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+                <TextBlock Text="{Binding RecoveryReplacementAdvice}"
+                           TextWrapping="Wrap"
+                           FontSize="11"
+                           Opacity="0.88"
+                           Foreground="{DynamicResource FluxSecondaryForeground}" />
+                <Button Content="Switch to selected"
+                        HorizontalAlignment="Left"
+                        Command="{Binding ApplyRecoveryReplacementCommand}"
+                        ToolTip.Tip="Load or route to the model you picked. The note above says whether this Client-app chat can continue." />
+            </StackPanel>
+        </StackPanel>
+    </Border>
+</Window>

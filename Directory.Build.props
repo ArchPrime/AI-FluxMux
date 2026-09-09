@@ -1,0 +1,20 @@
+<Project>
+  <!-- Side-output builds (-o artifacts\...) exist only so a running AI-FluxMux is not
+       overwritten. They must not share obj\Debug with the launcher: Avalonia weaves
+       compiled XAML into the intermediate DLL, and a shared obj tree can copy an
+       un-woven assembly into bin\Debug, after which the window never opens.
+       Redirecting BaseIntermediateOutputPath also means the SDK no longer excludes
+       the default obj\ folder, so that glob is restored below.
+       artifacts\ is never source: excluding it stops generated AssemblyInfo under
+       artifacts\obj from being globbed twice. -->
+  <PropertyGroup>
+    <_FluxMuxOutputHint>$(OutputPath)$(OutDir)$(BaseOutputPath)</_FluxMuxOutputHint>
+    <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**</DefaultItemExcludes>
+    <!-- UTF-8 source without a BOM; otherwise Windows ANSI turns middle-dots into Â/Ä. -->
+    <CodePage>65001</CodePage>
+  </PropertyGroup>
+  <PropertyGroup Condition="$([System.String]::Copy('$(_FluxMuxOutputHint)').ToLowerInvariant().Contains('artifacts'))">
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)artifacts\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj\**;bin\**</DefaultItemExcludes>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,9 @@
+AI-FluxMux 0.2 beta
+===================
+
+1. Unzip this folder to a place you own (for example C:\AI-FluxMux). Do not use Program Files — Help updates write next to the program.
+2. Double-click FluxMux.Avalonia.exe. Windows SmartScreen may ask you to choose More info, then Run anyway (this build is not code-signed).
+3. Open the Help tab in AI-FluxMux. Start with Install AI-FluxMux, then llama-server, then your local model folder and Client app (Cline or DeepSeek Harness).
+4. Settings are stored in %AppData%\AI-FluxMux\ — not in this folder.
+
+This is a beta. llama-server, local model files, and the Client app are separate downloads. Help names them in plain language.

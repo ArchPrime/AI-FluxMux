@@ -1,0 +1,37 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="FluxMux.Avalonia.Views.ConfirmDialogWindow"
+        Width="520"
+        MinWidth="420"
+        SizeToContent="Height"
+        CanResize="False"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Background="{DynamicResource FluxPaneBackground}"
+        Foreground="{DynamicResource FluxHeadingForeground}">
+
+    <Border Padding="14"
+            Background="{DynamicResource FluxCardBackground}"
+            BorderBrush="{DynamicResource FluxCardBorder}"
+            BorderThickness="1">
+        <StackPanel Spacing="12">
+            <TextBlock x:Name="HeadingText"
+                       FontSize="15"
+                       FontWeight="SemiBold"
+                       TextWrapping="Wrap"
+                       Foreground="{DynamicResource FluxHeadingForeground}" />
+            <TextBlock x:Name="MessageText"
+                       TextWrapping="Wrap"
+                       FontSize="12"
+                       Foreground="{DynamicResource FluxHeadingForeground}" />
+            <WrapPanel>
+                <Button x:Name="CancelButton"
+                        Margin="0,0,8,8"
+                        Click="Cancel_Click" />
+                <Button x:Name="OkButton"
+                        Margin="0,0,8,8"
+                        Click="Ok_Click" />
+            </WrapPanel>
+        </StackPanel>
+    </Border>
+</Window>

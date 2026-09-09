@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <_FluxMuxOutputHint>$(OutputPath)$(OutDir)$(BaseOutputPath)</_FluxMuxOutputHint>
+    <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**</DefaultItemExcludes>
+  </PropertyGroup>
+  <ItemGroup Condition="$([System.String]::Copy('$(_FluxMuxOutputHint)').ToLowerInvariant().Contains('artifacts'))">
+    <Compile Remove="obj\**" />
+    <EmbeddedResource Remove="obj\**" />
+    <None Remove="obj\**" />
+    <Compile Remove="bin\**" />
+    <EmbeddedResource Remove="bin\**" />
+    <None Remove="bin\**" />
+  </ItemGroup>
+</Project>

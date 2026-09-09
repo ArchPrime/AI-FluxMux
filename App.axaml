@@ -1,0 +1,131 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="FluxMux.Avalonia.App"
+             xmlns:local="using:FluxMux.Avalonia"
+             RequestedThemeVariant="Light">
+
+    <Application.DataTemplates>
+        <local:ViewLocator />
+    </Application.DataTemplates>
+
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Light">
+                    <SolidColorBrush x:Key="FluxCardBackground" Color="#FFFFFF" />
+                    <SolidColorBrush x:Key="FluxMutedBackground" Color="#F8FAFC" />
+                    <SolidColorBrush x:Key="FluxPaneBackground" Color="#F2F4F7" />
+                    <!-- Translucent, so a snippet reads the same on a card, in a callout, or in a table cell. -->
+                    <SolidColorBrush x:Key="FluxCodeFill" Color="#16000000" />
+                    <SolidColorBrush x:Key="FluxCardBorder" Color="#D0D7DE" />
+                    <SolidColorBrush x:Key="FluxMutedBorder" Color="#CBD5E1" />
+                    <SolidColorBrush x:Key="FluxHeadingForeground" Color="#0F172A" />
+                    <SolidColorBrush x:Key="FluxSecondaryForeground" Color="#334155" />
+                    <SolidColorBrush x:Key="FluxLinkForeground" Color="#0563C1" />
+                    <SolidColorBrush x:Key="FluxSplitter" Color="#98A2B3" />
+                    <SolidColorBrush x:Key="FluxListItemBackground" Color="#F8FAFC" />
+                    <SolidColorBrush x:Key="FluxListItemBorder" Color="#CBD5E1" />
+                    <SolidColorBrush x:Key="FluxListItemHoverBackground" Color="#EFF6FF" />
+                    <SolidColorBrush x:Key="FluxListItemHoverBorder" Color="#60A5FA" />
+                    <SolidColorBrush x:Key="FluxListItemSelectedBackground" Color="#DBEAFE" />
+                    <SolidColorBrush x:Key="FluxListItemSelectedBorder" Color="#2563EB" />
+                    <SolidColorBrush x:Key="FluxTintAmberBackground" Color="#FFFBEB" />
+                    <SolidColorBrush x:Key="FluxTintAmberBorder" Color="#FDE68A" />
+                    <SolidColorBrush x:Key="FluxTintGreenBackground" Color="#F0FDF4" />
+                    <SolidColorBrush x:Key="FluxTintGreenBorder" Color="#BBF7D0" />
+                    <SolidColorBrush x:Key="FluxTintOrangeBackground" Color="#FFF7ED" />
+                    <SolidColorBrush x:Key="FluxTintOrangeBorder" Color="#FED7AA" />
+                    <SolidColorBrush x:Key="FluxTintPurpleBackground" Color="#F5F3FF" />
+                    <SolidColorBrush x:Key="FluxTintPurpleBorder" Color="#DDD6FE" />
+                    <SolidColorBrush x:Key="FluxTintBlueBackground" Color="#EEF2FF" />
+                    <SolidColorBrush x:Key="FluxTintBlueBorder" Color="#C7D2FE" />
+                    <SolidColorBrush x:Key="FluxServersTintOrangeBackground" Color="#F8F5F2" />
+                    <SolidColorBrush x:Key="FluxServersTintOrangeBorder" Color="#E4D8CC" />
+                    <SolidColorBrush x:Key="FluxServersTintGreenBackground" Color="#F4F7F5" />
+                    <SolidColorBrush x:Key="FluxServersTintGreenBorder" Color="#D4DDD6" />
+                    <SolidColorBrush x:Key="FluxServersTintBlueBackground" Color="#F4F5F8" />
+                    <SolidColorBrush x:Key="FluxServersTintBlueBorder" Color="#D4D8E3" />
+                    <SolidColorBrush x:Key="FluxServersTintPurpleBackground" Color="#F5F4F8" />
+                    <SolidColorBrush x:Key="FluxServersTintPurpleBorder" Color="#D8D4E3" />
+                    <SolidColorBrush x:Key="FluxRowStripeEven" Color="#FFFFFF" />
+                    <SolidColorBrush x:Key="FluxRowStripeOdd" Color="#F8FAFC" />
+                    <SolidColorBrush x:Key="FluxQuickSelectLiveBackground" Color="#F3F8F4" />
+                    <SolidColorBrush x:Key="FluxQuickSelectAmberBackground" Color="#FBF6EF" />
+                    <SolidColorBrush x:Key="FluxQuickSelectFaultBackground" Color="#FBF4F4" />
+                    <SolidColorBrush x:Key="FluxQuickSelectStandbyBackground" Color="#F2F8F6" />
+                    <SolidColorBrush x:Key="FluxQuickSelectLiveBorder" Color="#BBF7D0" />
+                    <SolidColorBrush x:Key="FluxQuickSelectStandbyBorder" Color="#BBF7D0" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <SolidColorBrush x:Key="FluxCardBackground" Color="#1D2939" />
+                    <SolidColorBrush x:Key="FluxMutedBackground" Color="#152033" />
+                    <SolidColorBrush x:Key="FluxPaneBackground" Color="#0C111C" />
+                    <SolidColorBrush x:Key="FluxCodeFill" Color="#26FFFFFF" />
+                    <SolidColorBrush x:Key="FluxCardBorder" Color="#344054" />
+                    <SolidColorBrush x:Key="FluxMutedBorder" Color="#344054" />
+                    <SolidColorBrush x:Key="FluxHeadingForeground" Color="#F9FAFB" />
+                    <SolidColorBrush x:Key="FluxSecondaryForeground" Color="#D0D5DD" />
+                    <SolidColorBrush x:Key="FluxLinkForeground" Color="#93C5FD" />
+                    <SolidColorBrush x:Key="FluxSplitter" Color="#475467" />
+                    <SolidColorBrush x:Key="FluxListItemBackground" Color="#152033" />
+                    <SolidColorBrush x:Key="FluxListItemBorder" Color="#344054" />
+                    <SolidColorBrush x:Key="FluxListItemHoverBackground" Color="#1E3A5F" />
+                    <SolidColorBrush x:Key="FluxListItemHoverBorder" Color="#60A5FA" />
+                    <SolidColorBrush x:Key="FluxListItemSelectedBackground" Color="#1E40AF" />
+                    <SolidColorBrush x:Key="FluxListItemSelectedBorder" Color="#93C5FD" />
+                    <SolidColorBrush x:Key="FluxTintAmberBackground" Color="#3F2F12" />
+                    <SolidColorBrush x:Key="FluxTintAmberBorder" Color="#B45309" />
+                    <SolidColorBrush x:Key="FluxTintGreenBackground" Color="#052E16" />
+                    <SolidColorBrush x:Key="FluxTintGreenBorder" Color="#166534" />
+                    <SolidColorBrush x:Key="FluxTintOrangeBackground" Color="#431407" />
+                    <SolidColorBrush x:Key="FluxTintOrangeBorder" Color="#C2410C" />
+                    <SolidColorBrush x:Key="FluxTintPurpleBackground" Color="#2E1065" />
+                    <SolidColorBrush x:Key="FluxTintPurpleBorder" Color="#7C3AED" />
+                    <SolidColorBrush x:Key="FluxTintBlueBackground" Color="#1E3A5F" />
+                    <SolidColorBrush x:Key="FluxTintBlueBorder" Color="#3B82F6" />
+                    <SolidColorBrush x:Key="FluxServersTintOrangeBackground" Color="#241F1C" />
+                    <SolidColorBrush x:Key="FluxServersTintOrangeBorder" Color="#5C4E42" />
+                    <SolidColorBrush x:Key="FluxServersTintGreenBackground" Color="#1C2420" />
+                    <SolidColorBrush x:Key="FluxServersTintGreenBorder" Color="#3D4F46" />
+                    <SolidColorBrush x:Key="FluxServersTintBlueBackground" Color="#1E2430" />
+                    <SolidColorBrush x:Key="FluxServersTintBlueBorder" Color="#3D4A5C" />
+                    <SolidColorBrush x:Key="FluxServersTintPurpleBackground" Color="#221F2A" />
+                    <SolidColorBrush x:Key="FluxServersTintPurpleBorder" Color="#4A4558" />
+                    <SolidColorBrush x:Key="FluxRowStripeEven" Color="#1D2939" />
+                    <SolidColorBrush x:Key="FluxRowStripeOdd" Color="#152033" />
+                    <SolidColorBrush x:Key="FluxQuickSelectLiveBackground" Color="#1C2B22" />
+                    <SolidColorBrush x:Key="FluxQuickSelectAmberBackground" Color="#2A2318" />
+                    <SolidColorBrush x:Key="FluxQuickSelectFaultBackground" Color="#2A1C1E" />
+                    <SolidColorBrush x:Key="FluxQuickSelectStandbyBackground" Color="#1A2724" />
+                    <SolidColorBrush x:Key="FluxQuickSelectLiveBorder" Color="#2D4A3A" />
+                    <SolidColorBrush x:Key="FluxQuickSelectStandbyBorder" Color="#2D4A3A" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+        </ResourceDictionary>
+    </Application.Resources>
+
+    <Application.Styles>
+        <FluentTheme />
+        <!-- Prevent ScrollViewers from jumping to the focused control on every click;
+             use non-overlay scrollbars so content is not hidden beneath them -->
+        <Style Selector="ScrollViewer">
+            <Setter Property="BringIntoViewOnFocusChange" Value="False" />
+            <Setter Property="AllowAutoHide" Value="False" />
+            <Setter Property="Padding" Value="0,0,14,0" />
+        </Style>
+        <!-- Selecting a row must not scroll the parent page to that row -->
+        <Style Selector="ListBox">
+            <Setter Property="AutoScrollToSelectedItem" Value="False" />
+        </Style>
+        <!-- Prevent buttons from stealing keyboard focus and triggering scroll-into-view -->
+        <Style Selector="Button">
+            <Setter Property="Focusable" Value="False" />
+        </Style>
+        <Style Selector="Button.optionInfo">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Padding" Value="8,1" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="Foreground" Value="{DynamicResource FluxSecondaryForeground}" />
+        </Style>
+    </Application.Styles>
+</Application>

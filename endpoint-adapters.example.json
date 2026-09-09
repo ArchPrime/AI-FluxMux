@@ -1,0 +1,30 @@
+{
+  "notes": "Optional fluxmux_config.json key EndpointAdapters. Copy objects into that file — do not replace the whole config. Or use Servers → Export / Import Endpoint adapters (Help: Endpoint adapters (JSON)). Built-in cline-4x and harness-yaml still run unless you set enabled false. kind json-merge writes another Client app that already points at Port.",
+  "EndpointAdapters": [
+    {
+      "id": "cline-4x",
+      "kind": "cline-4x",
+      "enabled": true
+    },
+    {
+      "id": "harness-yaml",
+      "kind": "harness-yaml",
+      "enabled": true
+    },
+    {
+      "id": "example-openai-client",
+      "kind": "json-merge",
+      "enabled": false,
+      "path": "%USERPROFILE%\\.example-client\\settings.json",
+      "onlyIfFileExists": true,
+      "baseUrlPath": "provider.baseUrl",
+      "set": {
+        "provider.model": "{modelId}",
+        "models.local.name": "{displayName}",
+        "models.local.contextWindow": "{context}",
+        "models.local.maxTokens": "{maxTokens}",
+        "models.local.supportsImages": "{imagesOn}"
+      }
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="FluxMux.Avalonia.Controls.AnimatedAppLogo"
+             Height="44"
+             HorizontalAlignment="Left"
+             VerticalAlignment="Center"
+             ClipToBounds="True">
+    <Viewbox Stretch="Uniform">
+        <Panel Width="736" Height="605">
+            <Image x:Name="LogoFull"
+                   Width="736"
+                   Height="605"
+                   Stretch="Fill"
+                   Source="/Assets/Logos/AI-FluxMux Logo.png" />
+            <Image x:Name="LogoAnim"
+                   Width="736"
+                   Height="605"
+                   Stretch="Fill"
+                   IsVisible="False"
+                   IsHitTestVisible="False" />
+        </Panel>
+    </Viewbox>
+</UserControl>

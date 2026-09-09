@@ -1,0 +1,49 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Logos\AI-FluxMux.ico</ApplicationIcon>
+    <Version>0.2.0</Version>
+    <InformationalVersion>0.2 beta</InformationalVersion>
+    <Product>AI-FluxMux</Product>
+    <AssemblyTitle>AI-FluxMux</AssemblyTitle>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Folder Include="Models\" />
+    <AvaloniaResource Include="Assets\**" />
+    <AvaloniaResource Remove="Assets\Logos\*.jpg" />
+    <AvaloniaResource Remove="Assets\Logos\*.pln" />
+    <AvaloniaResource Remove="Assets\Logos\_preview_*.png" />
+    <Compile Remove="FluxMux.Avalonia.Tests\**" />
+    <None Remove="FluxMux.Avalonia.Tests\**" />
+    <EmbeddedResource Remove="FluxMux.Avalonia.Tests\**" />
+    <Content Include="Help.html">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <!-- Word writes Help.html pictures here, so they must travel with it. -->
+    <Content Include="Help_files\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="Start here.txt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
+    <PackageReference Include="AvaloniaUI.DiagnosticsSupport" Version="2.2.3">
+      <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
+      <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
+    <PackageReference Include="SkiaSharp" Version="3.119.4" />
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.0" />
+  </ItemGroup>
+</Project>
