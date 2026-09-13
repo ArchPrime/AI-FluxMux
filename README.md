@@ -2,6 +2,15 @@
 
 Desktop router for local (llama-server + GGUF) and cloud models. An OpenAI-compatible **Client app** (Cline, Harness, and similar) connects to **Port** `http://127.0.0.1:5001`.
 
+## Features
+
+- **One Port for local and cloud** — Cline, DeepSeek Harness, or any OpenAI-compatible Client app calls `http://127.0.0.1:5001`. AI-FluxMux talks to llama-server on a private daemon port.
+- **Local GGUF launch** — starts and stops `llama-server`, loads a saved model profile (Context, Images, reasoning, GPU/CPU), and parks the model when idle.
+- **Port rules (optional)** — watch a local Client-app turn for a hang, tool mill, repeated command, diagnostic dump, filling Context, or llama-server still loading. Pause in time and offer **Send this turn anyway**, **End this turn**, **Let me steer**, or switch to a ready cloud. Turn the whole set off to forward without intervention. Cloud models do not use Port rules.
+- **Compact and omit** — shorten older turns and stub older tool bodies on the pack forwarded to llama-server. The Client app still has the full chat.
+- **Route requests** — when the loaded local cannot take a turn, or a ready cloud would spare RAM, AI-FluxMux asks before switching. Overlay temperature / max tokens can apply without a reload.
+- **In-app Help** — install, llama-server, Cline, Harness, and Port rules. Setting Help links keep a stable topic id so a later Help text update does not break the jump.
+
 ## Install (Release zip)
 
 1. Download `AI-FluxMux-0.2.1-beta.zip` from the [GitHub Release](https://github.com/ArchPrime/AI-FluxMux/releases).
