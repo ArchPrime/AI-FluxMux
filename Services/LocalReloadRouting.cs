@@ -25,7 +25,7 @@ public static class LocalReloadRouting
         var wantsImage = LocalChatPayloadSignals.LatestUserTurnHasImage(payload);
         var wantsThinking = LocalChatPayloadSignals.PayloadWantsThinking(payload);
         var needVision = wantsImage && !hotVision;
-        var needThinking = wantsThinking && !hotReasoning.Equals("On", StringComparison.OrdinalIgnoreCase);
+        var needThinking = wantsThinking && !LocalReasoningLaunchPolicy.IsThinkingEnabled(hotReasoning);
         return (needVision, needThinking);
     }
 
@@ -109,6 +109,23 @@ public static class LocalReloadRouting
             compactRecommended,
             betterChance);
     }
+
+    /// <summary>
+    /// A later text turn may drop a leftover vision-miss offer. Do not use this
+    /// to retract a Context / Compact offer — Compact often runs after the offer
+    /// is written, and clearing it closes the decision popup in the same turn.
+    /// </summary>
+    public static bool ShouldClearLeftoverVisionMiss(
+        bool pending,
+        bool storedNeedVision,
+        bool currentNeedVision,
+        bool currentNeedThinking,
+        bool currentPromptExceeds)
+        => pending
+            && storedNeedVision
+            && !currentNeedVision
+            && !currentNeedThinking
+            && !currentPromptExceeds;
 
     public static bool LocalCannotCoverTurn(LocalReloadOffer? offer, bool needVision, bool promptExceeds)
     {
@@ -291,9 +308,11 @@ public static class LocalReloadRouting
         var named = string.IsNullOrWhiteSpace(cloudLabel)
             ? "the ready cloud model"
             : cloudLabel.Trim();
-        return "This turn cannot continue: the last reply came from "
+        return PortRulesPostMortem.ChatTurnCannotContinue
+            + "the last reply came from "
             + named
-            + ". That cloud model's Context cannot hold this turn.";
+            + ". That cloud model's Context cannot hold this turn. "
+            + PortRulesPostMortem.SmallerNextStepAdvice;
     }
 
     private static string BuildLeadReason(
@@ -307,12 +326,16 @@ public static class LocalReloadRouting
     {
         if (needVision)
         {
-            return "This turn cannot continue: the request included a picture, and Images is off on the loaded model profile.";
+            return PortRulesPostMortem.ChatTurnCannotContinue
+                + "the request included a picture, and **Images** is off on the loaded model profile. "
+                + PortRulesPostMortem.EnableImagesAdvice;
         }
 
         if (needThinking)
         {
-            return "This turn cannot continue: Reasoning is off on the loaded model profile.";
+            return PortRulesPostMortem.ChatTurnCannotContinue
+                + "**Reasoning** is off on the loaded model profile. "
+                + PortRulesPostMortem.EnableReasoningAdvice;
         }
 
         if (nearLimit || (neededContext > 0 && neededContext > hotContext))
@@ -322,10 +345,14 @@ public static class LocalReloadRouting
                 return FormatCloudContextLead(lastServedCloudLabel);
             }
 
-            return "This turn cannot continue: the loaded model profile's Context is too small.";
+            return PortRulesPostMortem.ChatTurnCannotContinue
+                + "the loaded model profile's Context is too small. "
+                + PortRulesPostMortem.RaiseContextAdvice
+                + " "
+                + PortRulesPostMortem.SmallerNextStepAdvice;
         }
 
-        return "This turn cannot continue.";
+        return "This chat turn cannot continue.";
     }
 
     private static string DescribeCandidateGain(
@@ -450,7 +477,7 @@ public static class LocalReloadRouting
             return false;
         }
 
-        if (needThinking && !Str(node, "reasoning").Equals("On", StringComparison.OrdinalIgnoreCase))
+        if (needThinking && !LocalReasoningLaunchPolicy.IsThinkingEnabled(Str(node, "reasoning")))
         {
             return false;
         }

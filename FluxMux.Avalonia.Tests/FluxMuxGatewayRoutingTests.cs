@@ -390,10 +390,11 @@ public sealed class FluxMuxGatewayRoutingTests
         var filling = FluxMuxGatewayRouting.FormatFillingBlockedMessage(state, payload);
         Assert.StartsWith(FluxMuxGatewayRouting.LocalFillingBlockedMessage, filling, System.StringComparison.Ordinal);
         Assert.Contains("too large for the current local model's Context", filling, System.StringComparison.Ordinal);
-        Assert.StartsWith("This turn cannot continue:", filling, System.StringComparison.Ordinal);
-        Assert.Contains("next message in this task", filling, System.StringComparison.Ordinal);
-        Assert.Contains("If Harness is also using Port", filling, System.StringComparison.Ordinal);
-        Assert.Contains("open Harness chat from that model's Quick Select slot", filling, System.StringComparison.Ordinal);
+        Assert.Contains(PortRulesPostMortem.RaiseContextAdvice, filling, System.StringComparison.Ordinal);
+        Assert.StartsWith("This chat turn cannot continue:", filling, System.StringComparison.Ordinal);
+        Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, filling, System.StringComparison.Ordinal);
+        Assert.Contains("reconnecting", filling, System.StringComparison.Ordinal);
+        Assert.Contains("'reconnecting'", filling, System.StringComparison.Ordinal);
         Assert.DoesNotContain("AI-FluxMux measured the messages", FluxMuxGatewayRouting.LocalFillingBlockedMessage, System.StringComparison.Ordinal);
         Assert.DoesNotContain("llama-server was not asked", FluxMuxGatewayRouting.LocalFillingBlockedMessage, System.StringComparison.Ordinal);
     }
@@ -412,20 +413,20 @@ public sealed class FluxMuxGatewayRoutingTests
         Assert.Contains("That cloud model's Context cannot hold this turn", filling, System.StringComparison.Ordinal);
         Assert.DoesNotContain("current local model's Context", filling, System.StringComparison.Ordinal);
         Assert.DoesNotContain("stub", filling, System.StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("If Harness is also using Port", filling, System.StringComparison.Ordinal);
-        Assert.Contains("open Harness chat from that model's Quick Select slot", filling, System.StringComparison.Ordinal);
+        Assert.Contains("reconnecting", filling, System.StringComparison.Ordinal);
+        Assert.Contains("'reconnecting'", filling, System.StringComparison.Ordinal);
     }
 
     [Fact]
     public void Endpoint_error_body_is_a_plain_sentence_not_a_typed_object()
     {
         var body = FluxMuxGatewayRouting.EndpointErrorBody(
-            "This turn cannot continue: the request included a picture, and Images is off on the loaded model profile.");
+            FluxMuxGatewayRouting.LocalVisionUnavailableMessage);
         var json = body.ToJsonString();
-        Assert.Equal(
-            "This turn cannot continue: the request included a picture, and Images is off on the loaded model profile.",
-            body["message"]?.ToString());
+        var plain = ControlLabelMarkup.ForClientApp(FluxMuxGatewayRouting.LocalVisionUnavailableMessage);
+        Assert.Equal(plain, body["message"]?.ToString());
         Assert.Equal(body["message"]?.ToString(), body["error"]?.ToString());
+        Assert.DoesNotContain("**", body["message"]?.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("\"type\"", json, System.StringComparison.Ordinal);
         Assert.DoesNotContain("\"code\"", json, System.StringComparison.Ordinal);
         Assert.DoesNotContain("local_context_filling", json, System.StringComparison.Ordinal);
@@ -567,16 +568,19 @@ public sealed class FluxMuxGatewayRoutingTests
     [Fact]
     public void Picture_on_text_only_load_uses_a_short_endpoint_error()
     {
-        Assert.Equal(
-            "This turn cannot continue: the request included a picture, and Images is off on the loaded model profile.",
-            FluxMuxGatewayRouting.LocalVisionUnavailableMessage);
+        Assert.StartsWith(
+            PortRulesPostMortem.ChatTurnCannotContinue,
+            FluxMuxGatewayRouting.LocalVisionUnavailableMessage,
+            System.StringComparison.Ordinal);
+        Assert.Contains("**Images**", FluxMuxGatewayRouting.LocalVisionUnavailableMessage, System.StringComparison.Ordinal);
+        Assert.Contains(PortRulesPostMortem.EnableImagesAdvice, FluxMuxGatewayRouting.LocalVisionUnavailableMessage, System.StringComparison.Ordinal);
         Assert.DoesNotContain("Load this local", FluxMuxGatewayRouting.LocalVisionUnavailableMessage, System.StringComparison.Ordinal);
         Assert.DoesNotContain("Validate", FluxMuxGatewayRouting.LocalVisionUnavailableMessage, System.StringComparison.Ordinal);
         var either = FluxMuxGatewayRouting.FormatLocalVisionUnavailableMessage(
             new System.Text.Json.Nodes.JsonObject { ["endpoint_app"] = FluxMuxGatewayRouting.HarnessEndpointApp });
-        Assert.Contains("next message in this task", either, System.StringComparison.Ordinal);
-        Assert.Contains("If Harness is also using Port", either, System.StringComparison.Ordinal);
-        Assert.Contains("open Harness chat from that model's Quick Select slot", either, System.StringComparison.Ordinal);
+        Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, either, System.StringComparison.Ordinal);
+        Assert.Contains("reconnecting", either, System.StringComparison.Ordinal);
+        Assert.Contains("'reconnecting'", either, System.StringComparison.Ordinal);
         var cline = FluxMuxGatewayRouting.FormatLocalVisionUnavailableMessage(
             new System.Text.Json.Nodes.JsonObject { ["endpoint_app"] = "Cline" });
         Assert.Equal(either, cline);

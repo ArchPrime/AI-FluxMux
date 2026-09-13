@@ -41,9 +41,9 @@ public sealed class RecoveryReplacementPolicyTests
                 LlamaServerMustReload: true,
                 TurnStillOpen: true));
         Assert.Equal(RecoveryChatFollowThrough.ContinueSameTaskNextMessage, follow);
-        Assert.Contains("next message in this task", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
-        Assert.Contains("If Harness is also using Port", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
-        Assert.Contains("Quick Select", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
+        Assert.Contains("next message in this Client-app chat", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
+        Assert.Contains("reconnecting", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
+        Assert.Contains("Client app", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -56,9 +56,9 @@ public sealed class RecoveryReplacementPolicyTests
                 LlamaServerMustReload: true,
                 TurnStillOpen: false));
         Assert.Equal(RecoveryChatFollowThrough.ContinueSameTaskNextMessage, follow);
-        Assert.Contains("next message in this task", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
+        Assert.Contains("next message in this Client-app chat", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
         Assert.Contains("llama-server reload", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
-        Assert.Contains("If Harness is also using Port", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
+        Assert.Contains("reconnecting", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
         Assert.DoesNotContain("Do not try to continue this chat", RecoveryReplacementPolicy.FormatAdvice(follow), StringComparison.Ordinal);
     }
 

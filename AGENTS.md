@@ -1,6 +1,6 @@
 # AI-FluxMux — resume here
 
-This folder is the Avalonia desktop app **AI-FluxMux v0.2 beta**. It launches local GGUF models through **llama-server**, can route cloud models, and presents one OpenAI-compatible address to a **Client app** (Cline or Harness).
+This folder is the Avalonia desktop app **AI-FluxMux v0.2.1 beta**. It launches local GGUF models through **llama-server**, can route cloud models, and presents one OpenAI-compatible address to a **Client app** (Cline or Harness).
 
 Open **this folder** as the Cursor workspace. The parent `Workspace` git tree also holds other projects; its `AGENTS.md` is a WinForms layout policy and does not apply here.
 
@@ -26,7 +26,7 @@ Do not launch from `artifacts\`. If the window flashes and disappears, rebuild D
 
 A public install (no `.vscode\fluxmux_config.json` walking up from the exe) uses `%AppData%\AI-FluxMux\`. This development tree still uses the workspace `.vscode` file.
 
-Nothing may **require** a write next to the exe, because an installed AI-FluxMux (Program Files, or any MSIX) cannot do it. Each such write falls back to `%AppData%\AI-FluxMux\`: a Help feed update saves there when the install folder refuses (`UpdateCheck`), and `HelpHtmlFile` lists that folder as a Help location so the updated copy is found on age like any other. `StartupCrashLog` tries the exe folder then that folder for both `FluxMux_Startup_Error.log` and `AI-FluxMux-could-not-start.txt` — losing those in a read-only install would hide exactly the failure the operator needs to read. Help pictures resolve beside the loaded `Help.html` and then beside the exe, so a per-user Help still shows the shipped screenshots. Do not add a new write beside the exe without a fallback. First public artifact is a **self-contained win-x64 zip** (`Properties/PublishProfiles/win-x64-selfcontained.pubxml` → `artifacts\publish\AI-FluxMux-0.2-beta`). Code signing is not in this tree. Do not put a development `fluxmux_config.json` or secrets in that zip.
+Nothing may **require** a write next to the exe, because an installed AI-FluxMux (Program Files, or any MSIX) cannot do it. Each such write falls back to `%AppData%\AI-FluxMux\`: a Help feed update saves there when the install folder refuses (`UpdateCheck`), and `HelpHtmlFile` lists that folder as a Help location so the updated copy is found on age like any other. `StartupCrashLog` tries the exe folder then that folder for both `FluxMux_Startup_Error.log` and `AI-FluxMux-could-not-start.txt` — losing those in a read-only install would hide exactly the failure the operator needs to read. Help pictures resolve beside the loaded `Help.html` and then beside the exe, so a per-user Help still shows the shipped screenshots. Do not add a new write beside the exe without a fallback. Public artifact is a **self-contained win-x64 zip** (`Properties/PublishProfiles/win-x64-selfcontained.pubxml` → `artifacts\publish\AI-FluxMux-0.2.1-beta`). Code signing is not in this tree. Do not put a development `fluxmux_config.json` or secrets in that zip.
 
 ## User-facing names (do not invent synonyms in UI or Health)
 

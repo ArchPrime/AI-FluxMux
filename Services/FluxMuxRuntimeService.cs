@@ -267,7 +267,7 @@ public sealed class FluxMuxRuntimeService
 
 	private string _endpointApp = string.Empty;
 
-	private readonly List<(string Variant, double Temperature, int MaxTokens)> _localRequestOverlays = new List<(string, double, int)>();
+	private readonly List<(string Variant, double Temperature, int MaxTokens, string Reasoning)> _localRequestOverlays = new List<(string, double, int, string)>();
 
 	private readonly string _proxyCloudHandshakeLogPath;
 
@@ -289,6 +289,8 @@ public sealed class FluxMuxRuntimeService
 
 	private FluxMuxGatewayHost? _gatewayHost;
 
+	private PortForwardingRules _portForwardingRules = PortForwardingRules.Defaults;
+
 	private readonly IdleSessionCoordinator _idleSession = new IdleSessionCoordinator();
 
 	private readonly GenerationSpeedTracker _generationSpeedTracker = new();
@@ -308,6 +310,10 @@ public sealed class FluxMuxRuntimeService
 	private ParkedLocalLaunch? _parkedLocalLaunch;
 
 	public event Action<string>? IdleTimeoutNotice;
+
+	public event Action<string>? PortRulesPostMortemNotice;
+
+	public event Action<PortRulesTelemetry>? PortRulesTelemetryNotice;
 
 	private sealed record ParkedLocalLaunch(
 		string Model,
@@ -463,6 +469,15 @@ public sealed class FluxMuxRuntimeService
 		return startupRuntimeNotice;
 	}
 
+	public void SetPortForwardingRules(PortForwardingRules rules)
+	{
+		_portForwardingRules = (rules ?? PortForwardingRules.Defaults).Clamp();
+		if (_gatewayHost is not null)
+		{
+			_gatewayHost.PortRules = _portForwardingRules.ForForwarding();
+		}
+	}
+
 	private FluxMuxGatewayHost CreateGatewayHost()
 	{
 		var host = new FluxMuxGatewayHost(
@@ -480,6 +495,9 @@ public sealed class FluxMuxRuntimeService
 		host.HonorCloudRecommendThisProcess = () => _honorCloudRecommendThisProcess;
 		host.GenerationSpeed = _generationSpeedTracker;
 		host.EnrichState = EnrichProxyRuntimeState;
+		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);
+		host.ReportPortRulesTelemetry = snap => PortRulesTelemetryNotice?.Invoke(snap);
+		host.PortRules = _portForwardingRules;
 		TryCaptureAndRedactExistingRuntimeState();
 		return host;
 	}
@@ -785,15 +803,27 @@ public sealed class FluxMuxRuntimeService
 		PatchProxyRoutingFlag();
 	}
 
-	public void UpsertLocalRequestOverlay(string variant, double temperature, int maxTokens)
+	public void UpsertLocalRequestOverlay(string variant, double temperature, int maxTokens, string? reasoning = null)
 	{
 		string name = (string.IsNullOrWhiteSpace(variant) ? "(defaults)" : variant.Trim());
-		_localRequestOverlays.RemoveAll(((string Variant, double Temperature, int MaxTokens) item) => item.Variant.Equals(name, StringComparison.OrdinalIgnoreCase));
-		_localRequestOverlays.Add((name, temperature, Math.Max(1, maxTokens)));
+		var mode = LocalReasoningLaunchPolicy.NormalizeMode(reasoning);
+		_localRequestOverlays.RemoveAll(item => item.Variant.Equals(name, StringComparison.OrdinalIgnoreCase));
+		_localRequestOverlays.Add((name, temperature, Math.Max(1, maxTokens), mode));
 		PatchProxyRoutingFlag();
 	}
 
-	public IReadOnlyList<(string Variant, double Temperature, int MaxTokens)> GetLocalRequestOverlays()
+	public void ApplyLiveLocalRequestSettings(string variant, double temperature, int maxTokens, string? reasoning)
+	{
+		_managedLocalReasoning = LocalReasoningLaunchPolicy.NormalizeMode(reasoning);
+		if (maxTokens > 0)
+		{
+			_managedLocalMaxTokens = maxTokens;
+		}
+
+		UpsertLocalRequestOverlay(variant, temperature, maxTokens, _managedLocalReasoning);
+	}
+
+	public IReadOnlyList<(string Variant, double Temperature, int MaxTokens, string Reasoning)> GetLocalRequestOverlays()
 	{
 		return _localRequestOverlays.ToList();
 	}
@@ -901,7 +931,8 @@ public sealed class FluxMuxRuntimeService
 			}
 			if (status.Equals("yes", StringComparison.OrdinalIgnoreCase)
 			    || status.Equals("no", StringComparison.OrdinalIgnoreCase)
-			    || status.Equals(RouteRecoveryPolicy.WaitStatus, StringComparison.OrdinalIgnoreCase))
+			    || status.Equals(RouteRecoveryPolicy.WaitStatus, StringComparison.OrdinalIgnoreCase)
+			    || RouteRecoveryPolicy.IsSteerStatus(status))
 			{
 				return null;
 			}
@@ -982,6 +1013,22 @@ public sealed class FluxMuxRuntimeService
 				jsonObject["local_sufficient_count"] = 0;
 			}
 
+			jsonObject["updatedUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+			File.WriteAllText(_proxyCloudRecommendPath, jsonObject.ToJsonString(new JsonSerializerOptions
+			{
+				WriteIndented = true
+			}));
+		}
+	}
+
+	public void AnswerPortRuleSteer()
+	{
+		lock (_proxyStateLock)
+		{
+			JsonObject jsonObject = (File.Exists(_proxyCloudRecommendPath) ? LoadJson(_proxyCloudRecommendPath) : new JsonObject());
+			jsonObject["status"] = RouteRecoveryPolicy.SteerStatus;
+			jsonObject["allow_until"] = 0;
+			jsonObject["suppress_until"] = 0;
 			jsonObject["updatedUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
 			File.WriteAllText(_proxyCloudRecommendPath, jsonObject.ToJsonString(new JsonSerializerOptions
 			{
@@ -2329,7 +2376,7 @@ public sealed class FluxMuxRuntimeService
 	{
 		Process localServerProcess = _localServerProcess;
 		bool managedAlive = localServerProcess != null && !localServerProcess.HasExited;
-		int probePort = ((managedAlive && _managedLocalPort > 0) ? _managedLocalPort : port);
+		int probePort = LocalHealthGuidance.ResolveLlamaHealthProbePort(managedAlive, _managedLocalPort, port);
 		bool ready = await IsLlamaEndpointReadyAsync(probePort, cancellationToken);
 		// While the Client app is generating, /health can time out even though llama-server is fine.
 		if (!ready && managedAlive && probePort > 0 && IsTcpPortOpen("127.0.0.1", probePort))
@@ -2784,7 +2831,8 @@ public sealed class FluxMuxRuntimeService
 			return gateway;
 		}
 		progressReporter?.Invoke("AI-FluxMux is checking the previous llama-server");
-		StopStaleManagedLocalFromRuntimeState(clearStateIfStopped: true);
+		int stoppedLeftover = StopStaleManagedLocalFromRuntimeState(clearStateIfStopped: true);
+		bool stoppedPrevious = stoppedLeftover > 0;
 		Process localServerProcess = null;
 		bool alreadyRunningThisProfile = false;
 		if (await IsLlamaEndpointReadyAsync(localBackendPort, cancellationToken))
@@ -2846,6 +2894,7 @@ public sealed class FluxMuxRuntimeService
 			catch
 			{
 			}
+			stoppedPrevious = true;
 			await WaitForPortToCloseAsync(localBackendPort, cancellationToken, 15000);
 			if (IsTcpPortOpen("127.0.0.1", localBackendPort))
 			{
@@ -2916,76 +2965,64 @@ public sealed class FluxMuxRuntimeService
 				settings["LastVramWarningUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
 			});
 		}
-		progressReporter?.Invoke("AI-FluxMux is starting llama-server");
-		Process process = new Process
+		bool vramBusyBeforeStart = LocalGpuVramSample.TryRead(out double busyUsedGiB, out double busyTotalGiB, out _)
+			&& LocalLaunchStartupRetry.VramLooksBusy(busyUsedGiB, busyTotalGiB);
+		if (stoppedPrevious || vramBusyBeforeStart)
 		{
-			StartInfo = new ProcessStartInfo
-			{
-				FileName = serverPath,
-				Arguments = argString,
-				RedirectStandardOutput = true,
-				RedirectStandardError = true,
-				UseShellExecute = false,
-				CreateNoWindow = true
-			},
-			EnableRaisingEvents = true
-		};
-		process.ErrorDataReceived += delegate(object _, DataReceivedEventArgs e)
-		{
-			if (!string.IsNullOrWhiteSpace(e.Data))
-			{
-				_lastLocalStderrTail = TruncateTail((_lastLocalStderrTail + Environment.NewLine + e.Data).Trim(), 1200);
-			}
-		};
-		process.OutputDataReceived += delegate(object _, DataReceivedEventArgs e)
-		{
-			if (!string.IsNullOrWhiteSpace(e.Data))
-			{
-				_lastLocalStderrTail = TruncateTail((_lastLocalStderrTail + Environment.NewLine + e.Data).Trim(), 1200);
-			}
-		};
-		try
-		{
-			if (!process.Start())
-			{
-				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "failed", "Failed to start llama-server process.", GetGatewayPid());
-				return new RuntimeActionResult
-				{
-					IsSuccess = false,
-					Status = "Local launch failed",
-					Details = "Failed to start llama-server process."
-				};
-			}
-			process.BeginOutputReadLine();
-			process.BeginErrorReadLine();
-			_localServerProcess = process;
-			_managedLocalPort = localBackendPort;
-			_managedLocalModel = selectedLocalModel;
-			_managedLocalVariant = selectedVariant;
-			_managedLocalLaunchFingerprint = LocalLaunchFingerprint.From(profile);
-			_hasUnmanagedLocalEndpoint = false;
-			_unmanagedLocalEndpointPort = -1;
-			WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "launching", "Managed llama-server process started on the daemon port.");
-			progressReporter?.Invoke("Loading model");
+			progressReporter?.Invoke("AI-FluxMux is waiting for the GPU after the previous llama-server");
+			await SettleAfterFailedLocalStartupAsync(localBackendPort, cancellationToken);
 		}
-		catch (Exception ex)
+		Process process = null;
+		RuntimeActionResult? started = null;
+		for (int startupAttempt = 1; startupAttempt <= LocalLaunchStartupRetry.MaxAttempts; startupAttempt++)
 		{
-			WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "failed", ex.Message, GetGatewayPid());
-			return new RuntimeActionResult
+			started = TryStartManagedLlamaProcess(
+				serverPath,
+				argString,
+				modelPath,
+				localBackendPort,
+				port,
+				selectedLocalModel,
+				selectedVariant,
+				profile,
+				progressReporter,
+				out process);
+			if (started != null)
 			{
-				IsSuccess = false,
-				Status = "Local launch failed",
-				Details = "Could not start llama-server: " + ex.Message
-			};
-		}
+				return started;
+			}
 		Stopwatch launchStopwatch = Stopwatch.StartNew();
 		DateTime deadline = DateTime.UtcNow.AddMilliseconds(launchBudgetMs);
 		bool modelLoadWaitActive = false;
+		bool retryStartup = false;
 		while (DateTime.UtcNow < deadline)
 		{
 			cancellationToken.ThrowIfCancellationRequested();
-			if (process.HasExited)
+			if (process == null || process.HasExited)
 			{
+				if (LocalLaunchStartupRetry.ShouldRetry(_lastLocalStderrTail, startupAttempt))
+				{
+					WriteProxyRuntimeStateForLocal(
+						selectedLocalModel,
+						port,
+						localBackendPort,
+						"transitioning",
+						"llama-server exited during startup; AI-FluxMux is waiting for the GPU, then trying once more.",
+						GetGatewayPid());
+					progressReporter?.Invoke("AI-FluxMux is waiting for the GPU after llama-server stopped");
+					await SettleAfterFailedLocalStartupAsync(localBackendPort, cancellationToken);
+					_lastLocalStderrTail = string.Empty;
+					try
+					{
+						process.Dispose();
+					}
+					catch
+					{
+					}
+					retryStartup = true;
+					break;
+				}
+
 				ClearLocalRuntimeState("local-exited-during-startup");
 				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "failed", "llama-server exited during startup.", GetGatewayPid());
 				return new RuntimeActionResult
@@ -3064,6 +3101,10 @@ public sealed class FluxMuxRuntimeService
 			}
 			await Task.Delay(500, cancellationToken);
 		}
+		if (retryStartup)
+		{
+			continue;
+		}
 		if (process != null && !process.HasExited)
 		{
 			if (IsTcpPortOpen("127.0.0.1", localBackendPort))
@@ -3089,6 +3130,13 @@ public sealed class FluxMuxRuntimeService
 			IsSuccess = false,
 			Status = "Local launch timeout",
 			Details = "llama-server did not finish launching within its previous manual launch timeframe for this model profile (" + FormatDurationMs((estimatedLaunchMs > 0) ? estimatedLaunchMs : launchBudgetMs) + " observed baseline); VRAM availability or other conditions may have changed. " + (string.IsNullOrWhiteSpace(_lastLocalStderrTail) ? string.Empty : (" Last llama-server output: " + _lastLocalStderrTail))
+		};
+		}
+		return new RuntimeActionResult
+		{
+			IsSuccess = false,
+			Status = "Local launch failed",
+			Details = "llama-server exited during startup." + (string.IsNullOrWhiteSpace(_lastLocalStderrTail) ? string.Empty : (" Last llama-server output: " + _lastLocalStderrTail))
 		};
 	}
 
@@ -4220,6 +4268,102 @@ public sealed class FluxMuxRuntimeService
 		}
 	}
 
+	private RuntimeActionResult? TryStartManagedLlamaProcess(
+		string serverPath,
+		string argString,
+		string modelPath,
+		int localBackendPort,
+		int port,
+		string selectedLocalModel,
+		string selectedVariant,
+		JsonObject profile,
+		Action<string>? progressReporter,
+		out Process process)
+	{
+		progressReporter?.Invoke("AI-FluxMux is starting llama-server");
+		process = new Process
+		{
+			StartInfo = new ProcessStartInfo
+			{
+				FileName = serverPath,
+				Arguments = argString,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				UseShellExecute = false,
+				CreateNoWindow = true
+			},
+			EnableRaisingEvents = true
+		};
+		process.ErrorDataReceived += delegate(object _, DataReceivedEventArgs e)
+		{
+			if (!string.IsNullOrWhiteSpace(e.Data))
+			{
+				_lastLocalStderrTail = TruncateTail((_lastLocalStderrTail + Environment.NewLine + e.Data).Trim(), 1200);
+			}
+		};
+		process.OutputDataReceived += delegate(object _, DataReceivedEventArgs e)
+		{
+			if (!string.IsNullOrWhiteSpace(e.Data))
+			{
+				_lastLocalStderrTail = TruncateTail((_lastLocalStderrTail + Environment.NewLine + e.Data).Trim(), 1200);
+			}
+		};
+		try
+		{
+			if (!process.Start())
+			{
+				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "failed", "Failed to start llama-server process.", GetGatewayPid());
+				return new RuntimeActionResult
+				{
+					IsSuccess = false,
+					Status = "Local launch failed",
+					Details = "Failed to start llama-server process."
+				};
+			}
+			process.BeginOutputReadLine();
+			process.BeginErrorReadLine();
+			_localServerProcess = process;
+			_managedLocalPort = localBackendPort;
+			_managedLocalModel = selectedLocalModel;
+			_managedLocalVariant = selectedVariant;
+			_managedLocalLaunchFingerprint = LocalLaunchFingerprint.From(profile);
+			_hasUnmanagedLocalEndpoint = false;
+			_unmanagedLocalEndpointPort = -1;
+			WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "launching", "Managed llama-server process started on the daemon port.");
+			progressReporter?.Invoke("Loading model");
+			return null;
+		}
+		catch (Exception ex)
+		{
+			WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "failed", ex.Message, GetGatewayPid());
+			return new RuntimeActionResult
+			{
+				IsSuccess = false,
+				Status = "Local launch failed",
+				Details = "Could not start llama-server: " + ex.Message
+			};
+		}
+	}
+
+	private async Task SettleAfterFailedLocalStartupAsync(int daemonPort, CancellationToken cancellationToken)
+	{
+		await WaitForPortToCloseAsync(daemonPort, cancellationToken, LocalLaunchStartupRetry.PortWaitMs);
+		bool haveBefore = LocalGpuVramSample.TryRead(out double usedBefore, out _, out double freeBefore);
+		DateTime deadline = DateTime.UtcNow.AddMilliseconds(LocalLaunchStartupRetry.VramSettleMs);
+		while (DateTime.UtcNow < deadline)
+		{
+			cancellationToken.ThrowIfCancellationRequested();
+			bool haveNow = LocalGpuVramSample.TryRead(out double usedNow, out _, out double freeNow);
+			if (!IsTcpPortOpen("127.0.0.1", daemonPort)
+				&& LocalLaunchStartupRetry.VramLooksSettled(haveBefore, usedBefore, freeBefore, haveNow, usedNow, freeNow))
+			{
+				return;
+			}
+
+			await Task.Delay(LocalLaunchStartupRetry.VramPollMs, cancellationToken);
+		}
+	}
+
 	private static async Task WaitForPortToCloseAsync(int port, CancellationToken cancellationToken, int timeoutMs = 5000)
 	{
 		if (port < 1 || port > 65535)
@@ -4494,48 +4638,22 @@ public sealed class FluxMuxRuntimeService
 			list.Add("-ub");
 			list.Add(profileInt4.ToString());
 		}
-		string localReasoning = GetString(profile, "LocalReasoning");
-		if (localReasoning.Equals("On", StringComparison.OrdinalIgnoreCase))
+		string localReasoning = LocalReasoningLaunchPolicy.ProcessLaunchMode();
+		if (SupportsArg(helpText, "--reasoning"))
 		{
-			if (SupportsArg(helpText, "--reasoning"))
-			{
-				list.Add("--reasoning");
-				list.Add("on");
-			}
-			// Keep raw <think> text in content. Default deepseek/auto streaming split
-			// can garble Qwen reasoning_content deltas (missing spaces / Invalid diff).
-			if (SupportsArg(helpText, "--reasoning-format"))
-			{
-				list.Add("--reasoning-format");
-				list.Add("none");
-			}
+			list.Add("--reasoning");
+			list.Add("auto");
 		}
-		else if (localReasoning.Equals("Auto", StringComparison.OrdinalIgnoreCase))
+
+		// Keep raw <think> text in content. Default deepseek/auto streaming split
+		// can garble Qwen reasoning_content deltas (missing spaces / Invalid diff).
+		if (SupportsArg(helpText, "--reasoning-format"))
 		{
-			if (SupportsArg(helpText, "--reasoning"))
-			{
-				list.Add("--reasoning");
-				list.Add("auto");
-			}
-			if (SupportsArg(helpText, "--reasoning-format"))
-			{
-				list.Add("--reasoning-format");
-				list.Add("none");
-			}
+			list.Add("--reasoning-format");
+			list.Add("none");
 		}
-		else
-		{
-			if (SupportsArg(helpText, "--reasoning"))
-			{
-				list.Add("--reasoning");
-				list.Add("off");
-			}
-			if (SupportsArg(helpText, "--reasoning-format"))
-			{
-				list.Add("--reasoning-format");
-				list.Add("none");
-			}
-		}
+
+		_ = localReasoning;
 		string gpuLayers = GetString(profile, "GpuLayers");
 		string resolvedGpuLayers = ResolveGpuLayers(offloadMode, gpuLayers);
 		if (!string.IsNullOrWhiteSpace(resolvedGpuLayers) && SupportsArg(helpText, "-ngl"))
@@ -4758,11 +4876,6 @@ public sealed class FluxMuxRuntimeService
 			list.Add("--reasoning-budget");
 			list.Add(profileInt8.ToString());
 		}
-		else if (LocalReasoningLaunchPolicy.IsOff(GetString(profile, "LocalReasoning")) && SupportsArg(helpText, "--reasoning-budget"))
-		{
-			list.Add("--reasoning-budget");
-			list.Add("0");
-		}
 		string cachePrompt = GetString(profile, "LocalCachePrompt");
 		if (cachePrompt.Equals("Disabled", StringComparison.OrdinalIgnoreCase) && SupportsArg(helpText, "--no-cache-prompt"))
 		{
@@ -4917,10 +5030,6 @@ public sealed class FluxMuxRuntimeService
 			list.Add("--skip-chat-parsing");
 		}
 		string chatTemplateKwargs = GetString(profile, "LocalChatTemplateKwargs");
-		if (string.IsNullOrWhiteSpace(chatTemplateKwargs) && IsQwen3Family(modelPath) && LocalReasoningLaunchPolicy.IsOff(GetString(profile, "LocalReasoning")))
-		{
-			chatTemplateKwargs = "{\"enable_thinking\":false}";
-		}
 		if (!string.IsNullOrWhiteSpace(chatTemplateKwargs) && SupportsArg(helpText, "--chat-template-kwargs"))
 		{
 			list.Add("--chat-template-kwargs");
@@ -6910,6 +7019,11 @@ public sealed class FluxMuxRuntimeService
 		state["routing_topology"] = _requestRoutingTopology;
 		state["cloud_routing_capacity"] = NormalizeCloudRoutingCapacity(_cloudRoutingCapacity);
 		state["endpoint_app"] = _endpointApp;
+		state["local_reasoning"] = string.IsNullOrWhiteSpace(_managedLocalReasoning) ? "Off" : _managedLocalReasoning;
+		if (_managedLocalMaxTokens > 0)
+		{
+			state["local_max_tokens"] = _managedLocalMaxTokens;
+		}
 		JsonArray jsonArray = new JsonArray();
 		foreach (var localRequestOverlay in _localRequestOverlays)
 		{
@@ -6917,7 +7031,8 @@ public sealed class FluxMuxRuntimeService
 			{
 				["variant"] = localRequestOverlay.Variant,
 				["temperature"] = localRequestOverlay.Temperature,
-				["max_tokens"] = localRequestOverlay.MaxTokens
+				["max_tokens"] = localRequestOverlay.MaxTokens,
+				["reasoning"] = localRequestOverlay.Reasoning
 			});
 		}
 		state["local_overlays"] = jsonArray;
@@ -7887,35 +8002,7 @@ public sealed class FluxMuxRuntimeService
 	}
 
 	private static string RunShortCommand(string fileName, string arguments)
-	{
-		using Process process = new Process
-		{
-			StartInfo = new ProcessStartInfo
-			{
-				FileName = fileName,
-				Arguments = arguments,
-				RedirectStandardOutput = true,
-				RedirectStandardError = true,
-				UseShellExecute = false,
-				CreateNoWindow = true
-			}
-		};
-		process.Start();
-		Task<string> task = process.StandardOutput.ReadToEndAsync();
-		Task<string> task2 = process.StandardError.ReadToEndAsync();
-		if (!process.WaitForExit(5000))
-		{
-			try
-			{
-				process.Kill(entireProcessTree: true);
-				process.WaitForExit(1000);
-			}
-			catch
-			{
-			}
-		}
-		return (task.GetAwaiter().GetResult() + Environment.NewLine + task2.GetAwaiter().GetResult()).Trim();
-	}
+		=> ExternalProcessText.RunOrEmpty(fileName, arguments, 5000);
 
 	private static string RunGpuCommand(string fileName, string arguments)
 	{

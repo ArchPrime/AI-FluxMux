@@ -38,6 +38,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private int _port;
     private readonly IdleSessionCoordinator _idleSession;
     private GenerationSpeedTracker? _generationSpeed;
+    private readonly object _churnLock = new();
+    private DateTime _lastLocalToolTurnUtc;
+    private int _rapidLocalToolTurns;
+    private readonly object _portRulesLock = new();
+    private PortForwardingRules _portRules = PortForwardingRules.Defaults;
+    private PortRulesTelemetry _lastPortRulesTelemetry = PortRulesTelemetry.Empty;
+    private string _lastPortRulesDiagnostic = string.Empty;
+    private DateTime _lastHangTallyUtc;
+    private int _portRuleSendAnywayGrace;
 
     public FluxMuxGatewayHost(
         string statePath,
@@ -77,6 +86,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
     public Func<JsonObject, JsonObject>? EnrichState { get; set; }
 
+    public Action<string>? ReportPortRulesPostMortem { get; set; }
+
+    public Action<PortRulesTelemetry>? ReportPortRulesTelemetry { get; set; }
+
     public GenerationSpeedTracker? GenerationSpeed
     {
         get => _generationSpeed;
@@ -84,6 +97,32 @@ public sealed class FluxMuxGatewayHost : IDisposable
     }
 
     public IdleSessionCoordinator IdleSession => _idleSession;
+
+    public PortForwardingRules PortRules
+    {
+        get
+        {
+            lock (_portRulesLock)
+            {
+                return _portRules;
+            }
+        }
+        set
+        {
+            lock (_portRulesLock)
+            {
+                _portRules = (value ?? PortForwardingRules.Defaults).Clamp().ForForwarding();
+            }
+        }
+    }
+
+    private PortForwardingRules CurrentRules()
+    {
+        lock (_portRulesLock)
+        {
+            return _portRules;
+        }
+    }
 
     public bool IsListening => _listener is { IsListening: true } && _port > 0;
 
@@ -371,7 +410,89 @@ public sealed class FluxMuxGatewayHost : IDisposable
         var forceRoute = context.Request.Headers[CloudEndpointValidationProbe.ForceRouteHeader];
         var requestId = Guid.NewGuid().ToString("N")[..8];
         string? overlayVariant = null;
-        var compactApplied = false;
+        var artifacts = LocalSessionArtifactPolicy.Apply(payload);
+        var sessionArtifacts = LocalSessionArtifactPolicy.Inspect(payload["messages"] as JsonArray);
+        if (artifacts.Omitted > 0)
+        {
+            Log("local chat: omitted "
+                + artifacts.Omitted.ToString(CultureInfo.InvariantCulture)
+                + " session-created diagnostic file(s); llama-server still sees the calls. The Client app still has the full output.");
+        }
+
+        if (artifacts.HottestEdits >= LocalSessionArtifactPolicy.EditLoopThreshold)
+        {
+            Log("local chat: same project file rewritten "
+                + artifacts.HottestEdits.ToString(CultureInfo.InvariantCulture)
+                + " times; llama-server was asked to change one thing. The Client app still has the full chat.");
+        }
+
+        var portRules = CurrentRules();
+        var clearedResults = LocalToolResultClearing.ClearOlderResults(payload, portRules);
+        if (clearedResults > 0)
+        {
+            Log("local chat: omitted "
+                + clearedResults.ToString(CultureInfo.InvariantCulture)
+                + " older tool result(s); llama-server still sees the calls. The Client app still has the full output.");
+        }
+
+        var droppedPictures = portRules.MaxPicturesEnabled
+            ? LocalChatPayloadSignals.KeepMostRecentImages(payload, portRules.MaxForwardedImages)
+            : 0;
+        if (droppedPictures > 0)
+        {
+            Log("local chat: dropped "
+                + droppedPictures.ToString(CultureInfo.InvariantCulture)
+                + " older picture(s); llama-server only gets the "
+                + portRules.MaxForwardedImages.ToString(CultureInfo.InvariantCulture)
+                + " most recent. The Client app still has the full album.");
+        }
+
+        var haltAsToolMill = LocalToolResultClearing.ShouldHaltAsToolMill(payload, clearedResults, portRules);
+        var rapidChurn = false;
+        var rapidStreak = 0;
+        lock (_churnLock)
+        {
+            var now = DateTime.UtcNow;
+            var since = _lastLocalToolTurnUtc == default
+                ? TimeSpan.MaxValue
+                : now - _lastLocalToolTurnUtc;
+            _rapidLocalToolTurns = LocalToolResultClearing.NextRapidChurnStreak(
+                clearedResults,
+                since,
+                _rapidLocalToolTurns,
+                portRules);
+            _lastLocalToolTurnUtc = now;
+            rapidStreak = _rapidLocalToolTurns;
+            rapidChurn = LocalToolResultClearing.ShouldHaltAsRapidChurn(_rapidLocalToolTurns, portRules);
+            if (rapidChurn)
+            {
+                _rapidLocalToolTurns = 0;
+            }
+        }
+
+        haltAsToolMill = haltAsToolMill || rapidChurn;
+        if (haltAsToolMill && ConsumePortRuleSendAnywayGrace())
+        {
+            Log("port rule pause: sending this mill turn anyway (grace after Send this turn anyway)");
+            haltAsToolMill = false;
+            rapidChurn = false;
+        }
+        var repeatedThisTurn = portRules.RepeatedCommandEnabled
+            && LocalChatPayloadSignals.HasRepeatedToolCommand(payload, out _);
+        PublishPortRulesTelemetry(new PortRulesTelemetry
+        {
+            HasLocalTurn = true,
+            Omitted = clearedResults,
+            ObserveOnly = LocalChatPayloadSignals.CountRecentObserveOnlyTools(
+                payload,
+                portRules.ObserveOnlyMillCount),
+            RapidStreak = rapidStreak,
+            PicturesKept = LocalChatPayloadSignals.CountForwardedImages(payload),
+            DumpCount = sessionArtifacts.ArtifactCount,
+            RepeatedCommandThisTurn = repeatedThisTurn
+        });
+        var compactOn = ParseBool(Str(LoadLocalReload(), "forward_compact"));
+        var compactApplied = TryApplyForwardCompact(payload, state, compactOn);
         var reloadOffered = false;
         var decision = FluxMuxGatewayRouting.DecideRoute(state, payload, forceRoute);
         var promptChars = 0;
@@ -464,6 +585,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
             reloadOffered = IsLocalReloadOfferPending();
             var hotContext = ParseInt(Str(state, "local_context"), 0);
             var lastServed = ReadLastServedIdentity();
+            var fillingDetails = FluxMuxGatewayRouting.LoadedLocalCannotTakeTurn(state, payload)
+                ? null
+                : PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules);
             await SendOpenAiErrorAsync(
                 context.Response,
                 FluxMuxGatewayRouting.FormatBlockedLocalTurnMessage(
@@ -471,7 +595,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     payload,
                     promptChars,
                     lastServed.Kind,
-                    lastServed.Label),
+                    lastServed.Label,
+                    fillingDetails),
                 400,
                 FluxMuxGatewayRouting.LocalFillingBlockedType).ConfigureAwait(false);
             Log("local_context_filling: blocked llama-server on a filling turn n_ctx="
@@ -484,6 +609,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 + " n_ctx=" + hotContext.ToString(CultureInfo.InvariantCulture)
                 + " n_prompt=" + EstimateNeededContext(payload).ToString(CultureInfo.InvariantCulture)
                 + " status=400");
+            ReportPortRulesFinding(fillingDetails);
             return;
         }
 
@@ -516,37 +642,34 @@ public sealed class FluxMuxGatewayHost : IDisposable
             var overlay = LocalRequestOverlayRouting.Pick(state, payload, requested);
             overlayVariant = overlay?["variant"]?.ToString();
             var requestedMax = ParseInt(payload["max_tokens"]?.ToString() ?? string.Empty, 0);
-            LocalRequestOverlayRouting.Apply(payload, overlay);
+            LocalRequestOverlayRouting.Apply(payload, overlay, portRules, requestedMax);
             if (overlay is not null)
             {
                 Log("local overlay: variant=" + (overlay["variant"]?.ToString() ?? "")
                     + " temperature=" + (overlay["temperature"]?.ToString() ?? "")
-                    + " max_tokens=" + (overlay["max_tokens"]?.ToString() ?? ""));
+                    + " max_tokens=" + (overlay["max_tokens"]?.ToString() ?? "")
+                    + " reasoning=" + (localReasoningForResponse ?? ""));
             }
 
             var hotContext = ParseInt(Str(state, "local_context"), 0);
-            var compactOn = ParseBool(Str(LoadLocalReload(), "forward_compact"));
-            var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
-            var promptExceeds = LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);
-            if (LocalHistoryCompaction.ShouldForwardCompact(compactOn, promptTokens, hotContext, promptExceeds)
-                && LocalHistoryCompaction.TryCompactPayload(payload, force: true))
+            if (!compactApplied)
             {
-                compactApplied = true;
-                Log("local history compact: shortened older turns before forwarding");
-                var inserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
-                if (inserted > 0)
-                {
-                    Log("local chat: inserted a user turn so the Qwen template has a query");
-                }
+                compactApplied = TryApplyForwardCompact(payload, state, compactOn);
             }
 
             var beforeClamp = ParseInt(payload["max_tokens"]?.ToString() ?? string.Empty, requestedMax);
-            var clamped = LocalRequestOverlayRouting.ClampMaxTokensToContext(payload, hotContext);
+            var clamped = LocalRequestOverlayRouting.ClampMaxTokensToContext(payload, hotContext, portRules.CompactHeadroom);
             if (hotContext > 0 && clamped != beforeClamp)
             {
                 Log("local max_tokens clamped from " + beforeClamp.ToString(CultureInfo.InvariantCulture)
                     + " to " + clamped.ToString(CultureInfo.InvariantCulture)
                     + " so prompt plus reply fit context " + hotContext.ToString(CultureInfo.InvariantCulture));
+            }
+
+            LocalReasoningPayloadPolicy.ApplyThinkingBudget(payload, localReasoningForResponse);
+            if (payload["thinking_budget"] is not null)
+            {
+                Log("local chat: thinking_budget=" + payload["thinking_budget"]!.ToString());
             }
 
             if (FluxMuxGatewayRouting.AllowsOperatorRouting(forceRoute))
@@ -655,12 +778,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 {
                     var overflowTokens = EstimateNeededContext(payload);
                     var lastServed = ReadLastServedIdentity();
+                    var overflowDetails = PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules);
                     await SendOpenAiErrorAsync(
                         context.Response,
                         FluxMuxGatewayRouting.FormatLocalContextOverflowMessage(
                             state,
                             lastServed.Kind,
-                            lastServed.Label),
+                            lastServed.Label,
+                            overflowDetails),
                         400,
                         "exceed_context_size_error").ConfigureAwait(false);
                     Log("exceed_context_size_error: reconnect/prompt already fills local_context=" + hotContext.ToString(CultureInfo.InvariantCulture));
@@ -671,6 +796,160 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         + " n_ctx=" + hotContext.ToString(CultureInfo.InvariantCulture)
                         + " n_prompt=" + overflowTokens.ToString(CultureInfo.InvariantCulture)
                         + " status=400");
+                    ReportPortRulesFinding(overflowDetails);
+                    return;
+                }
+            }
+
+            if (routeKind == "local"
+                && portRules.RepeatedCommandEnabled
+                && FluxMuxGatewayRouting.AllowsOperatorRouting(forceRoute)
+                && LocalChatPayloadSignals.HasRepeatedToolCommand(payload, out var repeatedCommand))
+            {
+                Log("local chat: Client app repeated the same command: " + Truncate(repeatedCommand, 80));
+                var finding = PortRulesPostMortem.FormatRepeatedCommand();
+                var pause = await AskPortRulePauseAsync(finding, portRules).ConfigureAwait(false);
+                if (pause == FluxMuxGatewayRouting.Cloud)
+                {
+                    state = LoadState();
+                    (routeKind, upstreamUrl, upstreamMode, provider, preferred) = BindRoute(state, FluxMuxGatewayRouting.Cloud);
+                    model = string.IsNullOrWhiteSpace(preferred) ? requested : preferred;
+                    payload["model"] = model;
+                    localReasoningForResponse = null;
+                    Log("local tool loop: sending this turn to the ready cloud after Switch to cloud");
+                }
+                else if (pause == RouteRecoveryPolicy.WaitStatus)
+                {
+                    NotePortRuleSendAnyway();
+                    Log("port rule pause: sending this repeated-command turn anyway");
+                }
+                else if (pause == RouteRecoveryPolicy.SteerStatus)
+                {
+                    await SendAssistantNoticeAsync(
+                        context.Response,
+                        PortRulesPostMortem.FormatSteerNotice(finding)).ConfigureAwait(false);
+                    ReportPortRulesFinding(finding);
+                    return;
+                }
+                else if (routeKind == "local")
+                {
+                    await SendOpenAiErrorAsync(
+                        context.Response,
+                        FluxMuxGatewayRouting.FormatRepeatedToolMessage(state, repeatedCommand),
+                        400,
+                        FluxMuxGatewayRouting.RepeatedToolType).ConfigureAwait(false);
+                    Log("cline_repeated_command: llama-server was not asked");
+                    EmitContextEvent(
+                        "cline_repeated_command",
+                        "provider=" + provider
+                        + " model=" + model
+                        + " status=400");
+                    ReportPortRulesFinding(finding);
+                    return;
+                }
+            }
+
+            if (routeKind == "local"
+                && haltAsToolMill)
+            {
+                var finding = PortRulesPostMortem.FormatMill(
+                    clearedResults,
+                    rapidChurn,
+                    rapidStreak,
+                    portRules);
+                var pause = await AskPortRulePauseAsync(finding ?? string.Empty, portRules).ConfigureAwait(false);
+                if (pause == FluxMuxGatewayRouting.Cloud)
+                {
+                    state = LoadState();
+                    (routeKind, upstreamUrl, upstreamMode, provider, preferred) = BindRoute(state, FluxMuxGatewayRouting.Cloud);
+                    model = string.IsNullOrWhiteSpace(preferred) ? requested : preferred;
+                    payload["model"] = model;
+                    localReasoningForResponse = null;
+                    Log("port rule pause: sending this mill turn to the ready cloud");
+                }
+                else if (pause == RouteRecoveryPolicy.WaitStatus)
+                {
+                    NotePortRuleSendAnyway();
+                    Log("port rule pause: sending this mill turn anyway");
+                }
+                else if (pause == RouteRecoveryPolicy.SteerStatus)
+                {
+                    await SendAssistantNoticeAsync(
+                        context.Response,
+                        PortRulesPostMortem.FormatSteerNotice(finding)).ConfigureAwait(false);
+                    ReportPortRulesFinding(finding);
+                    return;
+                }
+                else
+                {
+                    await SendOpenAiErrorAsync(
+                        context.Response,
+                        FluxMuxGatewayRouting.FormatToolMillMessage(
+                            state,
+                            clearedResults,
+                            rapidChurn,
+                            rapidStreak,
+                            portRules),
+                        400,
+                        FluxMuxGatewayRouting.ToolMillType).ConfigureAwait(false);
+                    Log("cline_tool_mill: llama-server was not asked after omitting "
+                        + clearedResults.ToString(CultureInfo.InvariantCulture)
+                        + " older tool result(s)"
+                        + (rapidChurn ? " (rapid churn)" : string.Empty));
+                    EmitContextEvent(
+                        FluxMuxGatewayRouting.ToolMillType,
+                        "provider=" + provider
+                        + " model=" + model
+                        + " n_omitted=" + clearedResults.ToString(CultureInfo.InvariantCulture)
+                        + " status=400");
+                    ReportPortRulesFinding(finding);
+                    return;
+                }
+            }
+
+            if (routeKind == "local" && portRules.DiagnosticDumpEnabled && sessionArtifacts.ShouldHalt)
+            {
+                var finding = PortRulesPostMortem.FormatDiagnosticDump(sessionArtifacts.ArtifactCount);
+                var pause = await AskPortRulePauseAsync(finding, portRules).ConfigureAwait(false);
+                if (pause == FluxMuxGatewayRouting.Cloud)
+                {
+                    state = LoadState();
+                    (routeKind, upstreamUrl, upstreamMode, provider, preferred) = BindRoute(state, FluxMuxGatewayRouting.Cloud);
+                    model = string.IsNullOrWhiteSpace(preferred) ? requested : preferred;
+                    payload["model"] = model;
+                    localReasoningForResponse = null;
+                    Log("port rule pause: sending this dump turn to the ready cloud");
+                }
+                else if (pause == RouteRecoveryPolicy.WaitStatus)
+                {
+                    NotePortRuleSendAnyway();
+                    Log("port rule pause: sending this dump turn anyway");
+                }
+                else if (pause == RouteRecoveryPolicy.SteerStatus)
+                {
+                    await SendAssistantNoticeAsync(
+                        context.Response,
+                        PortRulesPostMortem.FormatSteerNotice(finding)).ConfigureAwait(false);
+                    ReportPortRulesFinding(finding);
+                    return;
+                }
+                else
+                {
+                    await SendOpenAiErrorAsync(
+                        context.Response,
+                        LocalSessionArtifactPolicy.FormatHaltMessage(state),
+                        400,
+                        LocalSessionArtifactPolicy.HaltType).ConfigureAwait(false);
+                    Log("cline_diagnostic_dump: llama-server was not asked after "
+                        + sessionArtifacts.ArtifactCount.ToString(CultureInfo.InvariantCulture)
+                        + " session diagnostic file(s)");
+                    EmitContextEvent(
+                        LocalSessionArtifactPolicy.HaltType,
+                        "provider=" + provider
+                        + " model=" + model
+                        + " n_dump=" + sessionArtifacts.ArtifactCount.ToString(CultureInfo.InvariantCulture)
+                        + " status=400");
+                    ReportPortRulesFinding(finding);
                     return;
                 }
             }
@@ -726,33 +1005,93 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         JsonNode requestPayload = payload;
+        IReadOnlyList<string>? localDeclaredTools = null;
+        var localAllowParallel = true;
+        if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+        {
+            var names = LocalToolCallHealing.CollectDeclaredToolNames(payload);
+            if (names.Count > 0)
+            {
+                localDeclaredTools = names;
+                localAllowParallel = LocalToolCallHealing.AllowsParallelToolCalls(payload);
+            }
+        }
+
+        if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+        {
+            LocalStopHygiene.Apply(payload, portRules.StopHygieneMode);
+            LocalPrefixCachePolicy.ApplyAfterCompact(payload, compactApplied, portRules);
+        }
+
         if (upstreamMode == "anthropic")
         {
             requestPayload = MapOpenAiToAnthropic(payload, state);
         }
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, upstreamUrl)
+        HttpRequestMessage CreateUpstreamRequest()
         {
-            Content = new StringContent(requestPayload.ToJsonString(), Encoding.UTF8, "application/json")
-        };
-        ApplyUpstreamHeaders(request, state, provider);
+            var created = new HttpRequestMessage(HttpMethod.Post, upstreamUrl)
+            {
+                Content = new StringContent(requestPayload.ToJsonString(), Encoding.UTF8, "application/json")
+            };
+            ApplyUpstreamHeaders(created, state, provider);
+            return created;
+        }
 
         _generationSpeed?.Begin(routeKind);
         var sseStarted = false;
+        LocalStreamHangClock? hangClock = null;
         try
         {
             var timeoutSec = RequestTimeoutForPayload(
                 requestPayload as JsonObject ?? payload,
-                localStream: routeKind.Equals("local", StringComparison.OrdinalIgnoreCase));
+                localStream: routeKind.Equals("local", StringComparison.OrdinalIgnoreCase),
+                portRules);
             using var timeoutCts = new CancellationTokenSource();
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
-            var contentType = response.Content.Headers.ContentType?.ToString() ?? "application/json";
-            var status = (int)response.StatusCode;
+            HttpResponseMessage? response = null;
+            var loadingRetries = 0;
+            string? loadingDetail = null;
+            int status;
+            while (true)
+            {
+                response?.Dispose();
+                using var request = CreateUpstreamRequest();
+                response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
+                status = (int)response.StatusCode;
+                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
+                    && !response.IsSuccessStatusCode)
+                {
+                    loadingDetail = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
+                    if (LocalLoadingRetryPolicy.ShouldRetry(status, loadingDetail, loadingRetries, portRules))
+                    {
+                        loadingRetries++;
+                        PatchPortRulesTelemetry(prev => prev with
+                        {
+                            HasLocalTurn = true,
+                            LoadingRetries = loadingRetries
+                        });
+                        Log("local loading retry "
+                            + loadingRetries.ToString(CultureInfo.InvariantCulture)
+                            + "/"
+                            + portRules.LoadingRetryCount.ToString(CultureInfo.InvariantCulture)
+                            + " after llama-server 503");
+                        await Task.Delay(TimeSpan.FromSeconds(portRules.LoadingRetryDelaySeconds), timeoutCts.Token).ConfigureAwait(false);
+                        continue;
+                    }
+                }
+
+                break;
+            }
+
+            using (response)
+            {
+            var contentType = response!.Content.Headers.ContentType?.ToString() ?? "application/json";
 
             if (!response.IsSuccessStatusCode)
             {
-                var detail = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
+                var detail = loadingDetail
+                    ?? await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
                 var (message, errorType, mappedStatus, _) = ClassifyUpstreamError(status, detail, provider, model);
                 if (routeKind.Equals("cloud", StringComparison.OrdinalIgnoreCase))
                 {
@@ -780,13 +1119,31 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         message = FluxMuxGatewayRouting.FormatLocalContextOverflowMessage(
                             state,
                             lastServed.Kind,
-                            lastServed.Label);
+                            lastServed.Label,
+                            PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules));
                     }
+                }
+                else if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
+                    && portRules.Loading503Enabled
+                    && LocalLoadingRetryPolicy.LooksLikeDaemonLoading(status, detail))
+                {
+                    message = PortRulesPostMortem.WithStopAdvice(
+                        PortRulesPostMortem.FormatLoading503(loadingRetries, portRules));
                 }
 
                 await SendOpenAiErrorAsync(context.Response, message, mappedStatus, errorType).ConfigureAwait(false);
                 var eventType = errorType == "exceed_context_size_error" ? "local_context_overflow" : errorType;
                 Log($"{errorType} provider={provider} model={model} status={mappedStatus} detail={Truncate(detail, 400)}");
+                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
+                    && errorType == "exceed_context_size_error")
+                {
+                    ReportPortRulesFinding(PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules));
+                }
+                else if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
+                    && LocalLoadingRetryPolicy.LooksLikeDaemonLoading(status, detail))
+                {
+                    ReportPortRulesFinding(PortRulesPostMortem.FormatLoading503(loadingRetries, portRules));
+                }
                 var overflowDetail = errorType == "exceed_context_size_error"
                     ? "provider=" + provider
                       + " model=" + model
@@ -833,18 +1190,27 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 await using var upstream = await response.Content.ReadAsStreamAsync(timeoutCts.Token).ConfigureAwait(false);
                 using var hangCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token);
                 var gotUpstreamBytes = false;
-                var hangClock = new LocalStreamHangClock();
+                hangClock = new LocalStreamHangClock(portRules);
+                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+                {
+                    hangClock.FirstByteDeadline = LocalStreamHangPolicy.FirstByteDeadlineForThinkBudget(
+                        ReadThinkingBudget(payload),
+                        portRules);
+                }
+
                 var hangWatch = routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
+                    && portRules.HangEnabled
                     ? WatchLocalStreamHangAsync(
                         () => gotUpstreamBytes,
                         hangClock,
                         hangCts,
                         timeoutCts)
                     : Task.CompletedTask;
-                bool responseSanitized;
+                var responseSanitized = false;
+                var replyBudget = ParseInt(payload["max_tokens"]?.ToString() ?? string.Empty, 0);
                 try
                 {
-                    responseSanitized = await OpenAiStreamTelemetryProxy.CopyAsync(
+                    var copy = await OpenAiStreamTelemetryProxy.CopyAsync(
                         upstream,
                         context.Response.OutputStream,
                         _generationSpeed,
@@ -854,7 +1220,44 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         {
                             gotUpstreamBytes = true;
                             hangClock.NoteByte();
-                        }).ConfigureAwait(false);
+                        },
+                        localDeclaredTools,
+                        localAllowParallel,
+                        sessionArtifacts,
+                        replyBudget).ConfigureAwait(false);
+                    responseSanitized = copy.Sanitized;
+                    if (copy.ThinkCutOff)
+                    {
+                        Log("local_think_cutoff: llama-server was still thinking when this turn ended; Client app was told why");
+                        EmitContextEvent(
+                            LocalThinkBudgetNotice.Type,
+                            "provider=" + provider + " model=" + model + " stream=true");
+                        ReportPortRulesFinding(LocalThinkBudgetNotice.FormatDiagnostics(
+                            localReasoningForResponse,
+                            replyBudget,
+                            compactApplied));
+                    }
+                    else if (copy.ThinkOnly)
+                    {
+                        Log("local_think_only: llama-server only produced thinking; Cline was not given an empty complete");
+                    EmitContextEvent(
+                        "local_think_only",
+                        "provider=" + provider + " model=" + model + " stream=true");
+                    ReportPortRulesFinding(PortRulesPostMortem.FormatThinkOnly(portRules));
+                    }
+
+                    if (copy.Healed)
+                    {
+                        Log("local chat: healed malformed llama-server tool call(s) so the Client app received structured tool_calls");
+                        EmitContextEvent(
+                            "local_tool_heal",
+                            "provider=" + provider + " model=" + model + " stream=true");
+                    }
+
+                    if (copy.BlockedWrites)
+                    {
+                        Log("local chat: blocked diagnostic write_to_file from reaching the Client app (stream)");
+                    }
                 }
                 finally
                 {
@@ -881,13 +1284,47 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
             var bytes = await response.Content.ReadAsByteArrayAsync(timeoutCts.Token).ConfigureAwait(false);
             _generationSpeed?.ProcessJsonBody(bytes);
-            if (localReasoningForResponse is not null)
+            if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
             {
-                var (sanitized, changed) = LocalEndpointResponseSanitizer.SanitizeJsonBody(bytes, localReasoningForResponse);
+                var (sanitized, strippedThinking, healed) = LocalEndpointResponseSanitizer.SanitizeJsonBody(
+                    bytes,
+                    localReasoningForResponse,
+                    localDeclaredTools,
+                    localAllowParallel,
+                    sessionArtifacts);
                 bytes = sanitized;
-                if (changed)
+                if (strippedThinking)
                 {
                     Log("local chat: stripped thinking markup from endpoint response");
+                }
+
+                if (healed)
+                {
+                    Log("local chat: healed malformed llama-server tool call(s) so the Client app received structured tool_calls");
+                    EmitContextEvent(
+                        "local_tool_heal",
+                        "provider=" + provider + " model=" + model + " status=" + status.ToString(CultureInfo.InvariantCulture));
+                }
+
+                if (strippedThinking
+                    && bytes.Length > 0
+                    && TryParseCompletion(bytes, out var completion)
+                    && LocalThinkOnlyReply.CompletionIsThinkOnly(
+                        completion,
+                        localReasoningForResponse,
+                        strippedThinking))
+                {
+                    await SendOpenAiErrorAsync(
+                        context.Response,
+                        FluxMuxGatewayRouting.FormatThinkOnlyMessage(state, portRules),
+                        400,
+                        FluxMuxGatewayRouting.ThinkOnlyType).ConfigureAwait(false);
+                    Log("local_think_only: llama-server only produced thinking; Cline was not given an empty complete");
+                    EmitContextEvent(
+                        "local_think_only",
+                        "provider=" + provider + " model=" + model + " status=400");
+                    ReportPortRulesFinding(PortRulesPostMortem.FormatThinkOnly(portRules));
+                    return;
                 }
             }
 
@@ -898,6 +1335,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             Log($"upstream ok provider={provider} model={model} status={status}");
             EmitContextEvent("upstream_ok", $"provider={provider} model={model} status={status}");
             NoteSuccessfulUpstream(routeKind, provider, model, overlayVariant, compactApplied, reloadOffered, cloudConsentOffered, requestId);
+            }
         }
         catch (Exception ex)
         {
@@ -916,7 +1354,20 @@ public sealed class FluxMuxGatewayHost : IDisposable
             if (sseStarted && routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
             {
                 var endpointApp = Str(LoadState(), "endpoint_app");
-                message = LocalStreamHangPolicy.FormatHangAbortMessage(endpointApp);
+                string? hangDetails = null;
+                if (hangClock is not null)
+                {
+                    var quietSeconds = (int)(DateTime.UtcNow - hangClock.CopyStartUtc).TotalSeconds;
+                    hangDetails = PortRulesPostMortem.FormatHang(
+                        hangClock.LastAbortReason,
+                        quietSeconds,
+                        hangClock.WaitLongerCount,
+                        (int)hangClock.FirstByteDeadline.TotalSeconds,
+                        portRules);
+                    ReportPortRulesFinding(hangDetails);
+                }
+
+                message = LocalStreamHangPolicy.FormatHangAbortMessage(endpointApp, hangDetails);
                 hint = string.Empty;
                 errorType = "request_timeout";
                 var park = ParkLocalAfterHangAsync;
@@ -1152,10 +1603,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
             {
                 OfferCloudWhenLocalCannot(state, needVision);
             }
-            else if (Str(existing, "status").Equals("pending", StringComparison.OrdinalIgnoreCase)
-                && !needVision
-                && !needThinking
-                && !promptExceeds)
+            else if (LocalReloadRouting.ShouldClearLeftoverVisionMiss(
+                Str(existing, "status").Equals("pending", StringComparison.OrdinalIgnoreCase),
+                ParseBool(Str(existing, "needVision")),
+                needVision,
+                needThinking,
+                promptExceeds))
             {
                 existing["status"] = "idle";
                 existing["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
@@ -1392,6 +1845,45 @@ public sealed class FluxMuxGatewayHost : IDisposable
         return null;
     }
 
+    private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn)
+    {
+        var rules = CurrentRules();
+        if (!rules.CompactEnabled)
+        {
+            return false;
+        }
+
+        var hotContext = ParseInt(Str(state, "local_context"), 0);
+        var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        var promptExceeds = LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, rules.CompactHeadroom);
+        var filling = FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload);
+        if (!LocalHistoryCompaction.ShouldForwardCompact(
+                compactOn,
+                promptTokens,
+                hotContext,
+                promptExceeds,
+                filling,
+                rules))
+        {
+            return false;
+        }
+
+        if (!LocalHistoryCompaction.TryCompactPayload(payload, rules, force: true))
+        {
+            Log("local history compact: Context is filling but older turns could not be shortened (too few turns, or one over-full turn)");
+            return false;
+        }
+
+        Log("local history compact: shortened older turns before routing");
+        var inserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
+        if (inserted > 0)
+        {
+            Log("local chat: inserted a user turn so the Qwen template has a query");
+        }
+
+        return true;
+    }
+
     private static int EstimateNeededContext(JsonObject payload)
     {
         var maxTokens = ParseInt(payload["max_tokens"]?.ToString() ?? string.Empty, 0);
@@ -1499,7 +1991,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
         return FluxMuxGatewayRouting.Cloud;
     }
 
-    private async Task<string> ApplyCloudConsentAsync(string reason, bool failOnTimeout, bool waitForAnswer, string source = "")
+    private async Task<string> ApplyCloudConsentAsync(
+        string reason,
+        bool failOnTimeout,
+        bool waitForAnswer,
+        string source = "",
+        int waitSeconds = 45)
     {
         var rec = LoadRecommend();
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -1536,7 +2033,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return failOnTimeout ? FluxMuxGatewayRouting.ConsentTimeout : "local";
         }
 
-        var deadline = DateTime.UtcNow.AddSeconds(45);
+        var wait = Math.Clamp(waitSeconds, 10, 120);
+        var deadline = DateTime.UtcNow.AddSeconds(wait);
         while (DateTime.UtcNow < deadline)
         {
             rec = LoadRecommend();
@@ -1554,6 +2052,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
             if (RouteRecoveryPolicy.IsWaitStatus(status))
             {
                 return RouteRecoveryPolicy.WaitStatus;
+            }
+
+            if (RouteRecoveryPolicy.IsSteerStatus(status))
+            {
+                return RouteRecoveryPolicy.SteerStatus;
             }
 
             await Task.Delay(250).ConfigureAwait(false);
@@ -1855,8 +2358,36 @@ public sealed class FluxMuxGatewayHost : IDisposable
         };
     }
 
-    private static int RequestTimeoutForPayload(JsonObject payload, bool localStream = false)
+    private static int? ReadThinkingBudget(JsonObject payload)
     {
+        var node = payload["thinking_budget"] ?? (payload["chat_template_kwargs"] as JsonObject)?["thinking_budget"];
+        if (node is null)
+        {
+            var thinkingOn = (payload["chat_template_kwargs"] as JsonObject)?["enable_thinking"]?.ToString();
+            if (string.Equals(thinkingOn, "true", StringComparison.OrdinalIgnoreCase)
+                || thinkingOn == "True")
+            {
+                return null;
+            }
+
+            return 0;
+        }
+
+        return int.TryParse(
+            node.ToString(),
+            NumberStyles.Integer,
+            CultureInfo.InvariantCulture,
+            out var budget)
+            ? budget
+            : 0;
+    }
+
+    private static int RequestTimeoutForPayload(
+        JsonObject payload,
+        bool localStream,
+        PortForwardingRules rules)
+    {
+        var live = (rules ?? PortForwardingRules.Defaults).Clamp();
         try
         {
             var promptChars = (payload["messages"] ?? new JsonArray()).ToJsonString().Length;
@@ -1866,14 +2397,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
             var seconds = (int)Math.Ceiling(estimated);
             if (localStream)
             {
-                return LocalStreamHangPolicy.ClampCopyTimeoutSeconds(seconds);
+                return LocalStreamHangPolicy.ClampCopyTimeoutSeconds(seconds, ReadThinkingBudget(payload), live);
             }
 
             return Math.Max(MinUpstreamTimeoutSec, Math.Min(MaxUpstreamTimeoutSec, seconds));
         }
         catch
         {
-            return localStream ? LocalStreamHangPolicy.MinCopyTimeoutSeconds : MinUpstreamTimeoutSec;
+            return localStream ? live.MinCopyTimeoutSeconds : MinUpstreamTimeoutSec;
         }
     }
 
@@ -2111,6 +2642,155 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
     }
 
+    private void ReportPortRulesFinding(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        Log("port rules post-mortem: " + text);
+        EmitContextEvent("port_rules_postmortem", text);
+        try
+        {
+            ReportPortRulesPostMortem?.Invoke(text);
+        }
+        catch
+        {
+        }
+    }
+
+    private void NotePortRuleSendAnyway()
+        => _portRuleSendAnywayGrace = 1;
+
+    private bool ConsumePortRuleSendAnywayGrace()
+    {
+        if (_portRuleSendAnywayGrace <= 0)
+        {
+            return false;
+        }
+
+        _portRuleSendAnywayGrace--;
+        return true;
+    }
+
+    private void PublishPortRulesTelemetry(PortRulesTelemetry snap)
+    {
+        snap ??= PortRulesTelemetry.Empty;
+        lock (_portRulesLock)
+        {
+            _lastPortRulesTelemetry = snap;
+        }
+
+        try
+        {
+            ReportPortRulesTelemetry?.Invoke(snap);
+        }
+        catch
+        {
+        }
+
+        var line = snap.CompactDiagnosticLine(PortRules);
+        if (string.IsNullOrWhiteSpace(line)
+            || string.Equals(line, _lastPortRulesDiagnostic, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastPortRulesDiagnostic = line;
+        Log("PORT " + line);
+    }
+
+    private void PatchPortRulesTelemetry(Func<PortRulesTelemetry, PortRulesTelemetry> update)
+    {
+        PortRulesTelemetry next;
+        lock (_portRulesLock)
+        {
+            next = update(_lastPortRulesTelemetry);
+        }
+
+        PublishPortRulesTelemetry(next);
+    }
+
+    private async Task<string> AskPortRulePauseAsync(string finding, PortForwardingRules rules)
+    {
+        var prompt = PortRulesPostMortem.FormatPausePrompt(finding);
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            prompt = finding;
+        }
+
+        SaveRecommend(new JsonObject
+        {
+            ["status"] = "pending",
+            ["reason"] = prompt,
+            ["source"] = RouteRecoveryPolicy.PortRulePauseSource,
+            ["fail_on_timeout"] = true,
+            ["allow_until"] = 0,
+            ["suppress_until"] = 0,
+            ["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
+        });
+        Log("port rule pause pending: " + prompt);
+
+        var wait = Math.Clamp(rules.DecisionSeconds, 10, 120);
+        var deadline = DateTime.UtcNow.AddSeconds(wait);
+        while (DateTime.UtcNow < deadline)
+        {
+            var rec = LoadRecommend();
+            var status = Str(rec, "status");
+            if (status == "yes")
+            {
+                return FluxMuxGatewayRouting.Cloud;
+            }
+
+            if (status == "no")
+            {
+                return "local";
+            }
+
+            if (RouteRecoveryPolicy.IsWaitStatus(status))
+            {
+                return RouteRecoveryPolicy.WaitStatus;
+            }
+
+            if (RouteRecoveryPolicy.IsSteerStatus(status))
+            {
+                return RouteRecoveryPolicy.SteerStatus;
+            }
+
+            await Task.Delay(250).ConfigureAwait(false);
+        }
+
+        var timedOut = LoadRecommend();
+        timedOut["status"] = "timeout";
+        timedOut["reason"] = FirstNonEmpty(Str(timedOut, "reason"), prompt);
+        timedOut["fail_on_timeout"] = true;
+        timedOut["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        SaveRecommend(timedOut);
+        Log("port rule pause timed out; ending this turn so the Client app can stop waiting");
+        return FluxMuxGatewayRouting.ConsentTimeout;
+    }
+
+    private static async Task SendAssistantNoticeAsync(HttpListenerResponse response, string message)
+    {
+        response.StatusCode = 200;
+        response.ContentType = "text/event-stream";
+        ApplyCorsHeaders(response);
+        using var writeCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            await OpenAiStreamTelemetryProxy.WriteErrorAndDoneAsync(
+                response.OutputStream,
+                message,
+                "notice",
+                string.Empty,
+                writeCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
     private void EmitContextEvent(string eventType, string details)
     {
         try
@@ -2210,6 +2890,18 @@ public sealed class FluxMuxGatewayHost : IDisposable
             {
                 await Task.Delay(250, hangCts.Token).ConfigureAwait(false);
                 var now = DateTime.UtcNow;
+                if (clock.Rules.HangEnabled
+                    && (now - _lastHangTallyUtc).TotalSeconds >= 1)
+                {
+                    _lastHangTallyUtc = now;
+                    var quiet = (int)(now - (gotUpstreamBytes() ? clock.LastByteUtc : clock.CopyStartUtc)).TotalSeconds;
+                    PatchPortRulesTelemetry(prev => prev with
+                    {
+                        HasLocalTurn = true,
+                        QuietSeconds = Math.Max(0, quiet)
+                    });
+                }
+
                 if (!LocalStreamHangPolicy.ShouldAbort(
                     gotUpstreamBytes(),
                     now - clock.CopyStartUtc,
@@ -2225,24 +2917,34 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     + " after "
                     + ((int)(now - clock.CopyStartUtc).TotalSeconds).ToString(CultureInfo.InvariantCulture)
                     + "s — asking whether to wait longer on this turn");
-                var decision = await AskHangWaitAsync(hangCts.Token).ConfigureAwait(false);
+                var decision = await AskHangWaitAsync(
+                    () => gotUpstreamBytes(),
+                    clock,
+                    hangCts.Token).ConfigureAwait(false);
+                if (decision == LocalStreamHangPolicy.RecoveredStatus)
+                {
+                    Log("local stream hang: llama-server started sending; Cline is still on this turn");
+                    continue;
+                }
+
                 if (RouteRecoveryPolicy.IsWaitStatus(decision))
                 {
                     clock.ResetForWaitLonger();
                     try
                     {
-                        LocalStreamHangPolicy.ExtendCopyTimeout(timeoutCts);
+                        LocalStreamHangPolicy.ExtendCopyTimeout(timeoutCts, clock.Rules);
                     }
                     catch (ObjectDisposedException)
                     {
                     }
 
                     Log("local stream hang: waiting longer ("
-                        + LocalStreamHangPolicy.WaitLongerSeconds.ToString(CultureInfo.InvariantCulture)
+                        + clock.Rules.WaitLongerSeconds.ToString(CultureInfo.InvariantCulture)
                         + "s) on this turn");
                     continue;
                 }
 
+                clock.LastAbortReason = reason;
                 Log("local stream hang: ending SSE so the Client app can stop waiting");
                 hangCts.Cancel();
                 return;
@@ -2251,9 +2953,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
         catch (OperationCanceledException)
         {
         }
+        finally
+        {
+            DismissHangWaitIfPending();
+        }
     }
 
-    private async Task<string> AskHangWaitAsync(CancellationToken cancellationToken)
+    private async Task<string> AskHangWaitAsync(
+        Func<bool> gotUpstreamBytes,
+        LocalStreamHangClock clock,
+        CancellationToken cancellationToken)
     {
         var waitMessage = LocalStreamHangPolicy.FormatHangWaitMessage(Str(LoadState(), "endpoint_app"));
         SaveRecommend(new JsonObject
@@ -2269,27 +2978,44 @@ public sealed class FluxMuxGatewayHost : IDisposable
         Log("cloud recommend pending: " + waitMessage);
 
         var deadline = DateTime.UtcNow.AddSeconds(LocalStreamHangPolicy.DecisionSeconds);
-        while (DateTime.UtcNow < deadline)
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var rec = LoadRecommend();
-            var status = Str(rec, "status");
-            if (RouteRecoveryPolicy.IsWaitStatus(status))
+            while (DateTime.UtcNow < deadline)
             {
-                return RouteRecoveryPolicy.WaitStatus;
-            }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (LocalStreamHangPolicy.StreamRecovered(
+                    gotUpstreamBytes(),
+                    DateTime.UtcNow - clock.LastByteUtc,
+                    clock.StallDeadline))
+                {
+                    DismissHangWaitIfPending();
+                    return LocalStreamHangPolicy.RecoveredStatus;
+                }
 
-            if (status == "yes")
-            {
-                return "cloud";
-            }
+                var rec = LoadRecommend();
+                var status = Str(rec, "status");
+                if (RouteRecoveryPolicy.IsWaitStatus(status))
+                {
+                    return RouteRecoveryPolicy.WaitStatus;
+                }
 
-            if (status == "no")
-            {
-                return "end";
-            }
+                if (status == "yes")
+                {
+                    return "cloud";
+                }
 
-            await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+                if (status == "no")
+                {
+                    return "end";
+                }
+
+                await Task.Delay(250, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            DismissHangWaitIfPending();
+            throw;
         }
 
         var timedOut = LoadRecommend();
@@ -2300,6 +3026,23 @@ public sealed class FluxMuxGatewayHost : IDisposable
         SaveRecommend(timedOut);
         Log("cloud recommend timed out; ending this turn so the Client app can stop waiting");
         return FluxMuxGatewayRouting.ConsentTimeout;
+    }
+
+    private void DismissHangWaitIfPending()
+    {
+        var rec = LoadRecommend();
+        if (!Str(rec, "status").Equals("pending", StringComparison.OrdinalIgnoreCase)
+            || !RouteRecoveryPolicy.IsLocalHangSource(Str(rec, "source")))
+        {
+            return;
+        }
+
+        rec["status"] = "idle";
+        rec["reason"] = string.Empty;
+        rec["fail_on_timeout"] = false;
+        rec["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        SaveRecommend(rec);
+        Log("local stream hang: llama-server is working again; closed the wait prompt");
     }
 
     private static string Str(JsonObject? obj, string key, string fallback = "")
@@ -2317,6 +3060,20 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
         var text = node.ToString()?.Trim() ?? string.Empty;
         return string.IsNullOrWhiteSpace(text) ? fallback : text;
+    }
+
+    private static bool TryParseCompletion(byte[] bytes, out JsonObject? completion)
+    {
+        completion = null;
+        try
+        {
+            completion = JsonNode.Parse(bytes) as JsonObject;
+            return completion is not null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
     }
 
     private static int ParseInt(string value, int fallback)

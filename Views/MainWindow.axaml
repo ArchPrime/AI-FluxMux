@@ -3,6 +3,7 @@
         xmlns:vm="using:FluxMux.Avalonia.ViewModels"
         xmlns:views="using:FluxMux.Avalonia.Views"
         xmlns:svc="using:FluxMux.Avalonia.Services"
+        xmlns:conv="using:Avalonia.Data.Converters"
         xmlns:ctrl="using:FluxMux.Avalonia.Controls"
     xmlns:shapes="using:Avalonia.Controls.Shapes"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
@@ -12,12 +13,13 @@
         x:DataType="vm:MainViewModel"
         x:Name="RootWindow"
         Icon="/Assets/Logos/AI-FluxMux.ico"
-    Title="AI-FluxMux v0.2 beta"
+    Title="AI-FluxMux v0.2.1 beta"
     MinWidth="640"
     MinHeight="600"
         WindowStartupLocation="Manual"
         ExtendClientAreaToDecorationsHint="True"
-        WindowDecorations="Full">
+        WindowDecorations="Full"
+        Background="{DynamicResource FluxPaneBackground}">
 
     <Window.Resources>
         <x:String x:Key="IdleTimeoutTooltip">Set how many idle minutes before AI-FluxMux stops the local model. This saves power, and frees VRAM for other apps. A reply that is still being prepared does not count as idle, even if that turn takes a long time. While a reply is being worked on, AI-FluxMux asks Windows to stay awake so the turn can finish. Note however that if using a laptop, closing the lid can still trigger sleep. Windows can also sleep when no reply is in progress. After the PC wakes, idle time includes the time spent asleep. After an idle timeout, when you send the next chat, the local model must reload and rebuild the context from the chat history, which is slower and risks reduced model understanding of what was most pertinent. Leave the idle timeout setting off to keep the local model loaded and ready in memory.</x:String>
@@ -112,9 +114,16 @@
                                                                              SelectedItem="{Binding SelectedCloudPriority}"
                                                                              MinHeight="175"
                                                                              SelectionMode="Single"
+                                                                             views:ReorderMoveAnimation.Enable="True"
                                                                              PointerPressed="PriorityListBox_PointerPressed"
                                                                              PointerMoved="PriorityListBox_PointerMoved"
-                                                                             PointerReleased="PriorityListBox_PointerReleased">
+                                                                             PointerReleased="PriorityListBox_PointerReleased"
+                                                                             PointerCaptureLost="PriorityListBox_PointerCaptureLost">
+                                                                        <ListBox.ItemsPanel>
+                                                                            <ItemsPanelTemplate>
+                                                                                <StackPanel />
+                                                                            </ItemsPanelTemplate>
+                                                                        </ListBox.ItemsPanel>
                                                                         <ListBox.Styles>
                                                                             <Style Selector="ListBoxItem">
                                                                                 <Setter Property="Margin" Value="0,0,0,5" />
@@ -137,7 +146,14 @@
                                                                         <ListBox.ItemTemplate>
                                                                             <DataTemplate x:DataType="x:String">
                                                                                 <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8" Margin="2,3">
-                                                                                    <TextBlock Grid.Column="0" FontSize="14" Opacity="0.65" VerticalAlignment="Center" Text="↕" ToolTip.Tip="Use the up and down buttons to change how important this goal is." />
+                                                                                    <TextBlock Classes="reorderGrip"
+                                                                                               Grid.Column="0"
+                                                                                               Text="⋮⋮"
+                                                                                               ToolTip.Tip="Drag to change how important this goal is. The up and down buttons do the same."
+                                                                                               PointerPressed="PriorityListBox_PointerPressed"
+                                                                                               PointerMoved="PriorityListBox_PointerMoved"
+                                                                                               PointerReleased="PriorityListBox_PointerReleased"
+                                                                                               PointerCaptureLost="PriorityListBox_PointerCaptureLost" />
                                                                                     <TextBlock Grid.Column="1" FontSize="11" VerticalAlignment="Center" Text="{Binding}" ToolTip.Tip="{Binding Converter={x:Static vm:PriorityTooltipConverter.Instance}, ConverterParameter=cloud}" />
                                                                                 </Grid>
                                                                             </DataTemplate>
@@ -269,9 +285,16 @@
                                                                              SelectedItem="{Binding SelectedLocalPriority}"
                                                                              MinHeight="175"
                                                                              SelectionMode="Single"
+                                                                             views:ReorderMoveAnimation.Enable="True"
                                                                              PointerPressed="PriorityListBox_PointerPressed"
                                                                              PointerMoved="PriorityListBox_PointerMoved"
-                                                                             PointerReleased="PriorityListBox_PointerReleased">
+                                                                             PointerReleased="PriorityListBox_PointerReleased"
+                                                                             PointerCaptureLost="PriorityListBox_PointerCaptureLost">
+                                                                        <ListBox.ItemsPanel>
+                                                                            <ItemsPanelTemplate>
+                                                                                <StackPanel />
+                                                                            </ItemsPanelTemplate>
+                                                                        </ListBox.ItemsPanel>
                                                                         <ListBox.Styles>
                                                                             <Style Selector="ListBoxItem">
                                                                                 <Setter Property="Margin" Value="0,0,0,5" />
@@ -294,7 +317,14 @@
                                                                         <ListBox.ItemTemplate>
                                                                             <DataTemplate x:DataType="x:String">
                                                                                 <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8" Margin="2,3">
-                                                                                    <TextBlock Grid.Column="0" FontSize="14" Opacity="0.65" VerticalAlignment="Center" Text="↕" ToolTip.Tip="Use the up and down buttons to change how important this goal is." />
+                                                                                    <TextBlock Classes="reorderGrip"
+                                                                                               Grid.Column="0"
+                                                                                               Text="⋮⋮"
+                                                                                               ToolTip.Tip="Drag to change how important this goal is. The up and down buttons do the same."
+                                                                                               PointerPressed="PriorityListBox_PointerPressed"
+                                                                                               PointerMoved="PriorityListBox_PointerMoved"
+                                                                                               PointerReleased="PriorityListBox_PointerReleased"
+                                                                                               PointerCaptureLost="PriorityListBox_PointerCaptureLost" />
                                                                                     <TextBlock Grid.Column="1" FontSize="11" VerticalAlignment="Center" Text="{Binding}" ToolTip.Tip="{Binding Converter={x:Static vm:PriorityTooltipConverter.Instance}, ConverterParameter=local}" />
                                                                                 </Grid>
                                                                             </DataTemplate>
@@ -347,7 +377,6 @@
                                                                     <Border Padding="8,6" CornerRadius="5" BorderBrush="{DynamicResource FluxTintAmberBorder}" BorderThickness="1" Background="{DynamicResource FluxTintAmberBackground}">
                                                                         <StackPanel Spacing="6">
                                                                             <TextBlock FontSize="12" FontWeight="SemiBold" Text="Images" />
-                                                                            <TextBlock FontSize="11" TextWrapping="Wrap" Opacity="0.9" Text="{Binding LocalVariantImagesHeadroomNote}" />
                                                                             <Grid ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8" RowSpacing="6">
                                                                                 <TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Enable" />
                                                                                 <ComboBox Grid.Column="1" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantVisionEnabled}" ToolTip.Tip="On: this model can look at pictures (needs a matching extra file and uses more graphics memory). Off: text only. AutoTune does not change this — it works around the leftover graphics memory." />
@@ -372,6 +401,7 @@
                                                                                         Command="{Binding BrowseVisionProjectorCommand}"
                                                                                         ToolTip.Tip="Pick the picture-helper file if it was not found automatically." />
                                                                             </Grid>
+                                                                            <TextBlock FontSize="11" TextWrapping="Wrap" Opacity="0.9" Text="{Binding LocalVariantImagesHeadroomNote}" />
                                                                         </StackPanel>
                                                                     </Border>
                                                                     <Border Padding="8,6" CornerRadius="5" BorderBrush="{DynamicResource FluxMutedBorder}" BorderThickness="1" Background="{DynamicResource FluxMutedBackground}">
@@ -458,21 +488,33 @@
                                                                     </Border>
                                                                     <Border Padding="8,6" CornerRadius="5" BorderBrush="{DynamicResource FluxTintPurpleBorder}" BorderThickness="1" Background="{DynamicResource FluxTintPurpleBackground}">
                                                                         <StackPanel Spacing="6">
-                                                                            <TextBlock FontSize="12" FontWeight="SemiBold" Text="Chat format and reply style" />
-                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6">
-                                                                        <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Template" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding LocalChatTemplateOptions}" SelectedItem="{Binding LocalVariantChatTemplate}" ToolTip.Tip="Auto uses the format stored in the local model. Pick a named format only for older models. Newer Qwen models must stay on Auto or they may ignore instructions from the Client app." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Chat parser" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalChatParserOptions}" SelectedItem="{Binding LocalVariantChatParser}" ToolTip.Tip="How chat messages are read. Leave the default unless answers look garbled. Skip parsing is a last resort." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Unban tokens" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="5" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantUnbanTokensMode}" ToolTip.Tip="Allow some words llama-server would otherwise block. This is a real llama-server option (--unbantokens) when llama-server's help lists it; AI-FluxMux only sends it then. AutoTune may turn this on for some chat formats." />
-
-                                                                        <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Temperature" />
-                                                                        <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="2" Increment="0.05" Value="{Binding LocalVariantTemperature}" ToolTip.Tip="How mixed the wording is. Lower is more repeatable. Higher is more varied. Does not make answers faster." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Max tokens" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="3" ItemsSource="{Binding LocalMaxTokenOptions}" SelectedItem="{Binding LocalVariantMaxTokens}" ToolTip.Tip="How long one answer can be. Shorter answers may stop in the middle of a reply. AutoTune and the priority arrows will not lower this. Save keeps it. Changing only this does not require Validate to endpoint again." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Reasoning" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="5" ItemsSource="{Binding LocalReasoningOptions}" SelectedItem="{Binding LocalVariantReasoning}" ToolTip.Tip="Whether the model writes a hidden thinking step before answering. Off is usually better for the Client app. Changing this later means waiting for the model to load again." />
+                                                                            <TextBlock FontSize="12" FontWeight="SemiBold" Text="Chat format" />
+                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="8" RowSpacing="6">
+                                                                        <TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Template" />
+                                                                        <ComboBox Grid.Column="1" ItemsSource="{Binding LocalChatTemplateOptions}" SelectedItem="{Binding LocalVariantChatTemplate}" ToolTip.Tip="Auto uses the format stored in the local model. Pick a named format only for older models. Newer Qwen models must stay on Auto or they may ignore instructions from the Client app." />
+                                                                        <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Chat parser" />
+                                                                        <ComboBox Grid.Column="3" ItemsSource="{Binding LocalChatParserOptions}" SelectedItem="{Binding LocalVariantChatParser}" ToolTip.Tip="How chat messages are read. Leave the default unless answers look garbled. Skip parsing is a last resort." />
+                                                                        <TextBlock Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Unban tokens" />
+                                                                        <ComboBox Grid.Column="5" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantUnbanTokensMode}" ToolTip.Tip="Allow some words llama-server would otherwise block. This is a real llama-server option (--unbantokens) when llama-server's help lists it; AI-FluxMux only sends it then. AutoTune may turn this on for some chat formats." />
+                                                                            </Grid>
+                                                                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                                                                <TextBlock FontSize="12"
+                                                                                           FontWeight="SemiBold"
+                                                                                           VerticalAlignment="Center"
+                                                                                           Text="Reply style" />
+                                                                                <TextBlock FontSize="11"
+                                                                                           Opacity="0.72"
+                                                                                           VerticalAlignment="Center"
+                                                                                           Text="next message · no reload"
+                                                                                           ToolTip.Tip="Temperature, max tokens, and Reasoning apply on the next Client-app message while this profile is loaded. llama-server is not reloaded." />
+                                                                            </StackPanel>
+                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="8" RowSpacing="6">
+                                                                        <TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Temperature" />
+                                                                        <NumericUpDown Grid.Column="1" Minimum="0" Maximum="2" Increment="0.05" Value="{Binding LocalVariantTemperature}" ToolTip.Tip="How mixed the wording is. Lower is more repeatable. Higher is more varied. Does not make answers faster." />
+                                                                        <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Max tokens" />
+                                                                        <ComboBox Grid.Column="3" ItemsSource="{Binding LocalMaxTokenOptions}" SelectedItem="{Binding LocalVariantMaxTokens}" ToolTip.Tip="How long one answer can be. Shorter answers may stop in the middle of a reply. AutoTune and the priority arrows will not lower this. Save keeps it." />
+                                                                        <TextBlock Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Reasoning" />
+                                                                        <ComboBox Grid.Column="5" ItemsSource="{Binding LocalReasoningOptions}" SelectedItem="{Binding LocalVariantReasoning}" ToolTip.Tip="Whether the model writes a hidden thinking step before answering. Off is usually better for the Client app. Use the Quick Select list for Off, Low, Medium, or XHigh on the running row." />
                                                                             </Grid>
                                                                         </StackPanel>
                                                                     </Border>
@@ -541,6 +583,46 @@
                                                         </StackPanel>
                                                     </Border>
         </DataTemplate>
+        <ControlTheme x:Key="DiagnosticsSashTheme" TargetType="GridSplitter">
+            <Setter Property="Background" Value="{DynamicResource FluxChromeBackground}" />
+            <Setter Property="MinHeight" Value="12" />
+            <Setter Property="Focusable" Value="True" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Panel Background="{TemplateBinding Background}">
+                        <Border x:Name="SashHoverLine"
+                                Height="4"
+                                CornerRadius="2"
+                                VerticalAlignment="Center"
+                                Background="{DynamicResource FluxSashHover}"
+                                IsHitTestVisible="False"
+                                Opacity="0">
+                            <Border.Transitions>
+                                <Transitions>
+                                    <DoubleTransition Property="Opacity" Duration="0:0:0.10" />
+                                </Transitions>
+                            </Border.Transitions>
+                        </Border>
+                        <StackPanel x:Name="SashDots"
+                                    Orientation="Horizontal"
+                                    Spacing="5"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    IsHitTestVisible="False">
+                            <shapes:Ellipse Width="4" Height="4" Fill="{DynamicResource FluxSashGrip}" />
+                            <shapes:Ellipse Width="4" Height="4" Fill="{DynamicResource FluxSashGrip}" />
+                            <shapes:Ellipse Width="4" Height="4" Fill="{DynamicResource FluxSashGrip}" />
+                        </StackPanel>
+                    </Panel>
+                </ControlTemplate>
+            </Setter>
+            <Style Selector="^:pointerover /template/ Border#SashHoverLine">
+                <Setter Property="Opacity" Value="0.85" />
+            </Style>
+            <Style Selector="^:pressed /template/ Border#SashHoverLine">
+                <Setter Property="Opacity" Value="0.85" />
+            </Style>
+        </ControlTheme>
     </Window.Resources>
 
     <Design.DataContext>
@@ -550,6 +632,13 @@
     </Design.DataContext>
 
     <Window.Styles>
+        <Style Selector="TextBlock.reorderGrip">
+            <Setter Property="FontFamily" Value="Segoe UI Symbol" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="Opacity" Value="0.72" />
+            <Setter Property="Cursor" Value="SizeAll" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
         <Style Selector="Grid.vramCaution TextBlock">
             <Setter Property="FontStyle" Value="Italic" />
             <Setter Property="Opacity" Value="0.62" />
@@ -746,12 +835,13 @@
         </Style>
     </Window.Styles>
 
+    <Panel>
     <LayoutTransformControl x:Name="LayoutScaler">
         <LayoutTransformControl.LayoutTransform>
             <ScaleTransform ScaleX="1" ScaleY="1" />
         </LayoutTransformControl.LayoutTransform>
 
-    <Grid Margin="14,0,14,14">
+    <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="5*" MinHeight="160" />
@@ -759,9 +849,8 @@
             <RowDefinition Height="*" MinHeight="200" />
         </Grid.RowDefinitions>
         <Border Grid.Row="0"
-                Margin="-14,0,-14,0"
                 Padding="18,8,0,8"
-                Background="{DynamicResource FluxPaneBackground}"
+                Background="{DynamicResource FluxChromeBackground}"
                 BorderBrush="{DynamicResource FluxCardBorder}"
                 BorderThickness="0,0,0,1">
         <Grid x:Name="HeaderChrome"
@@ -808,9 +897,10 @@
         <TabControl x:Name="MainTabs"
                     Grid.Row="1"
                     Classes="mainTabs"
-                    Margin="0,4,0,0"
+                    Margin="14,4,14,0"
                     HorizontalAlignment="Stretch"
                     ClipToBounds="True"
+                    Background="{DynamicResource FluxPaneBackground}"
                     SelectedIndex="{Binding SelectedMainTabIndex}"
                     SelectionChanged="OnMainTabsSelectionChanged">
             <TabItem Header="Quick Select" ToolTip.Tip="Start, reload, or stop models you have already tested. This is the day-to-day tab.">
@@ -823,12 +913,12 @@
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <CheckBox VerticalAlignment="Center"
                                               IsChecked="{Binding RequestRoutingEnabled}"
-                                              ToolTip.Tip="Off: only one model answers at a time. On: launch local and cloud profiles in Quick Select, then set Cloud Usage Mode." />
+                                              ToolTip.Tip="Off: only one model answers at a time. On: a ready local and a ready cloud can both take turns on Port; AI-FluxMux asks before a switch, and Cloud Usage Mode sets how often cloud is offered." />
                                     <TextBlock VerticalAlignment="Center" Text="Route requests" />
                                 </StackPanel>
                                 <views:OptionInfoNote InfoId="quickselect.route_requests"
                                                       StartDismissed="True"
-                                                      NoteText="Off: only one model answers at a time. On: **Launch** local and cloud profiles in Quick Select, then set Cloud Usage Mode." />
+                                                      NoteText="Off: only one model answers at a time. On: a ready local and a ready cloud can both take turns on Port; AI-FluxMux asks before a switch, and **Cloud Usage Mode** sets how often cloud is offered." />
                             </StackPanel>
                             <StackPanel Spacing="2" Margin="0,0,16,4"
                                         IsVisible="{Binding RequestRoutingEnabled}">
@@ -842,24 +932,26 @@
                                                       StartDismissed="True"
                                                       NoteText="When **Route requests** needs a decision (**Keep current model — end this turn**, **Keep current model — this turn continues**, or **Switch to** the other ready model; **Load suggested model profile**; **Compact**), open a small always-on-top window so it is not hidden behind Harness or another Client app. The same buttons stay on Diagnostics." />
                             </StackPanel>
-                            <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,0,4"
+                            <StackPanel Spacing="2" Margin="0,0,0,4"
                                         IsVisible="{Binding RequestRoutingEnabled}">
-                                <TextBlock VerticalAlignment="Center" FontSize="11" Text="Cloud Usage Mode" />
-                                <ComboBox MinWidth="160"
-                                          HorizontalAlignment="Left"
-                                          VerticalAlignment="Center"
-                                          ItemsSource="{Binding CloudRoutingCapacityOptions}"
-                                          SelectedItem="{Binding SelectedCloudRoutingCapacity}"
-                                          ToolTip.Tip="How freely to spend your cloud subscription. Normal: large or clearly cloud-named requests may go to the ready cloud model. Low: stay on the loaded local unless it is down or the prompt asks for cloud. Hold: stay on the loaded local while it is working (if local is down, cloud can still be used). On Low or Hold, AI-FluxMux may ask before loading a different local model." />
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <TextBlock VerticalAlignment="Center" FontSize="11" Text="Cloud Usage Mode" />
+                                    <ComboBox MinWidth="160"
+                                              HorizontalAlignment="Left"
+                                              VerticalAlignment="Center"
+                                              ItemsSource="{Binding CloudRoutingCapacityOptions}"
+                                              SelectedItem="{Binding SelectedCloudRoutingCapacity}"
+                                              ToolTip.Tip="How freely to spend your cloud subscription. Normal: large or clearly cloud-named requests may go to the ready cloud model. Low: stay on the loaded local unless it is down or the prompt asks for cloud. Hold: stay on the loaded local while it is working (if local is down, cloud can still be used). On Low or Hold, AI-FluxMux may ask before loading a different local model." />
+                                </StackPanel>
+                                <views:OptionInfoNote InfoId="quickselect.cloud_usage"
+                                                      NoteText="Cloud Usage Mode sets how often (or if) routing can direct a selected cloud model to take a chat turn (fast). Prompted local routing (slower) will still apply when cloud is not used." />
                             </StackPanel>
                         </WrapPanel>
                         <views:OptionInfoNote InfoId="quickselect.hot_routing"
                                               NoteText="{Binding RequestRoutingModeText}" />
-                        <StackPanel IsVisible="{Binding RequestRoutingEnabled}">
-                            <views:OptionInfoNote InfoId="quickselect.cloud_usage"
-                                                  NoteText="Cloud Usage Mode sets how often (or if) routing can direct a selected cloud model to take a chat turn (fast). Prompted local routing (slower) will still apply when cloud is not used." />
-                        </StackPanel>
-                        <ItemsControl ItemsSource="{Binding QuickSelectSlots}">
+                        <ItemsControl x:Name="QuickSelectSlotList"
+                                      ItemsSource="{Binding QuickSelectSlots}"
+                                      views:ReorderMoveAnimation.Enable="True">
                             <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
                                     <StackPanel Spacing="10" />
@@ -867,7 +959,21 @@
                             </ItemsControl.ItemsPanel>
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate x:DataType="vm:RouteSlotViewModel">
-                                    <GroupBox Header="{Binding DisplayName}">
+                                    <GroupBox>
+                                        <GroupBox.Header>
+                                            <DockPanel LastChildFill="True">
+                                                <TextBlock Classes="reorderGrip"
+                                                           DockPanel.Dock="Left"
+                                                           Margin="0,0,8,0"
+                                                           Text="⋮⋮"
+                                                           ToolTip.Tip="Drag to reorder this Quick Select row."
+                                                           PointerPressed="OnQuickSelectSlotGripPressed"
+                                                           PointerMoved="OnQuickSelectSlotGripMoved"
+                                                           PointerReleased="OnQuickSelectSlotGripReleased"
+                                                           PointerCaptureLost="OnQuickSelectSlotGripCaptureLost" />
+                                                <TextBlock VerticalAlignment="Center" Text="{Binding DisplayName}" />
+                                            </DockPanel>
+                                        </GroupBox.Header>
                                         <Border Classes="slotRuntimeChrome"
                                                 Classes.activeRuntimeLive="{Binding IsActiveRuntimeLive}"
                                                 Classes.activeRuntimeAmber="{Binding IsActiveRuntimeAmber}"
@@ -885,7 +991,7 @@
                                                 CornerRadius="6" />
                                         <Grid Margin="8"
                                               ColumnDefinitions="Auto,*,Auto"
-                                              RowDefinitions="Auto,Auto,Auto,Auto,Auto"
+                                              RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto"
                                               ColumnSpacing="10"
                                               RowSpacing="8">
                                             <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Validated profile" />
@@ -932,7 +1038,46 @@
                                                        TextWrapping="Wrap" FontSize="11" Opacity="0.72"
                                                        Text="{Binding ProfileSyncNote}"
                                                        IsVisible="{Binding ShowProfileSyncNote}" />
-                                            <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Spacing="4">
+                                            <TextBlock Grid.Row="4"
+                                                       Grid.Column="0"
+                                                       VerticalAlignment="Center"
+                                                       FontSize="11"
+                                                       Text="Temperature"
+                                                       IsVisible="{Binding ShowRequestOverlay}" />
+                                            <WrapPanel Grid.Row="4"
+                                                       Grid.Column="1"
+                                                       Grid.ColumnSpan="2"
+                                                       Orientation="Horizontal"
+                                                       IsVisible="{Binding ShowRequestOverlay}">
+                                                <NumericUpDown MinWidth="88"
+                                                               Margin="0,0,16,4"
+                                                               HorizontalAlignment="Left"
+                                                               VerticalAlignment="Center"
+                                                               Minimum="0"
+                                                               Maximum="2"
+                                                               Increment="0.05"
+                                                               Value="{Binding RequestTemperature}"
+                                                               ToolTip.Tip="How mixed the wording is. Lower is more repeatable. Higher is more varied. Applies on the next Client-app message while this row is loaded." />
+                                                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,0,16,4">
+                                                    <TextBlock VerticalAlignment="Center" FontSize="11" Text="Max tokens" />
+                                                    <ComboBox MinWidth="96"
+                                                              HorizontalAlignment="Left"
+                                                              VerticalAlignment="Center"
+                                                              ItemsSource="{Binding RequestMaxTokenOptions}"
+                                                              SelectedItem="{Binding RequestMaxTokens}"
+                                                              ToolTip.Tip="How long one answer can be. Applies on the next Client-app message while this row is loaded." />
+                                                </StackPanel>
+                                                <StackPanel Orientation="Horizontal" Spacing="6" Margin="0,0,0,4">
+                                                    <TextBlock VerticalAlignment="Center" FontSize="11" Text="Reasoning" />
+                                                    <ComboBox MinWidth="96"
+                                                              HorizontalAlignment="Left"
+                                                              VerticalAlignment="Center"
+                                                              ItemsSource="{Binding RequestReasoningOptions}"
+                                                              SelectedItem="{Binding RequestReasoning}"
+                                                              views:MarkedText.Tip="How much the local model thinks before it answers. **Off** is what a Client-app tool loop wants — the next message can run a test or command instead of spending Max tokens on a think. **Low**, **Medium**, and **XHigh** turn thinking on for this row. **XHigh** can use the whole reply budget before any tool call." />
+                                                </StackPanel>
+                                            </WrapPanel>
+                                            <StackPanel Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" Spacing="4">
                                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                                     <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding HasSavedAssignment}">
                                                         <Button Content="Launch" Command="{Binding LaunchCommand}" IsEnabled="{Binding CanLaunchSavedAssignment}" views:MarkedText.Tip="Starts this row's saved model. If you changed the dropdown, click **Save** first. If ⚠ is showing, run **Validate to endpoint** on Model Profiles first." />
@@ -975,22 +1120,11 @@
                                                         </StackPanel>
                                                     </Border>
                                                 </StackPanel>
-                                                <StackPanel Spacing="4" IsVisible="{Binding ShowHarnessOperationalControls}">
-                                                    <TextBlock TextWrapping="Wrap"
-                                                               FontSize="11"
-                                                               Opacity="0.82"
-                                                               Text="{Binding ElementName=RootWindow, Path=DataContext.HarnessStopUnavailableHint}"
-                                                               IsVisible="{Binding ElementName=RootWindow, Path=DataContext.ShowHarnessStopUnavailableHint}" />
-                                                    <TextBlock TextWrapping="Wrap"
-                                                               FontSize="11"
-                                                               Opacity="0.82"
-                                                               Text="{Binding ElementName=RootWindow, Path=DataContext.HarnessWebUiStatusText}" />
-                                                    <TextBlock TextWrapping="Wrap"
-                                                               FontSize="11"
-                                                               Opacity="0.78"
-                                                               Text="{Binding ElementName=RootWindow, Path=DataContext.HarnessLaunchModeText}"
-                                                               IsVisible="{Binding ElementName=RootWindow, Path=DataContext.IsHarnessWebProcessTracked}" />
-                                                </StackPanel>
+                                                <TextBlock TextWrapping="Wrap"
+                                                           FontSize="11"
+                                                           Opacity="0.82"
+                                                           Text="{Binding ElementName=RootWindow, Path=DataContext.HarnessStopUnavailableHint}"
+                                                           IsVisible="{Binding ElementName=RootWindow, Path=DataContext.ShowHarnessStopUnavailableHint}" />
                                             </StackPanel>
                                         </Grid>
                                         </Grid>
@@ -1023,8 +1157,6 @@
                                 <Border Background="{DynamicResource FluxServersTintOrangeBackground}" BorderBrush="{DynamicResource FluxServersTintOrangeBorder}" BorderThickness="1" CornerRadius="6" Padding="10">
                                     <StackPanel Spacing="8">
                                         <TextBlock FontWeight="SemiBold" Text="Endpoint settings" />
-                                        <views:OptionInfoNote InfoId="servers.endpoint_intro"
-                                                              NoteText="{Binding EndpointSettingsIntroText}" />
                                         <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="8">
                                             <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Port" />
                                             <NumericUpDown Grid.Column="1" MinWidth="120" Value="{Binding OrchestratorPort}" Minimum="1" Maximum="65534" ToolTip.Tip="OpenAI-compatible model API for the Client app (Port). AI-FluxMux also uses the daemon port — the private listen port for llama-server (usually Port+1). Do not point the Client app at the daemon port." />
@@ -1042,6 +1174,8 @@
                                                        Opacity="0.85"
                                                        Text="{Binding EndpointModelAddressText}" />
                                         </Grid>
+                                        <views:OptionInfoNote InfoId="servers.endpoint_intro"
+                                                              NoteText="{Binding EndpointSettingsIntroText}" />
                                         <StackPanel Orientation="Horizontal" Spacing="8">
                                             <Button Content="Export Endpoint adapters"
                                                     Command="{Binding ExportEndpointAdaptersCommand}"
@@ -1058,8 +1192,6 @@
                                                 Padding="10">
                                             <StackPanel Spacing="8">
                                                 <TextBlock FontWeight="SemiBold" Text="Cline (VS Code)" />
-                                                <views:OptionInfoNote InfoId="servers.cline_hint"
-                                                                      NoteText="{Binding ClineEndpointHintText}" />
                                                 <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding ClineSettingsStatusText}" />
                                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                                     <Button Content="Install guide (Cline)"
@@ -1075,6 +1207,8 @@
                                                             CommandParameter="https://github.com/cline/cline/releases"
                                                             ToolTip.Tip="GitHub releases for Cline. AI-FluxMux does not install or upgrade Cline." />
                                                 </StackPanel>
+                                                <views:OptionInfoNote InfoId="servers.cline_hint"
+                                                                      NoteText="{Binding ClineEndpointHintText}" />
                                             </StackPanel>
                                         </Border>
                                         <Border IsVisible="{Binding ShowGenericEndpointHint}"
@@ -1094,8 +1228,6 @@
                                                 Padding="10">
                                             <StackPanel Spacing="8">
                                                 <TextBlock FontWeight="SemiBold" Text="DeepSeek Harness (experimental)" />
-                                                <views:OptionInfoNote InfoId="servers.harness_summary"
-                                                                      NoteText="{Binding HarnessServersSummaryText}" />
                                                 <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding HarnessInstalledVersionText}" />
                                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                                     <Button Content="Install guide (DeepSeek)"
@@ -1119,8 +1251,6 @@
                                                                    Maximum="65534"
                                                                    ToolTip.Tip="Browser chat address bookmark. Default 3080. AI-FluxMux does not listen on this port." />
                                                 </Grid>
-                                                <views:OptionInfoNote InfoId="servers.harness_advanced"
-                                                                      NoteText="{Binding HarnessServersAdvancedNote}" />
                                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                                     <Button Content="Copy settings.yaml"
                                                             Command="{Binding CopyHarnessSettingsYamlCommand}"
@@ -1129,6 +1259,8 @@
                                                             Command="{Binding WriteHarnessSettingsYamlCommand}"
                                                             ToolTip.Tip="Merges a freshly generated FluxMux provider block into %USERPROFILE%\.dsh\settings.yaml — same path as automatic sync; use to retry." />
                                                 </StackPanel>
+                                                <views:OptionInfoNote InfoId="servers.harness_summary"
+                                                                      NoteText="{Binding HarnessServersSummaryText}" />
                                             </StackPanel>
                                         </Border>
                                     </StackPanel>
@@ -1156,20 +1288,425 @@
                                                     ToolTip.Tip="Point to a llama-server.exe AI-FluxMux did not find automatically (for example a portable copy)." />
                                         </Grid>
                                         <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.78" Text="{Binding LocalServerInstallationText}" />
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <Button Content="Test Server Readiness"
+                                                    Command="{Binding TestLocalServerReadinessCommand}"
+                                                    ToolTip.Tip="Checks that llama-server is installed, the model folder exists, and the ports from Endpoint settings are free. Does not start a local model." />
+                                        </StackPanel>
+                                        <DockPanel LastChildFill="True">
+                                        <StackPanel DockPanel.Dock="Left"
+                                                    Orientation="Horizontal"
+                                                    Spacing="8"
+                                                    VerticalAlignment="Center"
+                                                    Margin="0,0,8,0">
+                                            <CheckBox VerticalAlignment="Center"
+                                                      Content="Port rules"
+                                                      IsChecked="{Binding PortRules.Enabled}"
+                                                      ToolTip.Tip="When Port rules are on, they watch for conditions that can derail a Client-app turn on local models, and can pause runaway looping. Turn them off to simply forward turns to llama-server without intervention. Cloud models do not use Port rules." />
+                                            <views:HelpTopicLink TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                 ToolTip.Tip="Open the Port rules Help topic." />
+                                        </StackPanel>
+                                        <Expander Classes="fieldHeight"
+                                                  Header="Advanced"
+                                                  IsExpanded="False"
+                                                  ToolTip.Tip="How a local Client-app chat is sent on to llama-server: Compact when Context fills, optionally pause a tool loop or hang, and retry a load. One checkbox turns off the outlined group it sits in. Cloud models do not use these.">
+                                            <Expander.Resources>
+                                                <x:Double x:Key="ExpanderMinHeight">32</x:Double>
+                                                <Thickness x:Key="ExpanderHeaderPadding">8,0,0,0</Thickness>
+                                                <Thickness x:Key="ExpanderChevronMargin">8,0,8,0</Thickness>
+                                            </Expander.Resources>
+                                            <StackPanel Spacing="10" Margin="0,8,0,0"
+                                                        Grid.IsSharedSizeScope="True"
+                                                        IsEnabled="{Binding PortRules.Enabled}">
+                                                <TextBlock TextWrapping="Wrap"
+                                                           FontSize="11"
+                                                           Opacity="0.85"
+                                                           Text="One checkbox turns off the outlined group it sits in. Compact, omit, and Max pictures only change the pack forwarded to llama-server. The Client app still has the full chat. Client-app max tokens and Stop strings are a choice, not on/off." />
+                                                <StackPanel.Styles>
+                                                    <Style Selector="NumericUpDown">
+                                                        <Setter Property="HorizontalAlignment" Value="Stretch" />
+                                                    </Style>
+                                                    <Style Selector="ComboBox">
+                                                        <Setter Property="HorizontalAlignment" Value="Stretch" />
+                                                    </Style>
+                                                    <Style Selector="Border.portRuleGroup">
+                                                        <Setter Property="Background" Value="{DynamicResource FluxMutedBackground}" />
+                                                        <Setter Property="BorderBrush" Value="{DynamicResource FluxMutedBorder}" />
+                                                        <Setter Property="BorderThickness" Value="1" />
+                                                        <Setter Property="CornerRadius" Value="4" />
+                                                        <Setter Property="Padding" Value="8" />
+                                                    </Style>
+                                                </StackPanel.Styles>
+                                                <Border Classes="portRuleGroup">
+                                                    <StackPanel Spacing="8">
+                                                        <DockPanel>
+                                                            <views:HelpTopicLink DockPanel.Dock="Right"
+                                                                                 TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                 ToolTip.Tip="Open the Port rules Help topic." />
+                                                            <CheckBox FontWeight="SemiBold"
+                                                                      Content="Compact"
+                                                                      IsChecked="{Binding PortRules.CompactEnabled}"
+                                                                      ToolTip.Tip="When off, AI-FluxMux does not shorten older turns forwarded to llama-server. The Client app still has the full chat." />
+                                                        </DockPanel>
+                                                        <Grid ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto" RowSpacing="6"
+                                                              IsEnabled="{Binding PortRules.CompactEnabled}">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabelA" />
+                                                                <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldA" />
+                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabelB" />
+                                                                <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldB" />
+                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabelC" />
+                                                                <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldC" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Watermark %"
+                                                                       ToolTip.Tip="Compact when the forwarded prompt reaches this percent of Context, or when Context is already filling." />
+                                                            <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="50" Maximum="95"
+                                                                           Value="{Binding PortRules.CompactWatermarkPercent}" />
+                                                            <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" Text="Keep turns"
+                                                                       ToolTip.Tip="Recent conversational turns left intact when Compact shortens older history." />
+                                                            <NumericUpDown Grid.Row="0" Grid.Column="3" Minimum="4" Maximum="24"
+                                                                           Value="{Binding PortRules.CompactKeepTurns}" />
+                                                            <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" Text="Tool keep turns"
+                                                                       ToolTip.Tip="When the chat has tools, Compact keeps at least this many recent turns." />
+                                                            <NumericUpDown Grid.Row="0" Grid.Column="5" Minimum="6" Maximum="32"
+                                                                           Value="{Binding PortRules.CompactToolKeepTurns}" />
+                                                            <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Headroom"
+                                                                       ToolTip.Tip="Tokens reserved so prompt plus reply still fit Context after Compact or a max-tokens clamp." />
+                                                            <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="64" Maximum="4096"
+                                                                           Value="{Binding PortRules.CompactHeadroom}" />
+                                                            <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" Text="Preserved user chars"
+                                                                       ToolTip.Tip="How much of an older user task Compact may pin when that turn would otherwise drop." />
+                                                            <NumericUpDown Grid.Row="1" Grid.Column="3" Minimum="500" Maximum="20000"
+                                                                           Value="{Binding PortRules.CompactPreservedUserChars}" />
+                                                            <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="6"
+                                                                      VerticalAlignment="Center"
+                                                                      Content="After Compact, skip prefix cache this turn"
+                                                                      IsChecked="{Binding PortRules.SkipPrefixCacheAfterCompact}"
+                                                                      ToolTip.Tip="Compact breaks the prompt prefix. This turn sends cache_prompt false. Session --no-cache-prompt stays on the model profile." />
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
+
+                                                <Border Classes="portRuleGroup">
+                                                    <StackPanel Spacing="8">
+                                                        <DockPanel>
+                                                            <views:HelpTopicLink DockPanel.Dock="Right"
+                                                                                 TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                 ToolTip.Tip="Open the Port rules Help topic." />
+                                                            <CheckBox FontWeight="SemiBold"
+                                                                      Content="Omit"
+                                                                      IsChecked="{Binding PortRules.OmitEnabled}"
+                                                                      ToolTip.Tip="When off, older tool bodies stay in the pack forwarded to llama-server. Mill counts still see every result. The Client app still has the full output." />
+                                                        </DockPanel>
+                                                        <Grid ColumnSpacing="8" RowDefinitions="Auto" RowSpacing="6"
+                                                              IsEnabled="{Binding PortRules.OmitEnabled}">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabelA" />
+                                                                <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldA" />
+                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabelB" />
+                                                                <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldB" />
+                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabelC" />
+                                                                <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldC" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Keep recent results"
+                                                                       ToolTip.Tip="Full tool bodies kept. Older ones are stubbed so llama-server still sees that the call ran." />
+                                                            <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="4" Maximum="64"
+                                                                           Value="{Binding PortRules.KeepRecentResults}" />
+                                                            <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" Text="Pin latest shell"
+                                                                       ToolTip.Tip="Recent shell results pinned even when omit is dropping other bodies." />
+                                                            <NumericUpDown Grid.Row="0" Grid.Column="3" Minimum="1" Maximum="16"
+                                                                           Value="{Binding PortRules.PinLatestShellResults}" />
+                                                            <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" Text="Min chars to omit"
+                                                                       ToolTip.Tip="Tool bodies shorter than this stay forwarded." />
+                                                            <NumericUpDown Grid.Row="0" Grid.Column="5" Minimum="80" Maximum="2000"
+                                                                           Value="{Binding PortRules.MinResultCharsToClear}" />
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
+
+                                                <Grid ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto" RowSpacing="8">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="*" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Border Grid.Row="0" Grid.Column="0" Classes="portRuleGroup">
+                                                        <StackPanel Spacing="4">
+                                                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                                                                <CheckBox VerticalAlignment="Center" Content="Mill at omitted"
+                                                                          IsChecked="{Binding PortRules.MillAtOmittedEnabled}"
+                                                                          ToolTip.Tip="End this Client-app turn when this many older tool results were omitted and the last tools are not a closed loop." />
+                                                                <NumericUpDown Grid.Column="1" Minimum="8" Maximum="128"
+                                                                               IsEnabled="{Binding PortRules.MillAtOmittedEnabled}"
+                                                                               Value="{Binding PortRules.RunawayOmittedResults}" />
+                                                                <views:HelpTopicLink Grid.Column="2"
+                                                                                     TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                     ToolTip.Tip="Open the Port rules Help topic." />
+                                                            </Grid>
+                                                            <TextBlock FontSize="11" Opacity="0.75"
+                                                                       IsVisible="{Binding PortRules.MillAtOmittedTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                                       Text="{Binding PortRules.MillAtOmittedTally}" />
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Grid.Row="0" Grid.Column="1" Classes="portRuleGroup">
+                                                        <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                                                            <CheckBox VerticalAlignment="Center" Content="Closed-loop lookback"
+                                                                      IsChecked="{Binding PortRules.ClosedLoopLookbackEnabled}"
+                                                                      ToolTip.Tip="How many recent tools FluxMux inspects. When off, Mill at omitted ends the turn at its count without that check." />
+                                                            <NumericUpDown Grid.Column="1" Minimum="2" Maximum="16"
+                                                                           IsEnabled="{Binding PortRules.ClosedLoopLookbackEnabled}"
+                                                                           Value="{Binding PortRules.ClosedLoopMillLookback}" />
+                                                            <views:HelpTopicLink Grid.Column="2"
+                                                                                 TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                 ToolTip.Tip="Open the Port rules Help topic." />
+                                                        </Grid>
+                                                    </Border>
+                                                    <Border Grid.Row="0" Grid.Column="2" Classes="portRuleGroup">
+                                                        <StackPanel Spacing="4">
+                                                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                                                                <CheckBox VerticalAlignment="Center" Content="Closed-loop mill ceiling"
+                                                                          IsChecked="{Binding PortRules.ClosedLoopCeilingEnabled}"
+                                                                          ToolTip.Tip="Last-resort pause when this many older tool results were omitted, even if the last tools still look useful. A valid closed loop may pass Mill at omitted (32) and keep going until this ceiling." />
+                                                                <NumericUpDown Grid.Column="1" Minimum="32" Maximum="512"
+                                                                               IsEnabled="{Binding PortRules.ClosedLoopCeilingEnabled}"
+                                                                               Value="{Binding PortRules.ClosedLoopRunawayOmittedResults}" />
+                                                                <views:HelpTopicLink Grid.Column="2"
+                                                                                     TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                     ToolTip.Tip="Open the Port rules Help topic." />
+                                                            </Grid>
+                                                            <TextBlock FontSize="11" Opacity="0.75"
+                                                                       IsVisible="{Binding PortRules.ClosedLoopCeilingTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                                       Text="{Binding PortRules.ClosedLoopCeilingTally}" />
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Classes="portRuleGroup">
+                                                        <StackPanel Spacing="8">
+                                                            <DockPanel>
+                                                                <views:HelpTopicLink DockPanel.Dock="Right"
+                                                                                     TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                     ToolTip.Tip="Open the Port rules Help topic." />
+                                                                <CheckBox FontWeight="SemiBold"
+                                                                          Content="Rapid-churn"
+                                                                          IsChecked="{Binding PortRules.RapidChurnEnabled}"
+                                                                          ToolTip.Tip="End this Client-app turn when tools arrive closer together than Seconds, this many times in a row, after omitted has passed Mill at omitted." />
+                                                            </DockPanel>
+                                                            <TextBlock FontSize="11" Opacity="0.75"
+                                                                       IsVisible="{Binding PortRules.RapidChurnTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                                       Text="{Binding PortRules.RapidChurnTally}" />
+                                                            <Grid ColumnSpacing="8" ColumnDefinitions="Auto,*,Auto,*"
+                                                                  IsEnabled="{Binding PortRules.RapidChurnEnabled}">
+                                                                <TextBlock VerticalAlignment="Center" Text="Seconds"
+                                                                           ToolTip.Tip="Turns closer together than this, with omitted past the mill count, count as rapid churn." />
+                                                                <NumericUpDown Grid.Column="1" Minimum="1" Maximum="15"
+                                                                               Value="{Binding PortRules.RapidChurnSeconds}" />
+                                                                <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Consecutive"
+                                                                           ToolTip.Tip="How many rapid turns in a row end this Client-app turn even when the lookback looks like a closed loop." />
+                                                                <NumericUpDown Grid.Column="3" Minimum="2" Maximum="12"
+                                                                               Value="{Binding PortRules.RapidChurnConsecutive}" />
+                                                            </Grid>
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Grid.Row="1" Grid.Column="2" Classes="portRuleGroup">
+                                                        <StackPanel Spacing="4">
+                                                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                                                                <CheckBox VerticalAlignment="Center" Content="Observe-only mill"
+                                                                          IsChecked="{Binding PortRules.ObserveOnlyMillEnabled}"
+                                                                          ToolTip.Tip="End this Client-app turn when this many recent tools are screenshot/python/run with no file edit, even before Mill at omitted." />
+                                                                <NumericUpDown Grid.Column="1" Minimum="4" Maximum="24"
+                                                                               IsEnabled="{Binding PortRules.ObserveOnlyMillEnabled}"
+                                                                               Value="{Binding PortRules.ObserveOnlyMillCount}" />
+                                                                <views:HelpTopicLink Grid.Column="2"
+                                                                                     TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                     ToolTip.Tip="Open the Port rules Help topic." />
+                                                            </Grid>
+                                                            <TextBlock FontSize="11" Opacity="0.75"
+                                                                       IsVisible="{Binding PortRules.ObserveOnlyTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                                       Text="{Binding PortRules.ObserveOnlyTally}" />
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Grid.Row="2" Grid.Column="0" Classes="portRuleGroup">
+                                                        <StackPanel Spacing="4">
+                                                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                                                                <CheckBox VerticalAlignment="Center" Content="Max pictures"
+                                                                          IsChecked="{Binding PortRules.MaxPicturesEnabled}"
+                                                                          ToolTip.Tip="Oldest pictures are dropped from the pack forwarded to llama-server. The Client app still has the album." />
+                                                                <NumericUpDown Grid.Column="1" Minimum="1" Maximum="8"
+                                                                               IsEnabled="{Binding PortRules.MaxPicturesEnabled}"
+                                                                               Value="{Binding PortRules.MaxForwardedImages}" />
+                                                                <views:HelpTopicLink Grid.Column="2"
+                                                                                     TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                     ToolTip.Tip="Open the Port rules Help topic." />
+                                                            </Grid>
+                                                            <TextBlock FontSize="11" Opacity="0.75"
+                                                                       IsVisible="{Binding PortRules.MaxPicturesTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                                       Text="{Binding PortRules.MaxPicturesTally}" />
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Grid.Row="2" Grid.Column="1" Classes="portRuleGroup">
+                                                        <StackPanel Spacing="4">
+                                                            <DockPanel>
+                                                                <views:HelpTopicLink DockPanel.Dock="Right"
+                                                                                     TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                     ToolTip.Tip="Open the Port rules Help topic." />
+                                                                <CheckBox VerticalAlignment="Center" Content="Repeated command"
+                                                                          IsChecked="{Binding PortRules.RepeatedCommandEnabled}"
+                                                                          ToolTip.Tip="End this Client-app turn when the Client app sends the same shell command again without reading the last result." />
+                                                            </DockPanel>
+                                                            <TextBlock FontSize="11" Opacity="0.75"
+                                                                       IsVisible="{Binding PortRules.RepeatedCommandTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                                       Text="{Binding PortRules.RepeatedCommandTally}" />
+                                                        </StackPanel>
+                                                    </Border>
+                                                    <Border Grid.Row="2" Grid.Column="2" Classes="portRuleGroup">
+                                                        <StackPanel Spacing="4">
+                                                            <DockPanel>
+                                                                <views:HelpTopicLink DockPanel.Dock="Right"
+                                                                                     TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                     ToolTip.Tip="Open the Port rules Help topic." />
+                                                                <CheckBox VerticalAlignment="Center" Content="Diagnostic dump"
+                                                                          IsChecked="{Binding PortRules.DiagnosticDumpEnabled}"
+                                                                          ToolTip.Tip="End this Client-app turn when the Client app dumps a large diagnostic artifact instead of editing a project file." />
+                                                            </DockPanel>
+                                                            <TextBlock FontSize="11" Opacity="0.75"
+                                                                       IsVisible="{Binding PortRules.DumpTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                                       Text="{Binding PortRules.DumpTally}" />
+                                                        </StackPanel>
+                                                    </Border>
+                                                </Grid>
+
+                                                <Border Classes="portRuleGroup">
+                                                    <StackPanel Spacing="8">
+                                                        <DockPanel>
+                                                            <views:HelpTopicLink DockPanel.Dock="Right"
+                                                                                 TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                 ToolTip.Tip="Open the Port rules Help topic." />
+                                                            <CheckBox FontWeight="SemiBold"
+                                                                      Content="Hang"
+                                                                      IsChecked="{Binding PortRules.HangEnabled}"
+                                                                      ToolTip.Tip="When off, AI-FluxMux does not open the hang prompt or abort a quiet llama-server stream." />
+                                                        </DockPanel>
+                                                        <TextBlock FontSize="11" Opacity="0.75"
+                                                                   IsVisible="{Binding PortRules.HangTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                                   Text="{Binding PortRules.HangTally}" />
+                                                        <Grid ColumnSpacing="8" RowDefinitions="Auto,Auto" RowSpacing="6"
+                                                              IsEnabled="{Binding PortRules.HangEnabled}">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabelA" />
+                                                                <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldA" />
+                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabelB" />
+                                                                <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldB" />
+                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabelC" />
+                                                                <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldC" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="First-byte seconds"
+                                                                       ToolTip.Tip="Open the hang prompt if llama-server sends nothing for this long (non-thinking turns)." />
+                                                            <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="5" Maximum="120"
+                                                                           Value="{Binding PortRules.FirstByteSeconds}" />
+                                                            <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" Text="Think tokens / sec"
+                                                                       ToolTip.Tip="Used to wait out a thinking budget before the hang prompt." />
+                                                            <NumericUpDown Grid.Row="0" Grid.Column="3" Minimum="5" Maximum="80"
+                                                                           Value="{Binding PortRules.ThinkTokensPerSecond}" />
+                                                            <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" Text="Max think first-byte"
+                                                                       ToolTip.Tip="Cap on how long a thinking model may sit before the hang prompt." />
+                                                            <NumericUpDown Grid.Row="0" Grid.Column="5" Minimum="30" Maximum="300"
+                                                                           Value="{Binding PortRules.MaxThinkFirstByteSeconds}" />
+                                                            <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Stall seconds"
+                                                                       ToolTip.Tip="Open the hang prompt if llama-server goes silent mid-stream for this long." />
+                                                            <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="10" Maximum="180"
+                                                                           Value="{Binding PortRules.StallSeconds}" />
+                                                            <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" Text="Wait-longer seconds"
+                                                                       ToolTip.Tip="Extra quiet time if you choose to keep this turn open." />
+                                                            <NumericUpDown Grid.Row="1" Grid.Column="3" Minimum="15" Maximum="180"
+                                                                           Value="{Binding PortRules.WaitLongerSeconds}" />
+                                                            <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" Text="Decision seconds"
+                                                                       ToolTip.Tip="How long the hang prompt waits for a choice before ending the turn." />
+                                                            <NumericUpDown Grid.Row="1" Grid.Column="5" Minimum="10" Maximum="120"
+                                                                           Value="{Binding PortRules.DecisionSeconds}" />
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
+
+                                                <Border Classes="portRuleGroup">
+                                                    <StackPanel Spacing="8">
+                                                        <DockPanel>
+                                                            <views:HelpTopicLink DockPanel.Dock="Right"
+                                                                                 TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                 ToolTip.Tip="Open the Port rules Help topic." />
+                                                            <CheckBox FontWeight="SemiBold"
+                                                                      Content="503"
+                                                                      IsChecked="{Binding PortRules.Loading503Enabled}"
+                                                                      ToolTip.Tip="Retry llama-server Loading model / 503 so the Client app does not mark Port dead during a cold load. FluxMux's own unused Port 503 is not retried." />
+                                                        </DockPanel>
+                                                        <TextBlock FontSize="11" Opacity="0.75"
+                                                                   IsVisible="{Binding PortRules.Loading503Tally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                                   Text="{Binding PortRules.Loading503Tally}" />
+                                                        <Grid ColumnSpacing="8" ColumnDefinitions="Auto,*,Auto,*"
+                                                              IsEnabled="{Binding PortRules.Loading503Enabled}">
+                                                            <TextBlock VerticalAlignment="Center" Text="Retries"
+                                                                       ToolTip.Tip="Retry llama-server Loading model / 503 this many times. FluxMux's own unused Port 503 is not retried." />
+                                                            <NumericUpDown Grid.Column="1" Minimum="0" Maximum="12"
+                                                                           Value="{Binding PortRules.LoadingRetryCount}" />
+                                                            <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Delay seconds"
+                                                                       ToolTip.Tip="Wait this long between Loading model retries. Total wait is capped." />
+                                                            <NumericUpDown Grid.Column="3" Minimum="1" Maximum="10"
+                                                                           Value="{Binding PortRules.LoadingRetryDelaySeconds}" />
+                                                        </Grid>
+                                                    </StackPanel>
+                                                </Border>
+
+                                                <Border Classes="portRuleGroup">
+                                                    <DockPanel>
+                                                    <views:HelpTopicLink DockPanel.Dock="Right"
+                                                                         TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                         ToolTip.Tip="Open the Port rules Help topic." />
+                                                    <Grid ColumnSpacing="8" RowDefinitions="Auto" ColumnDefinitions="Auto,*,Auto,*">
+                                                        <TextBlock VerticalAlignment="Center" Text="Client-app max tokens"
+                                                                   ToolTip.Tip="Whether the profile overlay, the Client app, or the smaller of the two sets max tokens. Reply is still clamped so prompt plus reply fit Context." />
+                                                        <ComboBox Grid.Column="1"
+                                                                  ItemsSource="{Binding PortRules.ClientMaxTokensModeOptions}"
+                                                                  SelectedItem="{Binding PortRules.SelectedClientMaxTokensMode}" />
+                                                        <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Stop strings"
+                                                                   ToolTip.Tip="Pass Client-app stop through, or ignore a list that can short-loop or cut thinking." />
+                                                        <ComboBox Grid.Column="3"
+                                                                  ItemsSource="{Binding PortRules.StopHygieneModeOptions}"
+                                                                  SelectedItem="{Binding PortRules.SelectedStopHygieneMode}" />
+                                                    </Grid>
+                                                    </DockPanel>
+                                                </Border>
+
+                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                    <Button Content="Save Port rules"
+                                                            Command="{Binding PortRules.SaveCommand}"
+                                                            ToolTip.Tip="Write port_forwarding_rules.json next to fluxmux_config.json and use these numbers on the next Client-app turn." />
+                                                    <Button Content="Load Port rules"
+                                                            Command="{Binding PortRules.LoadSavedCommand}"
+                                                            ToolTip.Tip="Throw away unsaved edits and put back the last saved Port rules file. If that file is missing, show the built-in defaults." />
+                                                    <Button Content="Revert to defaults"
+                                                            Command="{Binding PortRules.ResetCommand}"
+                                                            ToolTip.Tip="Fill the built-in Compact, omit, mill, hang, 503, cache, max tokens, and stop numbers. Save Port rules to keep them, or Load Port rules to put the last saved file back." />
+                                                </StackPanel>
+                                                <TextBlock TextWrapping="Wrap"
+                                                           FontSize="11"
+                                                           Opacity="0.85"
+                                                           IsVisible="{Binding PortRules.StatusText, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
+                                                           views:MarkedText.Source="{Binding PortRules.StatusText}" />
+                                                <TextBlock TextWrapping="Wrap"
+                                                           FontSize="11"
+                                                           Opacity="0.85"
+                                                           Text="Every Client app on Port shares these numbers. Save applies on the next local turn without reloading llama-server." />
+                                            </StackPanel>
+                                        </Expander>
+                                        </DockPanel>
                                         <TextBlock TextWrapping="Wrap"
                                                    FontSize="11"
-                                                   FontWeight="SemiBold"
-                                                   Text="Managed local models use llama-server." />
-                                        <StackPanel Orientation="Horizontal" Spacing="6">
-                                            <Button Content="Test Server Readiness" Command="{Binding TestLocalServerReadinessCommand}" ToolTip.Tip="Checks that llama-server is installed, the model folder exists, and the ports from Endpoint settings are free. Does not start a local model." />
-                                        </StackPanel>
+                                                   Opacity="0.85"
+                                                   Text="When Port rules are on, they watch for conditions that can derail a Client-app turn on local models, and can pause runaway looping. Turn them off to simply forward turns to llama-server without intervention. Cloud models do not use Port rules." />
                                     </StackPanel>
                                 </Border>
 
                                 <Border Background="{DynamicResource FluxServersTintBlueBackground}" BorderBrush="{DynamicResource FluxServersTintBlueBorder}" BorderThickness="1" CornerRadius="6" Padding="10">
                                     <StackPanel Spacing="8">
                                         <TextBlock FontWeight="SemiBold" Text="Cloud provider" />
-                                        <TextBlock TextWrapping="Wrap" Text="{Binding CloudCredentialsHelpText}" Opacity="0.75" FontSize="11" />
                                         <Grid ColumnDefinitions="Auto,*,Auto,2*,Auto,Auto" ColumnSpacing="8">
                                             <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Cloud AI Model Provider" />
                                             <ComboBox Grid.Column="1"
@@ -1186,6 +1723,7 @@
                                             <Button Grid.Column="4" Content="Validate Cloud Key" Command="{Binding ValidateCloudCommand}" ToolTip.Tip="Asks the cloud company if this key works. Paste or save the key first." />
                                             <Button Grid.Column="5" Content="Save Key" Command="{Binding SaveCloudApiKeyCommand}" ToolTip.Tip="Stores the key on this computer. Asterisks stay in the box to show a key is saved, without showing the real key." />
                                         </Grid>
+                                        <TextBlock TextWrapping="Wrap" Text="{Binding CloudCredentialsHelpText}" Opacity="0.75" FontSize="11" />
                                         <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8" IsVisible="{Binding ShowCustomOpenAiCompatibleSettings}">
                                             <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Base URL" />
                                             <TextBox Grid.Column="1"
@@ -1236,10 +1774,6 @@
                                 Padding="10,8">
                             <StackPanel Spacing="8">
                                 <TextBlock FontWeight="SemiBold" Text="Model profile pack" />
-                                <TextBlock FontSize="11"
-                                           Opacity="0.85"
-                                           TextWrapping="Wrap"
-                                           Text="Export writes a temporary JSON pack (no API keys). Import patches the live fluxmux_config.json with pack contents, but only if the pack coding is clean. Any imported profiles with existing name but different settings are skipped; profiles with existing settings but different name are skipped. See Help: Model profile packs." />
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button Content="Export model profiles"
                                             Command="{Binding ExportModelProfilesCommand}"
@@ -1248,6 +1782,10 @@
                                             Command="{Binding ImportModelProfilesCommand}"
                                             ToolTip.Tip="Writes a pre-import export next to fluxmux_config.json first, then patches from the chosen pack. Rejects secrets, scripts, and a full fluxmux_config.json. Skips a local row when the .gguf is not in the Model Directory, or when Images is on and no vision projector (mmproj) is found. Does not overwrite a live row that already exists with different settings. If rows are added, also saves fluxmux_config.json.bak-profiles-…. Each skip is listed on Diagnostics." />
                                 </StackPanel>
+                                <TextBlock FontSize="11"
+                                           Opacity="0.85"
+                                           TextWrapping="Wrap"
+                                           Text="Export writes a temporary JSON pack (no API keys). Import patches the live fluxmux_config.json with pack contents, but only if the pack coding is clean. Any imported profiles with existing name but different settings are skipped; profiles with existing settings but different name are skipped. See Help: Model profile packs." />
                             </StackPanel>
                         </Border>
                         <GroupBox Grid.Row="1" Header="Cloud Profiles">
@@ -1262,11 +1800,6 @@
                                                    FontWeight="SemiBold"
                                                    Foreground="{DynamicResource FluxHeadingForeground}"
                                                    Text="Create a cloud model profile" />
-                                        <TextBlock FontSize="11"
-                                                   Opacity="0.88"
-                                                   Foreground="{DynamicResource FluxSecondaryForeground}"
-                                                   TextWrapping="Wrap"
-                                                   views:MarkedText.Source="{Binding CloudModelIdHelpText}" />
                                         <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8" RowSpacing="6">
                                             <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Provider" />
                                             <ComboBox Grid.Column="1"
@@ -1296,13 +1829,17 @@
                                                     Command="{Binding CreateNewCloudModelProfileCommand}"
                                                     views:MarkedText.Tip="Creates a locked default for this cloud model. Run **Validate to endpoint** before it can be used in Quick Select." />
                                         </Grid>
+                                        <TextBlock FontSize="11"
+                                                   Opacity="0.88"
+                                                   Foreground="{DynamicResource FluxSecondaryForeground}"
+                                                   TextWrapping="Wrap"
+                                                   views:MarkedText.Source="{Binding CloudModelIdHelpText}" />
                                     </StackPanel>
                                 </Border>
                                 <StackPanel Spacing="6">
                                     <TextBlock FontSize="12"
                                                FontWeight="SemiBold"
                                                Text="Existing cloud profiles" />
-                                    <TextBlock FontSize="11" Opacity="0.75" TextWrapping="Wrap" views:MarkedText.Source="Locked default model profiles appear below after Creation. Click the padlock to unlock and edit, rename, or replace AI-FluxMux auto settings; click it again to lock. Provider and Model id live in Detailed settings and save with **Save profile**. If **Validate to endpoint** fails, change those fields, **Save profile**, then **Validate to endpoint** again. On successful validation, the profile becomes an available set up option for the Quick Select tab. **Make New Variant** copies the current profile for tweaking as a new model profile variant, with a different settings package. Deleting a default model profile removes that model and all its variants from AI-FluxMux after confirmation." />
                                 <ListBox x:Name="CloudVariantList"
                                          Classes="profileTree"
                                          ItemsSource="{Binding CloudVariantTreeItems}"
@@ -1416,6 +1953,7 @@
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
                                 </ListBox>
+                                    <TextBlock FontSize="11" Opacity="0.75" TextWrapping="Wrap" views:MarkedText.Source="Locked default model profiles appear in the list after Creation. Click the padlock to unlock and edit, rename, or replace AI-FluxMux auto settings; click it again to lock. Provider and Model id live in Detailed settings and save with **Save profile**. If **Validate to endpoint** fails, change those fields, **Save profile**, then **Validate to endpoint** again. On successful validation, the profile becomes an available set up option for the Quick Select tab. **Make New Variant** copies the current profile for tweaking as a new model profile variant, with a different settings package. Deleting a default model profile removes that model and all its variants from AI-FluxMux after confirmation." />
                                 </StackPanel>
 
 
@@ -1451,7 +1989,6 @@
                                     <TextBlock FontSize="12"
                                                FontWeight="SemiBold"
                                                Text="Existing local profiles" />
-                                    <TextBlock FontSize="11" Opacity="0.75" TextWrapping="Wrap" views:MarkedText.Source="Locked default model profiles appear below after Creation. Click the padlock to unlock and edit, rename, or replace AI-FluxMux auto settings; click it again to lock. If **Validate to endpoint** fails, change the settings, **Save profile**, then **Validate to endpoint** again. On successful validation, the profile becomes an available set up option for the Quick Select tab. **Make New Variant** copies the current profile for tweaking as a new model profile variant, with a different settings package. Deleting a default model profile removes that model and all its variants from AI-FluxMux after confirmation." />
                                 <ListBox x:Name="LocalVariantList"
                                          Classes="profileTree"
                                          ItemsSource="{Binding LocalVariantTreeItems}"
@@ -1565,6 +2102,7 @@
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
                                 </ListBox>
+                                    <TextBlock FontSize="11" Opacity="0.75" TextWrapping="Wrap" views:MarkedText.Source="Locked default model profiles appear in the list after Creation. Click the padlock to unlock and edit, rename, or replace AI-FluxMux auto settings; click it again to lock. If **Validate to endpoint** fails, change the settings, **Save profile**, then **Validate to endpoint** again. On successful validation, the profile becomes an available set up option for the Quick Select tab. **Make New Variant** copies the current profile for tweaking as a new model profile variant, with a different settings package. Deleting a default model profile removes that model and all its variants from AI-FluxMux after confirmation." />
                                 </StackPanel>
 
 
@@ -1586,9 +2124,7 @@
 
                         <GroupBox Header="Model switch performance testing">
                             <StackPanel Margin="8" Spacing="8">
-                                <TextBlock TextWrapping="Wrap"
-                                           Text="Nominate any two cloud or local model profiles; one as Profile A and one as Profile B. (Only profiles that have been validated to endpoint in their respective settings panels are offered.) The benchmark will launch Profile A with a nominal task, hand the chat to Profile B, then return it to Profile A and then score how well the task anchors survived the round trip." />
-                                <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                                <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
                                     <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Profile A" />
                                     <ComboBox Grid.Row="0"
                                               Grid.Column="1"
@@ -1622,10 +2158,14 @@
                                                 Content="Run test"
                                                 Command="{Binding RunSwitchBenchmarkCommand}" />
                                     </Grid>
-
-                                    <TextBlock Grid.Row="4" Grid.Column="0" VerticalAlignment="Top" Text="Result" />
-                                    <TextBox Grid.Row="4"
-                                             Grid.Column="1"
+                                </Grid>
+                                <TextBlock TextWrapping="Wrap"
+                                           FontSize="11"
+                                           Opacity="0.75"
+                                           Text="Nominate any two cloud or local model profiles; one as Profile A and one as Profile B. (Only profiles that have been validated to endpoint in their respective settings panels are offered.) The benchmark will launch Profile A with a nominal task, hand the chat to Profile B, then return it to Profile A and then score how well the task anchors survived the round trip." />
+                                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10" RowSpacing="8">
+                                    <TextBlock Grid.Column="0" VerticalAlignment="Top" Text="Result" />
+                                    <TextBox Grid.Column="1"
                                              IsReadOnly="True"
                                              Text="{Binding SwitchBenchmarkResultText}"
                                              AcceptsReturn="True"
@@ -1661,8 +2201,6 @@
 
                         <GroupBox Header="AI-FluxMux updates">
                             <StackPanel Margin="8" Spacing="8">
-                                <TextBlock TextWrapping="Wrap"
-                                           Text="Paste a feed URL when you have a public host. Leave this blank until then. The feed is a small JSON file: it can name a newer AI-FluxMux download, and it can replace Help.html (llama.cpp links, Harness yaml, and similar) without a new build. A sample file is fluxmux-updates.example.json in the AI-FluxMux folder." />
                                 <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
                                     <TextBlock VerticalAlignment="Center" Text="Update feed URL" />
                                     <TextBox Grid.Column="1"
@@ -1670,6 +2208,10 @@
                                              PlaceholderText="https://…/fluxmux-updates.json"
                                              ToolTip.Tip="Full http or https address of an AI-FluxMux update JSON file. Not required until you have a public host." />
                                 </Grid>
+                                <TextBlock TextWrapping="Wrap"
+                                           FontSize="11"
+                                           Opacity="0.85"
+                                           Text="Paste a feed URL when you have a public host. Leave this blank until then. The feed is a small JSON file: it can name a newer AI-FluxMux download, and it can replace Help.html (llama.cpp links, Harness yaml, and similar) without a new build. A sample file is fluxmux-updates.example.json in the AI-FluxMux folder." />
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button Content="Check for updates"
                                             Command="{Binding CheckForUpdatesCommand}">
@@ -1963,20 +2505,18 @@
         </TabControl>
 
         <GridSplitter Grid.Row="2"
+                      Theme="{StaticResource DiagnosticsSashTheme}"
                       ResizeDirection="Rows"
                       HorizontalAlignment="Stretch"
-                      Margin="-14,0,-14,0"
-                      Padding="0,3"
-                      Background="{DynamicResource FluxSplitter}"
                       ToolTip.Tip="Drag to make the log area taller or shorter." />
 
         <Border Grid.Row="3"
-                Margin="-14,0,-14,-14"
                 Padding="14,6,14,14"
                 ClipToBounds="True"
                 HorizontalAlignment="Stretch"
-                Background="{DynamicResource FluxPaneBackground}"
-                BorderThickness="0">
+                Background="{DynamicResource FluxChromeBackground}"
+                BorderBrush="{DynamicResource FluxChromeEdge}"
+                BorderThickness="0,1,0,0">
             <Grid RowDefinitions="Auto,*" RowSpacing="3">
                 <StackPanel Grid.Row="0" Spacing="4">
                     <Grid ColumnDefinitions="Auto,Auto,*,Auto,*" ColumnSpacing="6" ClipToBounds="True">
@@ -2020,7 +2560,7 @@
                                TextTrimming="CharacterEllipsis"
                                Text="{Binding LastRouteExplanationText}"
                                IsVisible="{Binding ShowLastRouteExplanationText}"
-                               ToolTip.Tip="Last Client-app completion through AI-FluxMux: route kind, overlay variant, compact, reload offer, and request id." />
+                               ToolTip.Tip="Settings for the loaded model profile that the name row does not show: Images, Reasoning, Context, GPU, temperature, and max tokens. Compact is for the last Client-app turn on this model." />
                     <Border IsVisible="{Binding HealthReportVisible}"
                             Background="{DynamicResource FluxTintAmberBackground}"
                             BorderBrush="{DynamicResource FluxTintAmberBorder}"
@@ -2046,41 +2586,42 @@
                             BorderThickness="1"
                             CornerRadius="4"
                             Padding="8,6">
-                        <DockPanel LastChildFill="True">
-                            <StackPanel DockPanel.Dock="Right"
-                                        Orientation="Horizontal"
-                                        Spacing="8"
-                                        Margin="8,0,0,0"
-                                        VerticalAlignment="Center">
+                        <StackPanel Spacing="8">
+                            <TextBlock views:MarkedText.Source="{Binding CloudRecommendText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="12" />
+                            <TextBlock Text="{Binding RecoveryHarnessRelaunchHint}"
+                                       TextWrapping="Wrap"
+                                       FontSize="11"
+                                       Opacity="0.88"
+                                       IsVisible="{Binding RecoveryHarnessRelaunchVisible}" />
+                            <WrapPanel>
                                 <Button Content="{Binding RecoveryWaitLongerLabel}"
+                                        Margin="0,0,8,4"
                                         IsVisible="{Binding RecoveryWaitLongerVisible}"
                                         Command="{Binding ContinueWaitingRecoveryCommand}"
-                                        views:MarkedText.Tip="Keep this Client-app turn open. llama-server keeps working. The same choices appear again if it stays quiet." />
+                                        views:MarkedText.Tip="{Binding RecoveryWaitLongerTooltip}" />
                                 <Button Content="{Binding RecoveryResumeLabel}"
+                                        Margin="0,0,8,4"
                                         Command="{Binding ResumeCurrentModelRecoveryCommand}"
                                         views:MarkedText.Tip="{Binding RecoveryResumeTooltip}" />
+                                <Button Content="{Binding RecoverySteerLabel}"
+                                        Margin="0,0,8,4"
+                                        IsVisible="{Binding RecoverySteerVisible}"
+                                        Command="{Binding SteerPortRuleRecoveryCommand}"
+                                        views:MarkedText.Tip="{Binding RecoverySteerTooltip}" />
                                 <Button Content="{Binding RecoverySwitchLocalLabel}"
+                                        Margin="0,0,8,4"
                                         IsVisible="{Binding RecoverySwitchLocalVisible}"
                                         Command="{Binding SwitchRecoveryLocalCommand}"
                                         ToolTip.Tip="{Binding RecoverySwitchLocalTooltip}" />
                                 <Button Content="{Binding RecoverySwitchCloudLabel}"
+                                        Margin="0,0,8,4"
                                         IsVisible="{Binding RecoverySwitchCloudVisible}"
                                         Command="{Binding ApproveCloudRecommendCommand}"
                                         ToolTip.Tip="{Binding RecoverySwitchCloudTooltip}" />
-                            </StackPanel>
-                            <StackPanel>
-                                <TextBlock views:MarkedText.Source="{Binding CloudRecommendText}"
-                                           TextWrapping="Wrap"
-                                           FontSize="12"
-                                           VerticalAlignment="Center" />
-                                <TextBlock Text="{Binding RecoveryHarnessRelaunchHint}"
-                                           TextWrapping="Wrap"
-                                           FontSize="11"
-                                           Opacity="0.88"
-                                           Margin="0,4,0,0"
-                                           IsVisible="{Binding RecoveryHarnessRelaunchVisible}" />
-                            </StackPanel>
-                        </DockPanel>
+                            </WrapPanel>
+                        </StackPanel>
                     </Border>
                     <Border IsVisible="{Binding LocalReloadRecommendVisible}"
                             Background="{DynamicResource FluxTintBlueBackground}"
@@ -2089,27 +2630,27 @@
                             CornerRadius="4"
                             Padding="8,6"
                             views:MarkedText.Tip="{Binding LocalReloadRecommendTooltip}">
-                        <DockPanel LastChildFill="True">
-                            <StackPanel DockPanel.Dock="Right"
-                                        Orientation="Horizontal"
-                                        Spacing="8"
-                                        Margin="8,0,0,0"
-                                        VerticalAlignment="Center">
+                        <StackPanel Spacing="8">
+                            <TextBlock views:MarkedText.Source="{Binding LocalReloadRecommendText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="12" />
+                            <WrapPanel>
                                 <Button Content="Compact"
+                                        Margin="0,0,8,4"
                                         IsVisible="{Binding LocalReloadCompactVisible}"
                                         Command="{Binding CompactLocalReloadRecommendCommand}"
                                         ToolTip.Tip="Shorten older turns that AI-FluxMux forwards to the local model, but only when this chat is actually filling the loaded Context. The Client app still has the full chat. If the suggested model profile's Context is too small for this chat, Compact also loads that model profile." />
                                 <Button Content="Load suggested model profile"
+                                        Margin="0,0,8,4"
                                         IsVisible="{Binding LocalReloadLoadVisible}"
                                         Command="{Binding ApproveLocalReloadRecommendCommand}"
                                         views:MarkedText.Tip="Unload the model profile that is running now and start the suggested model profile named in the blue note. The new local starts without the in-memory reading of this chat. If that model profile's Context is smaller than this chat, the next turn may still fail unless you **Compact** first." />
-                                <Button Content="Keep current model profile" Command="{Binding DeclineLocalReloadRecommendCommand}" ToolTip.Tip="Keep the local model profile that is already loaded. Hide this suggestion for 15 minutes. Does not shorten what AI-FluxMux forwards." />
-                            </StackPanel>
-                            <TextBlock views:MarkedText.Source="{Binding LocalReloadRecommendText}"
-                                       TextWrapping="Wrap"
-                                       FontSize="12"
-                                       VerticalAlignment="Center" />
-                        </DockPanel>
+                                <Button Content="Keep current model profile"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DeclineLocalReloadRecommendCommand}"
+                                        ToolTip.Tip="Keep the local model profile that is already loaded. Hide this suggestion for 15 minutes. Does not shorten what AI-FluxMux forwards." />
+                            </WrapPanel>
+                        </StackPanel>
                     </Border>
                     <Border IsVisible="{Binding RecoveryReplacementVisible}"
                             Background="{DynamicResource FluxMutedBackground}"
@@ -2402,6 +2943,9 @@
         </Border>
     </Grid>
     </LayoutTransformControl>
+    <Canvas x:Name="DragGhostLayer"
+            IsHitTestVisible="False" />
+    </Panel>
 
 </Window>
 

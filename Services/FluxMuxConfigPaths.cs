@@ -10,6 +10,7 @@ namespace FluxMux.Avalonia.Services;
 public static class FluxMuxConfigPaths
 {
     public const string ConfigFileName = "fluxmux_config.json";
+    public const string PortRulesFileName = "port_forwarding_rules.json";
     public const string AppFolderName = "AI-FluxMux";
     public const string ProjectFileName = "FluxMux.Avalonia.csproj";
 
@@ -66,4 +67,22 @@ public static class FluxMuxConfigPaths
 
         return publicPath;
     }
+
+    public static string ResolveSibling(
+        string configPath,
+        string fileName)
+    {
+        var directory = Path.GetDirectoryName(configPath);
+        return string.IsNullOrWhiteSpace(directory)
+            ? fileName
+            : Path.Combine(directory, fileName);
+    }
+
+    public static string ResolvePortRulesPath(
+        string baseDirectory,
+        string applicationDataDirectory,
+        Func<string, bool> fileExists)
+        => ResolveSibling(
+            Resolve(baseDirectory, applicationDataDirectory, fileExists),
+            PortRulesFileName);
 }

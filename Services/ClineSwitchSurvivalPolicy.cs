@@ -7,25 +7,33 @@ namespace FluxMux.Avalonia.Services;
 /// model id <c>local</c>. They do not bind a task to a GGUF or cloud name.
 /// Live-Switch Testing only probes Port after each profile is ready — that
 /// is Cline's next message, not an in-flight Cline turn.
-/// Routing-dialog copy always covers Cline and Harness together: more than
-/// one Client app can use Port at once, so the Servers list is not a
-/// nomination of who is talking.
+/// Printed follow-through says Client app so any OpenAI-compatible app
+/// fits. Name Cline or Harness only on Help topics and Harness-only
+/// controls (yaml, Quick Select launcher). More than one Client app can
+/// use Port at once; the Servers list is not a nomination of who is talking.
 /// </summary>
 public static class ClineSwitchSurvivalPolicy
 {
-    public const string SameTaskAfterFailedTurnAdvice =
-        "This Cline turn is over. After a model that can take this thread is ready, the next message in this task can use it. Start a new task if the same error would repeat or Cline is looping a command.";
+    public const string SameTaskAfterFailedTurnAdvice = PortRulesPostMortem.PortRuleStopAdvice;
+
+    public const string MillStopAdvice = PortRulesPostMortem.PortRuleStopAdvice;
 
     public const string SameTaskAfterReloadAdvice =
-        "This Cline turn cannot stay open through a llama-server reload. After the new model is ready, the next message in this task can use it. Start a new task if the same error would repeat or Cline is looping a command.";
+        "This Client-app turn cannot stay open through a llama-server reload. After the new model is ready, the next message in this Client-app chat can use it if that app keeps the conversation. Start a new chat in the Client app if it does not pick up the new model.";
 
     public const string HarnessIfAlsoOnPortAdvice =
-        "If Harness is also using Port, do not continue that Harness chat after a llama-server reload — open Harness chat from that model's Quick Select slot.";
+        "A Client app may sit on reconnecting and not show a failed turn — do not continue that chat.";
 
     public static string FormatFailedTurnAdvice(string? endpointApp = null)
     {
         _ = endpointApp;
-        return SameTaskAfterFailedTurnAdvice + " " + HarnessIfAlsoOnPortAdvice;
+        return PortRulesPostMortem.PortRuleStopAdvice;
+    }
+
+    public static string FormatMillStopAdvice(string? endpointApp = null)
+    {
+        _ = endpointApp;
+        return PortRulesPostMortem.PortRuleStopAdvice;
     }
 
     public static string FormatReloadAdvice(string? endpointApp = null)

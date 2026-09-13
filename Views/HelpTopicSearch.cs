@@ -6,9 +6,20 @@ using Avalonia.Controls;
 
 namespace FluxMux.Avalonia.Views;
 
+/// <summary>
+/// Title and optional stable id stashed on the Help topic panel so the index
+/// can jump after a Word or feed update renames the Heading 2.
+/// </summary>
+public sealed class HelpTopicAnchor
+{
+    public required string Title { get; init; }
+    public string Id { get; init; } = string.Empty;
+}
+
 public sealed class HelpTopicEntry
 {
     public required string Title { get; init; }
+    public string Id { get; init; } = string.Empty;
     public Control? Target { get; init; }
     public string SearchText { get; init; } = string.Empty;
 
@@ -27,11 +38,12 @@ public sealed class HelpTopicEntry
 public static class HelpTopicSearch
 {
     /// <summary>
-    /// The topic a Help.html cross-reference points at. A link is written as
-    /// <c>href="#Topic title"</c> and matched on the visible Heading 2 text, because Word
-    /// cannot be asked to keep a generated anchor id in step with the topic it names.
-    /// Typing that address escapes the spaces and a Word bookmark drops the punctuation,
-    /// so the fallback comparison keeps letters and digits only.
+    /// The topic a Help.html cross-reference or a setting Help link points at.
+    /// A <c>topic.*</c> id is tried first so a Word or feed update can rename the
+    /// Heading 2 title. A link written as <c>href="#Topic title"</c> still matches
+    /// on the visible Heading 2 text. Typing that address escapes the spaces and a
+    /// Word bookmark drops the punctuation, so the fallback comparison keeps letters
+    /// and digits only.
     /// </summary>
     public static HelpTopicEntry? FindByReference(IEnumerable<HelpTopicEntry> topics, string? reference)
     {
@@ -42,6 +54,25 @@ public static class HelpTopicSearch
         }
 
         var candidates = topics.Where(topic => topic.IsTopic).ToList();
+        var byId = candidates.FirstOrDefault(topic =>
+            topic.Id.Length > 0
+            && topic.Id.Equals(wanted, StringComparison.OrdinalIgnoreCase));
+        if (byId is not null)
+        {
+            return byId;
+        }
+
+        var idKey = LettersAndDigits(wanted);
+        if (idKey.Length > 0)
+        {
+            var byIdKey = candidates.FirstOrDefault(topic =>
+                topic.Id.Length > 0 && LettersAndDigits(topic.Id) == idKey);
+            if (byIdKey is not null)
+            {
+                return byIdKey;
+            }
+        }
+
         var exact = candidates.FirstOrDefault(topic =>
             topic.Title.Trim().Equals(wanted, StringComparison.OrdinalIgnoreCase));
         if (exact is not null)

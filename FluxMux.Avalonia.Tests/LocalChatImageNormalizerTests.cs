@@ -123,6 +123,37 @@ public sealed class LocalChatImageNormalizerTests
         Assert.StartsWith("data:image/png;base64,", url, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Does_not_embed_markdown_pictures_from_system_or_tool_text()
+    {
+        const string remote = "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcTestThumb&s=10";
+        using var http = new HttpClient(new StaticImageHandler(OnePixelPng, "image/jpeg"));
+        var payload = new JsonObject
+        {
+            ["messages"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["role"] = "system",
+                    ["content"] = "Docs ![a](" + remote + ") ![b](" + remote + "?x=1) ![c](" + remote + "?x=2)"
+                },
+                new JsonObject
+                {
+                    ["role"] = "tool",
+                    ["content"] = "see ![d](" + remote + "?x=3)"
+                },
+                new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = "no picture, just text"
+                }
+            }
+        };
+
+        Assert.Equal(0, await LocalChatImageNormalizer.NormalizeAsync(payload, http));
+        Assert.False(LocalChatPayloadSignals.PayloadHasImage(payload));
+    }
+
     private static JsonObject MessagePayload(JsonObject part)
         => new()
         {

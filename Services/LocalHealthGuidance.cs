@@ -87,6 +87,34 @@ public static class LocalHealthGuidance
         return text[..177] + "...";
     }
 
+    /// <summary>
+    /// llama-server listens on the daemon port (usually Port+1). The public Port is
+    /// AI-FluxMux and stays up after idle park — probing it would mark a parked
+    /// local as launched.
+    /// </summary>
+    public static int ResolveLlamaHealthProbePort(bool managedAlive, int managedLocalPort, int publicPort)
+    {
+        if (managedAlive && managedLocalPort > 0 && managedLocalPort <= 65535)
+        {
+            return managedLocalPort;
+        }
+
+        if (publicPort < 1 || publicPort >= 65535)
+        {
+            return -1;
+        }
+
+        return publicPort + 1;
+    }
+
+    public static bool IsRouteNotStarted(string? status, string? details)
+    {
+        return (!string.IsNullOrWhiteSpace(status)
+                && status.Contains("not started", StringComparison.OrdinalIgnoreCase))
+            || (!string.IsNullOrWhiteSpace(details)
+                && details.Contains("not started", StringComparison.OrdinalIgnoreCase));
+    }
+
     public static string Build(
         bool ready,
         bool managedAlive,

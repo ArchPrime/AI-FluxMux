@@ -9,7 +9,7 @@ public static class ProfileEndpointValidationStamp
     public const string ValidatedUtcKey = "EndpointValidatedUtc";
     public const string WarningKey = "EndpointWarning";
 
-    public static void Apply(JsonObject profile, bool validated, string? warning)
+    public static void Apply(JsonObject profile, bool validated, string? warning, bool keepValidatedStamp = false)
     {
         if (validated)
         {
@@ -23,7 +23,11 @@ public static class ProfileEndpointValidationStamp
             return;
         }
 
-        profile.Remove(ValidatedUtcKey);
+        if (!keepValidatedStamp)
+        {
+            profile.Remove(ValidatedUtcKey);
+        }
+
         profile[WarningKey] = LocalHealthGuidance.FormatProfilePanelWarning(warning);
     }
 }

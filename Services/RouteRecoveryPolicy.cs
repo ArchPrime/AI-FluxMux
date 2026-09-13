@@ -11,16 +11,22 @@ public static class RouteRecoveryPolicy
     public const string ResumeWaitingLabel = "Keep current model — end this turn";
     public const string StayLocalContinueLabel = "Keep current model — this turn continues";
     public const string WaitLongerLabel = "Continue waiting";
+    public const string SendAnywayLabel = "Send this turn anyway";
+    public const string EndThisTurnLabel = "End this turn";
+    public const string SteerLabel = "Let me steer";
     public const string SwitchLabelPrefix = "Switch to";
     public const string CompactLabel = "Compact";
     public const string LoadSuggestedLabel = "Load suggested model profile";
     public const string KeepProfileLabel = "Keep current model profile";
     public const string WaitStatus = "wait";
+    public const string SteerStatus = "steer";
+    public const string PortRulePauseSource = "port_rule_pause";
     public const string LocalHangSource = "local_hang";
     public const string LocalHangAbortSource = "local_hang_abort";
     public const string CloudFailSource = "cloud_fail";
     public const string CapacitySource = "capacity";
     public const string LocalCannotSource = "local_cannot";
+    public const string ToolLoopSource = "tool_loop";
     public const string ReturnToLocalSource = CloudReturnToLocalPolicy.Source;
 
     public const string SwitchHarnessRelaunchSuffix = " — open Harness chat from this slot";
@@ -55,9 +61,19 @@ public static class RouteRecoveryPolicy
         => cloudReady;
 
     public static string FormatResumeLabel(string? source)
-        => IsHotHopSource(source)
+    {
+        if (IsPortRulePauseSource(source))
+        {
+            return EndThisTurnLabel;
+        }
+
+        return IsHotHopSource(source)
             ? StayLocalContinueLabel
             : ResumeWaitingLabel;
+    }
+
+    public static string FormatWaitLongerLabel(string? source)
+        => IsPortRulePauseSource(source) ? SendAnywayLabel : WaitLongerLabel;
 
     public static string FormatSwitchLabel(string? modelDisplayName, bool harnessNeedsRelaunch = false)
     {
@@ -68,17 +84,29 @@ public static class RouteRecoveryPolicy
         return harnessNeedsRelaunch ? label + SwitchHarnessRelaunchSuffix : label;
     }
 
-    public static string FormatResumeTooltip(string? endpointApp, bool turnContinues)
+    public static string FormatResumeTooltip(string? endpointApp, bool turnContinues, string? source = null)
     {
         _ = endpointApp;
+        if (IsPortRulePauseSource(source))
+        {
+            return "End this Client-app turn. llama-server is not asked.";
+        }
+
         if (turnContinues)
         {
             return "Keep the current model. This turn continues.";
         }
 
-        return "End this turn and keep the current model. This Cline turn is over. The next message in this task can still use this model. Start a new Cline task if the same error would repeat or Cline is looping a command. "
-            + ClineSwitchSurvivalPolicy.HarnessIfAlsoOnPortAdvice;
+        return "End this turn and keep the current model. " + ClineSwitchSurvivalPolicy.FormatFailedTurnAdvice();
     }
+
+    public static string FormatWaitLongerTooltip(string? source)
+        => IsPortRulePauseSource(source)
+            ? "Forward this request to llama-server once. Does not raise the saved Port rule."
+            : "Keep this Client-app turn open. llama-server keeps working. The same choices appear again if it stays quiet.";
+
+    public static string FormatSteerTooltip()
+        => "Finish this turn with a notice so you can send the next Client-app message and steer.";
 
     public static string FormatSwitchTooltip(string? endpointApp, bool cloud, bool turnContinues)
     {
@@ -106,8 +134,17 @@ public static class RouteRecoveryPolicy
     public static bool IsLocalHangAbortSource(string? source)
         => string.Equals(source, LocalHangAbortSource, StringComparison.OrdinalIgnoreCase);
 
+    public static bool IsToolLoopSource(string? source)
+        => string.Equals(source, ToolLoopSource, StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsPortRulePauseSource(string? source)
+        => string.Equals(source, PortRulePauseSource, StringComparison.OrdinalIgnoreCase);
+
     public static bool IsWaitStatus(string? status)
         => string.Equals(status, WaitStatus, StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsSteerStatus(string? status)
+        => string.Equals(status, SteerStatus, StringComparison.OrdinalIgnoreCase);
 
     public static bool IsTimeoutStatus(string? status)
         => string.Equals(status, "timeout", StringComparison.OrdinalIgnoreCase);

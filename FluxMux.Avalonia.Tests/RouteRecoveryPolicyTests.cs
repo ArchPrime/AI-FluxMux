@@ -60,7 +60,8 @@ public sealed class RouteRecoveryPolicyTests
             RouteRecoveryPolicy.FormatSwitchLabel("Gemini / gemini-flash", harnessNeedsRelaunch: true));
         Assert.Equal(RouteRecoveryPolicy.ResumeWaitingLabel, "Keep current model — end this turn");
         Assert.Equal(RouteRecoveryPolicy.WaitLongerLabel, "Continue waiting");
-        Assert.Contains("Quick Select", RouteRecoveryPolicy.HarnessRelaunchHint, System.StringComparison.Ordinal);
+        Assert.Contains("reconnecting", RouteRecoveryPolicy.HarnessRelaunchHint, System.StringComparison.Ordinal);
+        Assert.Contains("Client app", RouteRecoveryPolicy.HarnessRelaunchHint, System.StringComparison.Ordinal);
         Assert.False(RouteRecoveryPolicy.ShouldShowHarnessRelaunchHint(true, continueWaitingOffered: true));
         Assert.False(RouteRecoveryPolicy.ShouldShowHarnessRelaunchHint(
             true,
@@ -88,6 +89,46 @@ public sealed class RouteRecoveryPolicyTests
         Assert.True(RouteRecoveryPolicy.IsHotHopSource(RouteRecoveryPolicy.LocalCannotSource));
         Assert.True(RouteRecoveryPolicy.IsHotHopSource(CloudReturnToLocalPolicy.Source));
         Assert.False(RouteRecoveryPolicy.IsHotHopSource(RouteRecoveryPolicy.CloudFailSource));
+        Assert.False(RouteRecoveryPolicy.IsHotHopSource(RouteRecoveryPolicy.ToolLoopSource));
+        Assert.True(RouteRecoveryPolicy.IsToolLoopSource(RouteRecoveryPolicy.ToolLoopSource));
+        Assert.False(RouteRecoveryPolicy.IsLocalHangSource(RouteRecoveryPolicy.ToolLoopSource));
+        Assert.Equal(RouteRecoveryPolicy.ResumeWaitingLabel, RouteRecoveryPolicy.FormatResumeLabel(RouteRecoveryPolicy.ToolLoopSource));
+        Assert.Equal(RouteRecoveryPolicy.EndThisTurnLabel, RouteRecoveryPolicy.FormatResumeLabel(RouteRecoveryPolicy.PortRulePauseSource));
+        Assert.Equal(RouteRecoveryPolicy.SendAnywayLabel, RouteRecoveryPolicy.FormatWaitLongerLabel(RouteRecoveryPolicy.PortRulePauseSource));
+        Assert.Equal(RouteRecoveryPolicy.WaitLongerLabel, RouteRecoveryPolicy.FormatWaitLongerLabel(RouteRecoveryPolicy.LocalHangSource));
+        Assert.True(RouteRecoveryPolicy.IsPortRulePauseSource(RouteRecoveryPolicy.PortRulePauseSource));
+        Assert.False(RouteRecoveryPolicy.IsPortRulePauseSource(RouteRecoveryPolicy.ToolLoopSource));
+        Assert.False(RouteRecoveryPolicy.IsPortRulePauseSource(RouteRecoveryPolicy.LocalHangSource));
+        Assert.Contains("llama-server", RouteRecoveryPolicy.FormatWaitLongerTooltip(RouteRecoveryPolicy.PortRulePauseSource), System.StringComparison.Ordinal);
+        Assert.DoesNotContain("400", RouteRecoveryPolicy.FormatWaitLongerTooltip(RouteRecoveryPolicy.PortRulePauseSource), System.StringComparison.Ordinal);
+        Assert.DoesNotContain("400", RouteRecoveryPolicy.FormatResumeTooltip("Cline", turnContinues: false, RouteRecoveryPolicy.PortRulePauseSource), System.StringComparison.Ordinal);
+        Assert.DoesNotContain("400", RouteRecoveryPolicy.FormatSteerTooltip(), System.StringComparison.Ordinal);
+        Assert.False(RouteRecoveryPolicy.IsTimeoutStatus(RouteRecoveryPolicy.WaitStatus));
+        Assert.False(RouteRecoveryPolicy.IsTimeoutStatus(RouteRecoveryPolicy.SteerStatus));
+        Assert.True(RouteRecoveryPolicy.IsWaitStatus(RouteRecoveryPolicy.WaitStatus));
+        Assert.True(RouteRecoveryPolicy.IsSteerStatus(RouteRecoveryPolicy.SteerStatus));
+        Assert.Contains("llama-server", FluxMuxGatewayRouting.FormatRepeatedToolConsentReason("npm test"), System.StringComparison.Ordinal);
+        Assert.Contains("Client app", FluxMuxGatewayRouting.FormatRepeatedToolMessage(null), System.StringComparison.Ordinal);
+        Assert.Contains("Client app", FluxMuxGatewayRouting.FormatToolMillMessage(null), System.StringComparison.Ordinal);
+        Assert.Contains("**Observe-only mill**", FluxMuxGatewayRouting.FormatToolMillMessage(null), System.StringComparison.Ordinal);
+        Assert.Contains("Observe-only mill", FluxMuxGatewayRouting.FormatToolMillMessage(null), System.StringComparison.Ordinal);
+        Assert.Contains(
+            PortRulesPostMortem.PortRulesLocation,
+            FluxMuxGatewayRouting.FormatToolMillMessage(null),
+            System.StringComparison.Ordinal);
+        Assert.Contains(
+            "Another message in this chat will hit the same stop",
+            FluxMuxGatewayRouting.FormatToolMillMessage(null),
+            System.StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "next message in this Client-app chat",
+            FluxMuxGatewayRouting.FormatToolMillMessage(null),
+            System.StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "would repeat",
+            FluxMuxGatewayRouting.FormatToolMillMessage(null),
+            System.StringComparison.Ordinal);
+        Assert.DoesNotContain("the runner", FluxMuxGatewayRouting.FormatRepeatedToolMessage(null), System.StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -99,12 +140,11 @@ public sealed class RouteRecoveryPolicyTests
         Assert.DoesNotContain("Keep or Switch", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
         Assert.Contains("same choices will appear again", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
         Assert.DoesNotContain("retry", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("turn is over", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("keep this turn open", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
         Assert.Contains("Client app", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
-        Assert.Contains("new Cline task", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
-        Assert.Contains("fresh Harness chat", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
-        Assert.Contains("stronger model", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
-        Assert.Contains("simpler question", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
+        Assert.Contains("'reconnecting'", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
+        Assert.Contains("reconnecting", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
+        Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
         Assert.DoesNotContain("The same model is fine", LocalStreamHangPolicy.HangWaitMessage, System.StringComparison.Ordinal);
     }
 
@@ -114,10 +154,12 @@ public sealed class RouteRecoveryPolicyTests
         var text = LocalStreamHangPolicy.FormatHangWaitMessage(FluxMuxGatewayRouting.HarnessEndpointApp);
         Assert.Equal(text, LocalStreamHangPolicy.FormatHangWaitMessage("Cline"));
         Assert.Contains("not the Client app", text, System.StringComparison.Ordinal);
-        Assert.Contains("Cline may end a stalled turn", text, System.StringComparison.Ordinal);
-        Assert.Contains("look like it is still working normally", text, System.StringComparison.Ordinal);
-        Assert.Contains("new Cline task", text, System.StringComparison.Ordinal);
-        Assert.Contains("fresh Harness chat", text, System.StringComparison.Ordinal);
+        Assert.Contains("The Client app may keep working", text, System.StringComparison.Ordinal);
+        Assert.Contains("this prompt closes if llama-server starts sending", text, System.StringComparison.Ordinal);
+        Assert.Contains("reconnecting", text, System.StringComparison.Ordinal);
+        Assert.Contains("'reconnecting'", text, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("Cline", text, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("Harness", text, System.StringComparison.Ordinal);
         Assert.Contains(ControlLabelMarkup.Mark(RouteRecoveryPolicy.WaitLongerLabel), text, System.StringComparison.Ordinal);
         Assert.Contains(ControlLabelMarkup.Mark(RouteRecoveryPolicy.ResumeWaitingLabel), text, System.StringComparison.Ordinal);
         Assert.Contains(ControlLabelMarkup.Mark(RouteRecoveryPolicy.SwitchLabelPrefix), text, System.StringComparison.Ordinal);
@@ -128,10 +170,14 @@ public sealed class RouteRecoveryPolicyTests
     [Fact]
     public void Hang_abort_copy_says_start_a_fresh_chat_not_add_to_this_one()
     {
-        Assert.Contains("This turn was aborted", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
+        Assert.Contains("This chat turn cannot continue", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
         Assert.Contains("did not start a reply in time", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
-        Assert.Contains("new Cline task", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
-        Assert.Contains("fresh Harness chat", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
+        Assert.Contains("'reconnecting'", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
+        Assert.Contains("reconnecting", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
+        Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("Cline", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("Harness", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
+        Assert.DoesNotContain("This Cline turn is over", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
         Assert.DoesNotContain("The same model is fine", LocalStreamHangPolicy.HangAbortMessage, System.StringComparison.Ordinal);
         Assert.Equal(
             LocalStreamHangPolicy.HangAbortMessage,

@@ -13,20 +13,23 @@ public readonly record struct ClineContextSyncOptions(
     int ContextWindow,
     string ModelId,
     bool ImagesOn,
-    string DisplayName)
+    string DisplayName,
+    int MaxTokens)
 {
     public static ClineContextSyncOptions Create(
         int fluxMuxPort,
         int contextWindow,
         string? modelId = null,
         bool imagesOn = false,
-        string? displayName = null)
+        string? displayName = null,
+        int maxTokens = 0)
     {
         var port = Math.Clamp(fluxMuxPort, 1, 65535);
         var context = Math.Clamp(contextWindow, 1024, DeepSeekHarnessSetup.MaxLocalContextWindow);
         var id = string.IsNullOrWhiteSpace(modelId) ? FluxMuxGatewayModels.LocalModelId : modelId.Trim();
         var label = string.IsNullOrWhiteSpace(displayName) ? id : displayName.Trim();
-        return new ClineContextSyncOptions(port, context, id, imagesOn, label);
+        var replyBudget = maxTokens > 0 ? Math.Clamp(maxTokens, 1, context) : 0;
+        return new ClineContextSyncOptions(port, context, id, imagesOn, label, replyBudget);
     }
 }
 
@@ -54,6 +57,9 @@ public enum ClinePortStatus
 /// Cline 4.x OpenAI Compatible stores Context in ~/.cline/data/settings/models.json.
 /// It defaults to 128000 and does not read Port. This writes the loaded local Context
 /// onto model id local when that provider already points at AI-FluxMux Port.
+/// It also writes <c>maxTokens</c> from the loaded reply budget (llama-server
+/// <c>-n</c>), not Context, so Cline does not keep an 8k OpenAI default and
+/// report a full output limit while the window is half empty.
 /// It also turns off Cline Auto compact (useAutoCondense) in globalState.json so
 /// FluxMux Compact is the one that shortens forwarded history, and sets Supports
 /// Images from the loaded model profile (not a Cline-side VRAM switch).
@@ -267,7 +273,8 @@ public static class ClineContextSync
                 globalStatePath,
                 options.ContextWindow,
                 options.ImagesOn,
-                options.DisplayName);
+                options.DisplayName,
+                options.MaxTokens);
             var settingsChanged = PatchGlobalSettingsAutoCompactOff(globalSettingsPath);
             var changed = modelsChanged || providersChanged || stateChanged || settingsChanged;
             return new ClineContextSyncResult(
@@ -337,6 +344,7 @@ public static class ClineContextSync
         entry["name"] = string.IsNullOrWhiteSpace(options.DisplayName) ? modelId : options.DisplayName;
         entry["contextWindow"] = options.ContextWindow;
         entry["maxInputTokens"] = options.ContextWindow;
+        ApplyMaxTokens(entry, options.MaxTokens);
         ApplyImagesFlags(entry, options.ImagesOn);
     }
 
@@ -344,6 +352,22 @@ public static class ClineContextSync
         => string.IsNullOrWhiteSpace(options.DisplayName)
             ? options.ModelId
             : options.DisplayName;
+
+    internal static bool ApplyMaxTokens(JsonObject entry, int maxTokens)
+    {
+        if (maxTokens <= 0)
+        {
+            return false;
+        }
+
+        if (TryReadPositiveInt(entry["maxTokens"], out var current) && current == maxTokens)
+        {
+            return false;
+        }
+
+        entry["maxTokens"] = maxTokens;
+        return true;
+    }
 
     internal static void ApplyImagesFlags(JsonObject entry, bool imagesOn)
     {
@@ -393,7 +417,12 @@ public static class ClineContextSync
         return true;
     }
 
-    internal static bool ApplyOpenAiModelInfo(JsonObject root, int contextWindow, bool imagesOn, string displayName)
+    internal static bool ApplyOpenAiModelInfo(
+        JsonObject root,
+        int contextWindow,
+        bool imagesOn,
+        string displayName,
+        int maxTokens = 0)
     {
         var changed = false;
         var label = string.IsNullOrWhiteSpace(displayName) ? FluxMuxGatewayModels.LocalModelId : displayName.Trim();
@@ -413,6 +442,11 @@ public static class ClineContextSync
             if (!TryReadPositiveInt(info["maxInputTokens"], out var maxInput) || maxInput != contextWindow)
             {
                 info["maxInputTokens"] = contextWindow;
+                changed = true;
+            }
+
+            if (ApplyMaxTokens(info, maxTokens))
+            {
                 changed = true;
             }
 
@@ -617,7 +651,12 @@ public static class ClineContextSync
         return true;
     }
 
-    private static bool PatchGlobalState(string? path, int contextWindow, bool imagesOn, string displayName)
+    private static bool PatchGlobalState(
+        string? path,
+        int contextWindow,
+        bool imagesOn,
+        string displayName,
+        int maxTokens)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
@@ -629,7 +668,8 @@ public static class ClineContextSync
             return false;
         }
 
-        var changed = ApplyAutoCondenseOff(root) | ApplyOpenAiModelInfo(root, contextWindow, imagesOn, displayName);
+        var changed = ApplyAutoCondenseOff(root)
+            | ApplyOpenAiModelInfo(root, contextWindow, imagesOn, displayName, maxTokens);
         if (!changed)
         {
             return false;

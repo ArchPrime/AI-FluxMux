@@ -5,7 +5,8 @@ namespace FluxMux.Avalonia.Services;
 
 /// <summary>
 /// Marks control names in operator-facing copy so the UI can bold them.
-/// Client-app error text must stay unmarked; Diagnostics strips markers.
+/// Diagnostics and Client-app Port text strip markers: Cline and Harness
+/// show those strings as plain text, so the asterisks would stay visible.
 /// </summary>
 public static class ControlLabelMarkup
 {
@@ -13,6 +14,9 @@ public static class ControlLabelMarkup
 
     public static string Mark(string label)
         => string.IsNullOrWhiteSpace(label) ? string.Empty : Marker + label.Trim() + Marker;
+
+    public static string ForClientApp(string? source)
+        => Strip(source);
 
     public static string Strip(string? source)
     {

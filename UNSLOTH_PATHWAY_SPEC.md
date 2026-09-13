@@ -24,7 +24,9 @@ Their hub `unsloth/Qwen3.8-27B-NVFP4` (safetensors) is a different file. Studio 
 
 3. **Optional Validate: `--spec-draft-n-max` 3 or 4** vs the default 2. Watch tok/s and whether Health stays GPU-only at the saved Context. Do not copy Unsloth’s GPU preset of 6.
 
-4. **Tool-call heal on Port** (later, own slice) — repair malformed llama-server `tool_calls` before the Client app sees them. Needs tests and a Health line that a heal happened. Do not mix into `FluxMuxGatewayHost` with routing work.
+4. **Tool-call heal on Port** — landed as `LocalToolCallHealing` / `LocalToolCallHealSession`. Promotes text-form calls to structured `tool_calls` for names the Client app declared, coerces invalid argument JSON, dedupes, and holds XML across SSE deltas. Diagnostics logs `local_tool_heal`. Do not add Studio sandbox tools or a nudge retry that issues extra generation.
+
+Compact policy steal (not Unsloth Auto Compact): when a tool ledger exists, do not paste truncated dropped file bodies into the forward summary. The Client app still has the full chat.
 
 ## Do not steal
 

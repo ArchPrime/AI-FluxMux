@@ -151,6 +151,30 @@ public sealed class LocalHealthGuidanceTests
     }
 
     [Fact]
+    public void Health_probe_uses_daemon_port_when_llama_server_is_not_managed()
+    {
+        Assert.Equal(5002, LocalHealthGuidance.ResolveLlamaHealthProbePort(
+            managedAlive: false,
+            managedLocalPort: -1,
+            publicPort: 5001));
+        Assert.Equal(5002, LocalHealthGuidance.ResolveLlamaHealthProbePort(
+            managedAlive: true,
+            managedLocalPort: 5002,
+            publicPort: 5001));
+        Assert.Equal(-1, LocalHealthGuidance.ResolveLlamaHealthProbePort(
+            managedAlive: false,
+            managedLocalPort: -1,
+            publicPort: 65535));
+    }
+
+    [Fact]
+    public void Parked_or_never_started_local_is_not_a_live_route()
+    {
+        Assert.True(LocalHealthGuidance.IsRouteNotStarted("Local route not started", "No local model is launched yet."));
+        Assert.False(LocalHealthGuidance.IsRouteNotStarted("Local health check passed", "llama-server is up."));
+    }
+
+    [Fact]
     public void Ready_names_llama_server_and_the_local_model()
     {
         var text = LocalHealthGuidance.Build(

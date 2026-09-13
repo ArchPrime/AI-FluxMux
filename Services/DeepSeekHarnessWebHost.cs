@@ -253,6 +253,17 @@ public sealed class DeepSeekHarnessWebHost : IDisposable
                     + ").");
             }
 
+            if (IsPortListening(webPort))
+            {
+                return new DeepSeekHarnessLaunchResult(
+                    false,
+                    _launchMode,
+                    null,
+                    "DeepSeek Harness web is already listening on "
+                    + DeepSeekHarnessSetup.BuildChatUrl(webPort)
+                    + ". Use the open Harness tab instead of starting a second dsh.");
+            }
+
             var (fileName, argumentPrefix, mode) = ResolveLauncher(dshExecutablePath);
             var arguments = ComposeArguments(argumentPrefix, webPort);
             try

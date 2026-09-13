@@ -75,6 +75,34 @@ public sealed class HelpHtmlParserTests
     }
 
     [Fact]
+    public void A_topic_id_heading_is_not_shown_and_survives_a_title_rename()
+    {
+        const string html = """
+            <html><body>
+            <h1>AI-FluxMux v0.2</h1>
+            <h2>Forwarding rules</h2>
+            <h3>topic.port_rules</h3>
+            <p>Watch the pack.</p>
+            <h3>What Compact does</h3>
+            <p>Shorten older turns.</p>
+            </body></html>
+            """;
+
+        var document = HelpHtmlParser.Parse(html);
+        var topic = Assert.Single(document.Topics);
+        Assert.Equal("Forwarding rules", topic.Title);
+        Assert.Equal(HelpTopicIds.PortRules, topic.Id);
+        Assert.DoesNotContain(
+            topic.Blocks,
+            block => block is HelpBannerBlock banner && banner.Text.Contains("topic.port_rules", StringComparison.Ordinal));
+        var sub = Assert.Single(topic.Blocks.OfType<HelpBannerBlock>());
+        Assert.Equal("What Compact does", sub.Text);
+
+        var entries = new[] { new HelpTopicEntry { Title = topic.Title, Id = topic.Id } };
+        Assert.Equal(topic.Title, HelpTopicSearch.FindByReference(entries, HelpTopicIds.PortRules)?.Title);
+    }
+
+    [Fact]
     public void Quote_paragraph_becomes_a_callout()
     {
         const string html = """
@@ -458,15 +486,16 @@ public sealed class HelpHtmlParserTests
         Assert.Contains("First-day path", Titles(document));
         Assert.Contains("Diagnostics", Titles(document));
         Assert.Contains("Ports", Titles(document));
+        Assert.Contains("Port rules", Titles(document));
         Assert.Contains("Copyright and licence", Titles(document));
         Assert.DoesNotContain("Interface notes", Titles(document));
         Assert.True(document.UiNotes.ContainsKey("quickselect.hot_routing"));
         Assert.Contains("Dynamic Model Routing", document.UiNotes["quickselect.hot_routing"], StringComparison.Ordinal);
         Assert.True(HelpHtmlViewBuilder.IsCopyrightHelpTopic("Copyright and licence"));
         Assert.False(HelpHtmlViewBuilder.IsCopyrightHelpTopic("What is AI-FluxMux?"));
-        Assert.True(HelpHtmlViewBuilder.TrySplitProductTitle("AI-FluxMux v0.2 beta", out var name, out var version));
+        Assert.True(HelpHtmlViewBuilder.TrySplitProductTitle("AI-FluxMux v0.2.1 beta", out var name, out var version));
         Assert.Equal("AI-FluxMux", name);
-        Assert.Equal("v0.2 beta", version);
+        Assert.Equal("v0.2.1 beta", version);
         var html = File.ReadAllText(path);
         Assert.True(IsBold(html, "Continue waiting"));
         Assert.True(IsBold(html, "Keep current model — end this turn"));
@@ -474,6 +503,56 @@ public sealed class HelpHtmlParserTests
         Assert.True(IsBold(html, "Keep current model profile"));
         Assert.DoesNotContain("keep / switch", VisibleText(html), StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Prompt for any AI editing this file", VisibleText(html), StringComparison.Ordinal);
+        Assert.Contains("topic.port_rules", VisibleText(html), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Shipped_help_html_keeps_the_port_rules_topic_id_and_table()
+    {
+        // Settings jump by topic.port_rules, not the Heading 2 title, so a Word or
+        // feed update can rename the topic and rewrite the table without breaking
+        // the Servers links.
+        var document = HelpHtmlParser.Load(FindShippedHelp());
+        var topic = Assert.Single(document.Topics, item => item.Id == HelpTopicIds.PortRules);
+        Assert.False(string.IsNullOrWhiteSpace(topic.Title));
+        Assert.DoesNotContain(
+            topic.Blocks,
+            block => block is HelpBannerBlock banner && banner.Text.Contains("topic.port_rules", StringComparison.Ordinal));
+
+        var table = Assert.Single(topic.Blocks.OfType<HelpTableBlock>());
+        var cells = table.Rows
+            .SelectMany(row => row)
+            .Select(cell => string.Concat(cell.Select(inline => inline.Text)))
+            .ToList();
+        foreach (var rule in new[]
+                 {
+                     "Compact",
+                     "Omit",
+                     "Max pictures",
+                     "Mill at omitted",
+                     "Closed-loop lookback",
+                     "Closed-loop mill ceiling",
+                     "Observe-only mill",
+                     "Rapid-churn",
+                     "Repeated command",
+                     "Diagnostic dump",
+                     "Hang",
+                     "503",
+                     "Client-app max tokens",
+                     "Stop strings"
+                 })
+        {
+            Assert.Contains(cells, cell => cell.Contains(rule, StringComparison.Ordinal));
+        }
+
+        Assert.Contains(cells, cell => cell.Contains("What it watches", StringComparison.Ordinal));
+        Assert.Contains(cells, cell => cell.Contains("When it treats the turn as a problem", StringComparison.Ordinal));
+        Assert.Contains(cells, cell => cell.Contains("What FluxMux does", StringComparison.Ordinal));
+
+        var copy = string.Join(' ', cells.Concat(
+            topic.Blocks.OfType<HelpParagraphBlock>().Select(block =>
+                string.Concat(block.Inlines.Select(inline => inline.Text)))));
+        Assert.DoesNotContain("400", copy, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -507,7 +586,7 @@ public sealed class HelpHtmlParserTests
 
         Assert.NotEmpty(references);
         var topics = document.Topics
-            .Select(topic => new HelpTopicEntry { Title = topic.Title })
+            .Select(topic => new HelpTopicEntry { Title = topic.Title, Id = topic.Id })
             .ToList();
         var reached = references
             .Select(reference => HelpTopicSearch.FindByReference(topics, reference))

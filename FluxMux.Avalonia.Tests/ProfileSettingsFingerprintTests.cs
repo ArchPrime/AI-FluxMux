@@ -65,6 +65,16 @@ public sealed class ProfileSettingsFingerprintTests
         Assert.Equal(LocalLaunchFingerprint.From(baseline), LocalLaunchFingerprint.From(overlayOnly));
     }
 
+    [Fact]
+    public void Launch_fingerprint_ignores_reasoning_on_vs_off()
+    {
+        var off = SampleLocal(visionEnabled: "Disabled");
+        var on = SampleLocal(visionEnabled: "Disabled");
+        on["LocalReasoning"] = "On";
+
+        Assert.Equal(LocalLaunchFingerprint.From(off), LocalLaunchFingerprint.From(on));
+    }
+
     private static JsonObject SampleLocal(string? visionEnabled)
     {
         var settings = new JsonObject

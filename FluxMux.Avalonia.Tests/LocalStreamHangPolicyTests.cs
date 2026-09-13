@@ -73,6 +73,23 @@ public sealed class LocalStreamHangPolicyTests
     }
 
     [Fact]
+    public void Tokens_after_a_quiet_spell_count_as_recovered()
+    {
+        Assert.True(LocalStreamHangPolicy.StreamRecovered(
+            gotUpstreamBytes: true,
+            sinceLastUpstreamByte: TimeSpan.FromSeconds(1),
+            stallDeadline: TimeSpan.FromSeconds(LocalStreamHangPolicy.StallSeconds)));
+        Assert.False(LocalStreamHangPolicy.StreamRecovered(
+            gotUpstreamBytes: false,
+            sinceLastUpstreamByte: TimeSpan.FromSeconds(1),
+            stallDeadline: TimeSpan.FromSeconds(LocalStreamHangPolicy.StallSeconds)));
+        Assert.False(LocalStreamHangPolicy.StreamRecovered(
+            gotUpstreamBytes: true,
+            sinceLastUpstreamByte: TimeSpan.FromSeconds(LocalStreamHangPolicy.StallSeconds),
+            stallDeadline: TimeSpan.FromSeconds(LocalStreamHangPolicy.StallSeconds)));
+    }
+
+    [Fact]
     public void Local_copy_timeout_covers_one_continue_waiting_cycle()
     {
         Assert.True(LocalStreamHangPolicy.MinCopyTimeoutSeconds
@@ -83,5 +100,46 @@ public sealed class LocalStreamHangPolicyTests
         Assert.Equal(LocalStreamHangPolicy.MinCopyTimeoutSeconds, LocalStreamHangPolicy.ClampCopyTimeoutSeconds(30));
         Assert.Equal(LocalStreamHangPolicy.MaxCopyTimeoutSeconds, LocalStreamHangPolicy.ClampCopyTimeoutSeconds(10_000));
         Assert.True(LocalStreamHangPolicy.CopyTimeoutExtendSeconds > LocalStreamHangPolicy.WaitLongerSeconds);
+    }
+
+    [Fact]
+    public void Think_budget_delays_the_first_byte_hang_prompt()
+    {
+        Assert.Equal(
+            TimeSpan.FromSeconds(LocalStreamHangPolicy.FirstByteSeconds),
+            LocalStreamHangPolicy.FirstByteDeadlineForThinkBudget(0));
+        Assert.Equal(
+            TimeSpan.FromSeconds(LocalStreamHangPolicy.WaitLongerSeconds),
+            LocalStreamHangPolicy.FirstByteDeadlineForThinkBudget(null));
+        var low = LocalStreamHangPolicy.FirstByteDeadlineForThinkBudget(2048);
+        Assert.Equal(
+            TimeSpan.FromSeconds((int)Math.Ceiling(2048d / LocalStreamHangPolicy.ThinkTokensPerSecond)),
+            low);
+        Assert.False(LocalStreamHangPolicy.ShouldAbort(
+            gotUpstreamBytes: false,
+            sinceCopyStart: TimeSpan.FromSeconds(25),
+            sinceLastUpstreamByte: TimeSpan.FromSeconds(25),
+            low,
+            TimeSpan.FromSeconds(LocalStreamHangPolicy.StallSeconds),
+            out _));
+        Assert.True(LocalStreamHangPolicy.ShouldAbort(
+            gotUpstreamBytes: false,
+            sinceCopyStart: low,
+            sinceLastUpstreamByte: low,
+            low,
+            TimeSpan.FromSeconds(LocalStreamHangPolicy.StallSeconds),
+            out var reason));
+        Assert.Equal(LocalStreamHangPolicy.FirstByteReason, reason);
+    }
+
+    [Fact]
+    public void Copy_timeout_covers_a_low_think_then_one_wait_cycle()
+    {
+        var firstByte = (int)LocalStreamHangPolicy.FirstByteDeadlineForThinkBudget(2048).TotalSeconds;
+        var seconds = LocalStreamHangPolicy.ClampCopyTimeoutSeconds(30, 2048);
+        Assert.True(seconds >= firstByte
+            + LocalStreamHangPolicy.DecisionSeconds
+            + LocalStreamHangPolicy.WaitLongerSeconds
+            + LocalStreamHangPolicy.DecisionSeconds);
     }
 }

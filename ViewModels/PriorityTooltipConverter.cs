@@ -30,7 +30,7 @@ public sealed class PriorityTooltipConverter : IValueConverter
                 : "Put this first so one answer can be a long dump of code or text. Put it lower for quicker, shorter turns. A short limit can cut an answer off mid-sentence. This is not how much of the past chat is remembered, and it does not by itself use extra VRAM.",
             "Reasoning depth" => cloud
                 ? "Put this first so the cloud model thinks longer before it writes (when the company supports it). That uses extra tokens and usually raises the bill. Put it lower for faster, cheaper turns. Higher is slower; it often helps hard problems more than coding."
-                : "Put this first for a hidden thinking step before the answer. For writing code, Off is usually better (faster, cleaner). Hidden thinking fills the context window, so it uses VRAM and eats the reply budget. Changing this later reloads the model.",
+                : "Put this first for a hidden thinking step before the answer. For writing code, Off is usually better (faster, cleaner). Hidden thinking fills the context window, so it uses VRAM and eats the reply budget.",
             "Token Cost Economy" => "Put this first to spend fewer cloud credits. Put it lower if you will pay for fuller thinking or a longer written answer. Cheaper can mean thinner answers.",
             _ => "Use the up and down buttons to rank this goal. Top of the list matters most when AI-FluxMux fills in settings."
         };

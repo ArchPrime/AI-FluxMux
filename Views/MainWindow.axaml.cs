@@ -27,6 +27,10 @@ public partial class MainWindow : Window
     private ScaleTransform? _uiScaleTransform;
     private string? _draggedPriorityName;
     private string? _draggedPriorityCollection;
+    private ListBox? _draggedPriorityList;
+    private RouteSlotViewModel? _draggedQuickSelectSlot;
+    private bool _quickSelectOrderDirty;
+    private bool _listDragHandlersArmed;
     private bool _exitCleanupStarted;
     private InterventionPopupWindow? _interventionPopup;
     private bool _interventionPopupClosing;
@@ -283,6 +287,11 @@ public partial class MainWindow : Window
             _interventionPopup.Closed -= OnInterventionPopupClosed;
             _interventionPopup = null;
         }
+
+        if (DataContext is MainViewModel vm)
+        {
+            vm.DismissPendingIntervention();
+        }
     }
 
     private void CloseInterventionPopupIfStillIdle()
@@ -487,62 +496,291 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
+    private void OnQuickSelectSlotGripPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (sender is not Control grip || !e.GetCurrentPoint(grip).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        var slot = grip.DataContext as RouteSlotViewModel
+            ?? grip.FindAncestorOfType<GroupBox>()?.DataContext as RouteSlotViewModel;
+        if (slot is null)
+        {
+            return;
+        }
+
+        _draggedQuickSelectSlot = slot;
+        _quickSelectOrderDirty = false;
+        if (QuickSelectSlotList is not null)
+        {
+            ReorderMoveAnimation.BeginFollow(QuickSelectSlotList, slot, e);
+        }
+
+        ArmListDragHandlers();
+        e.Pointer.Capture(this);
+        e.Handled = true;
+    }
+
+    private void OnQuickSelectSlotGripMoved(object? sender, PointerEventArgs e)
+        => ContinueQuickSelectDrag(e);
+
+    private void OnQuickSelectSlotGripReleased(object? sender, PointerReleasedEventArgs e)
+        => FinishQuickSelectSlotDrag();
+
+    private void OnQuickSelectSlotGripCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+    }
+
+    private void ContinueQuickSelectDrag(PointerEventArgs e)
+    {
+        if (_draggedQuickSelectSlot is null
+            || DataContext is not MainViewModel vm
+            || QuickSelectSlotList is null
+            || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        ReorderMoveAnimation.Follow(QuickSelectSlotList, _draggedQuickSelectSlot, e);
+
+        var moved = false;
+        for (var step = 0; step < QuickSelectSlotList.ItemCount; step++)
+        {
+            var target = ReorderMoveAnimation.GetDisplacementTarget(QuickSelectSlotList, _draggedQuickSelectSlot)
+                as RouteSlotViewModel;
+            if (target is null || ReferenceEquals(target, _draggedQuickSelectSlot))
+            {
+                break;
+            }
+
+            vm.ReorderQuickSelectSlot(_draggedQuickSelectSlot, target);
+            moved = true;
+        }
+
+        if (moved)
+        {
+            _quickSelectOrderDirty = true;
+        }
+
+        e.Handled = true;
+    }
+
+    private void FinishQuickSelectSlotDrag()
+    {
+        DisarmListDragHandlers();
+        if (_quickSelectOrderDirty && DataContext is MainViewModel vm)
+        {
+            vm.PersistQuickSelectSlotOrder();
+        }
+
+        if (QuickSelectSlotList is not null)
+        {
+            ReorderMoveAnimation.EndFollow(QuickSelectSlotList, _draggedQuickSelectSlot);
+        }
+
+        _draggedQuickSelectSlot = null;
+        _quickSelectOrderDirty = false;
+    }
+
+    private static object? GetItemAtPointer(ItemsControl list, PointerEventArgs e)
+    {
+        var index = GetItemIndexAtPointer(list, e);
+        if (index is null)
+        {
+            return null;
+        }
+
+        return list.ContainerFromIndex(index.Value) is Control container
+            ? container.DataContext ?? list.Items[index.Value]
+            : list.Items[index.Value];
+    }
+
+    private static int? GetItemIndexAtPointer(ItemsControl list, PointerEventArgs e)
+    {
+        Visual? parent = null;
+        for (var index = 0; index < list.ItemCount; index++)
+        {
+            if (list.ContainerFromIndex(index) is Control item && item.Parent is Visual visual)
+            {
+                parent = visual;
+                break;
+            }
+        }
+
+        if (parent is null)
+        {
+            return null;
+        }
+
+        var point = e.GetPosition(parent);
+        var nearest = -1;
+        var nearestDistance = double.MaxValue;
+        for (var index = 0; index < list.ItemCount; index++)
+        {
+            if (list.ContainerFromIndex(index) is not Control item)
+            {
+                continue;
+            }
+
+            var bounds = item.Bounds;
+            if (point.Y >= bounds.Top && point.Y <= bounds.Bottom)
+            {
+                return index;
+            }
+
+            var distance = Math.Abs(point.Y - ((bounds.Top + bounds.Bottom) / 2));
+            if (distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearest = index;
+            }
+        }
+
+        return nearest >= 0 ? nearest : null;
+    }
+
     private void PriorityListBox_PointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (sender is not ListBox listBox || !e.GetCurrentPoint(listBox).Properties.IsLeftButtonPressed)
+        if (FindPriorityListBox(sender) is not { } listBox
+            || !e.GetCurrentPoint(listBox).Properties.IsLeftButtonPressed)
+        {
             return;
+        }
 
-        var selectedPriority = GetPriorityAtPointer(listBox, e);
+        var selectedPriority = GetItemAtPointer(listBox, e) as string
+            ?? (sender as Control)?.DataContext as string;
         if (selectedPriority is null)
+        {
             return;
+        }
 
         listBox.SelectedItem = selectedPriority;
         _draggedPriorityName = selectedPriority;
-        _draggedPriorityCollection = listBox.ItemsSource == (DataContext as MainViewModel)?.CloudPriorityOrder ? "cloud" : "local";
-        e.Pointer.Capture(listBox);
+        _draggedPriorityList = listBox;
+        _draggedPriorityCollection = listBox.ItemsSource == (DataContext as MainViewModel)?.CloudPriorityOrder
+            ? "cloud"
+            : "local";
+        ReorderMoveAnimation.BeginFollow(listBox, selectedPriority, e);
+        ArmListDragHandlers();
+        e.Pointer.Capture(this);
         e.Handled = true;
     }
 
     private void PriorityListBox_PointerMoved(object? sender, PointerEventArgs e)
     {
-        if (sender is not ListBox listBox || DataContext is not MainViewModel vm ||
-            string.IsNullOrWhiteSpace(_draggedPriorityName) || !e.GetCurrentPoint(listBox).Properties.IsLeftButtonPressed)
-            return;
-
-        var targetPriority = GetPriorityAtPointer(listBox, e);
-        if (string.IsNullOrWhiteSpace(targetPriority) || targetPriority == _draggedPriorityName)
-            return;
-
-        if (_draggedPriorityCollection == "cloud")
-            vm.ReorderCloudPriority(_draggedPriorityName, targetPriority);
-        else
-            vm.ReorderLocalPriority(_draggedPriorityName, targetPriority);
-
-        e.Handled = true;
+        if (FindPriorityListBox(sender) is { } listBox)
+        {
+            ContinuePriorityDrag(listBox, e);
+        }
     }
 
     private void PriorityListBox_PointerReleased(object? sender, PointerReleasedEventArgs e)
+        => FinishPriorityDrag();
+
+    private void PriorityListBox_PointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
     {
-        e.Pointer.Capture(null);
-        _draggedPriorityName = null;
-        _draggedPriorityCollection = null;
+    }
+
+    private void ContinuePriorityDrag(ListBox listBox, PointerEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm
+            || string.IsNullOrWhiteSpace(_draggedPriorityName)
+            || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        ReorderMoveAnimation.Follow(listBox, _draggedPriorityName, e);
+
+        for (var step = 0; step < listBox.ItemCount; step++)
+        {
+            var targetPriority = ReorderMoveAnimation.GetDisplacementTarget(listBox, _draggedPriorityName) as string;
+            if (string.IsNullOrWhiteSpace(targetPriority) || targetPriority == _draggedPriorityName)
+            {
+                break;
+            }
+
+            if (_draggedPriorityCollection == "cloud")
+            {
+                vm.ReorderCloudPriority(_draggedPriorityName, targetPriority);
+            }
+            else
+            {
+                vm.ReorderLocalPriority(_draggedPriorityName, targetPriority);
+            }
+        }
+
         e.Handled = true;
     }
 
-    private static string? GetPriorityAtPointer(ListBox listBox, PointerEventArgs e)
+    private void FinishPriorityDrag()
     {
-        for (var index = 0; index < listBox.ItemCount; index++)
+        DisarmListDragHandlers();
+        if (_draggedPriorityList is not null)
         {
-            if (listBox.ContainerFromIndex(index) is not ListBoxItem item)
-                continue;
-
-            var point = e.GetPosition(item);
-            if (new Rect(item.Bounds.Size).Contains(point))
-                return listBox.Items[index] as string;
+            ReorderMoveAnimation.EndFollow(_draggedPriorityList, _draggedPriorityName);
         }
 
-        return null;
+        _draggedPriorityName = null;
+        _draggedPriorityCollection = null;
+        _draggedPriorityList = null;
     }
+
+    private void ArmListDragHandlers()
+    {
+        if (_listDragHandlersArmed)
+        {
+            return;
+        }
+
+        _listDragHandlersArmed = true;
+        AddHandler(PointerMovedEvent, OnArmedListDragMoved, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
+        AddHandler(PointerReleasedEvent, OnArmedListDragReleased, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
+    }
+
+    private void DisarmListDragHandlers()
+    {
+        if (!_listDragHandlersArmed)
+        {
+            return;
+        }
+
+        _listDragHandlersArmed = false;
+        RemoveHandler(PointerMovedEvent, OnArmedListDragMoved);
+        RemoveHandler(PointerReleasedEvent, OnArmedListDragReleased);
+    }
+
+    private void OnArmedListDragMoved(object? sender, PointerEventArgs e)
+    {
+        if (_draggedPriorityList is not null && !string.IsNullOrWhiteSpace(_draggedPriorityName))
+        {
+            ContinuePriorityDrag(_draggedPriorityList, e);
+            return;
+        }
+
+        if (_draggedQuickSelectSlot is not null)
+        {
+            ContinueQuickSelectDrag(e);
+        }
+    }
+
+    private void OnArmedListDragReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (_draggedPriorityName is not null)
+        {
+            FinishPriorityDrag();
+        }
+        else if (_draggedQuickSelectSlot is not null)
+        {
+            FinishQuickSelectSlotDrag();
+        }
+
+        e.Pointer.Capture(null);
+    }
+
+    private static ListBox? FindPriorityListBox(object? sender)
+        => sender as ListBox ?? (sender as Control)?.FindAncestorOfType<ListBox>();
 
     private void OnHelpChromeLoaded(object? sender, RoutedEventArgs e)
     {
@@ -634,7 +872,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        var selectedTitle = (this.FindControl<ListBox>("HelpIndexList")?.SelectedItem as HelpTopicEntry)?.Title;
+        var selected = this.FindControl<ListBox>("HelpIndexList")?.SelectedItem as HelpTopicEntry;
+        var selectedTitle = selected?.Title;
+        var selectedId = selected?.Id;
         HelpDocument document;
         try
         {
@@ -656,7 +896,7 @@ public partial class MainWindow : Window
         _loadedHelpUtc = stamp;
         RebuildHelpIndex();
         ApplyHelpFilter();
-        RestoreHelpSelection(selectedTitle);
+        RestoreHelpSelection(selectedTitle, selectedId);
         StartHelpFileWatchers();
     }
 
@@ -693,7 +933,35 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Follows a link written in Help.html as <c>href="#Topic title"</c>.
+    /// Opens the Help tab and scrolls to a topic. Prefer a <c>topic.*</c> id so a
+    /// Word or feed update can rename the Heading 2 title.
+    /// </summary>
+    public void ShowHelpTopic(string? reference)
+    {
+        var tabs = TryFindNamed<TabControl>("MainTabs");
+        if (tabs is not null)
+        {
+            foreach (var item in tabs.Items)
+            {
+                if (item is TabItem tab
+                    && string.Equals(Convert.ToString(tab.Header), "Help", StringComparison.Ordinal))
+                {
+                    tabs.SelectedItem = tab;
+                    break;
+                }
+            }
+        }
+
+        ReloadHelpFromFile(force: false);
+        if (!string.IsNullOrWhiteSpace(reference))
+        {
+            TryGoToHelpTopic(reference);
+        }
+    }
+
+    /// <summary>
+    /// Follows a link written in Help.html as <c>href="#Topic title"</c> or
+    /// <c>href="#topic.port_rules"</c>.
     /// </summary>
     private bool TryGoToHelpTopic(string reference)
     {
@@ -738,9 +1006,9 @@ public partial class MainWindow : Window
         return true;
     }
 
-    private void RestoreHelpSelection(string? title)
+    private void RestoreHelpSelection(string? title, string? id = null)
     {
-        if (string.IsNullOrWhiteSpace(title))
+        if (string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(id))
         {
             return;
         }
@@ -751,8 +1019,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        var match = _helpTopics.FirstOrDefault(topic =>
-            topic.Title.Equals(title, StringComparison.Ordinal));
+        var match = !string.IsNullOrWhiteSpace(id)
+            ? _helpTopics.FirstOrDefault(topic =>
+                topic.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
+            : null;
+        match ??= !string.IsNullOrWhiteSpace(title)
+            ? _helpTopics.FirstOrDefault(topic =>
+                topic.Title.Equals(title, StringComparison.Ordinal))
+            : null;
         if (match is null)
         {
             return;
@@ -916,17 +1190,34 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            var title = topic.Tag as string ?? string.Empty;
+            var title = string.Empty;
+            var id = string.Empty;
+            if (topic.Tag is HelpTopicAnchor anchor)
+            {
+                title = anchor.Title;
+                id = anchor.Id;
+            }
+            else
+            {
+                title = topic.Tag as string ?? string.Empty;
+            }
+
             if (string.IsNullOrWhiteSpace(title))
             {
                 continue;
             }
 
             var body = new StringBuilder();
+            if (id.Length > 0)
+            {
+                body.Append(id).Append(' ');
+            }
+
             CollectHelpText(topic, body);
             _helpTopics.Add(new HelpTopicEntry
             {
                 Title = title,
+                Id = id,
                 Target = topic,
                 SearchText = body.ToString(),
                 Section = section

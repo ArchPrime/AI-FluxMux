@@ -35,14 +35,14 @@ public sealed class HttpErrorResponseFormatterTests
         const string body =
             """
             {
-              "message": "This turn cannot continue: the request included a picture, and Images is off on the loaded model profile.",
-              "error": "This turn cannot continue: the request included a picture, and Images is off on the loaded model profile."
+              "message": "This chat turn cannot continue: the request included a picture, and **Images** is off on the loaded model profile.",
+              "error": "This chat turn cannot continue: the request included a picture, and **Images** is off on the loaded model profile."
             }
             """;
 
         var detail = HttpErrorResponseFormatter.FormatHttpErrorDetail(400, "Bad Request", body);
 
-        Assert.Contains("This turn cannot continue", detail);
+        Assert.Contains("This chat turn cannot continue", detail);
         Assert.DoesNotContain("local_context_filling", detail);
         Assert.DoesNotContain("\"type\"", detail);
     }

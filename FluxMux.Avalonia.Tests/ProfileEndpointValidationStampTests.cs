@@ -49,6 +49,27 @@ public sealed class ProfileEndpointValidationStampTests
     }
 
     [Fact]
+    public void Transient_startup_failure_keeps_a_previous_validated_stamp()
+    {
+        var profile = new JsonObject
+        {
+            [ProfileEndpointValidationStamp.ValidatedUtcKey] = "2026-01-01T00:00:00Z"
+        };
+
+        ProfileEndpointValidationStamp.Apply(
+            profile,
+            validated: false,
+            warning: "llama-server exited during startup.",
+            keepValidatedStamp: true);
+
+        Assert.Equal("2026-01-01T00:00:00Z", profile[ProfileEndpointValidationStamp.ValidatedUtcKey]?.ToString());
+        Assert.Contains(
+            "exited during startup",
+            profile[ProfileEndpointValidationStamp.WarningKey]?.ToString(),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Successful_validate_clears_the_warning()
     {
         var profile = new JsonObject

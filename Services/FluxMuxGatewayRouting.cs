@@ -25,21 +25,44 @@ public static class FluxMuxGatewayRouting
         "The latest prompt asks to use a cloud model.";
     public const string LocalFillingBlockedType = "local_context_filling";
     public const string LocalFillingBlockedMessage =
-        "This turn cannot continue: it is too large for the current local model's Context.";
+        PortRulesPostMortem.ChatTurnCannotContinue
+        + "it is too large for the current local model's Context. "
+        + PortRulesPostMortem.RaiseContextAdvice
+        + " "
+        + PortRulesPostMortem.SmallerNextStepAdvice;
     public const string LocalContextOverflowMessage =
-        "This turn cannot continue: it is too large for the local model's Context.";
+        PortRulesPostMortem.ChatTurnCannotContinue
+        + "it is too large for the local model's Context. "
+        + PortRulesPostMortem.RaiseContextAdvice
+        + " "
+        + PortRulesPostMortem.SmallerNextStepAdvice;
+    public const string RepeatedToolType = "cline_repeated_command";
+    public const string RepeatedToolMessage =
+        PortRulesPostMortem.ChatTurnCannotContinue
+        + "the Client app repeated the same command. llama-server was not asked.";
+    public const string RepeatedToolConsentReason =
+        "The Client app repeated the same command. llama-server was not asked for another copy. Keep current model ends this turn. Switch sends this turn to the ready cloud.";
+    public const string ToolMillType = "cline_tool_mill";
+    public const string ToolMillMessage =
+        PortRulesPostMortem.ChatTurnCannotContinue
+        + "the Client app has run too many tools. llama-server was not asked.";
+    public const string ThinkOnlyType = LocalThinkOnlyReply.Type;
+    public const string ThinkOnlyMessage = LocalThinkOnlyReply.Message;
     public const string LocalVisionUnavailableType = "local_vision_unavailable";
     public const string LocalVisionUnavailableMessage =
-        "This turn cannot continue: the request included a picture, and Images is off on the loaded model profile.";
+        PortRulesPostMortem.ChatTurnCannotContinue
+        + "the request included a picture, and **Images** is off on the loaded model profile. "
+        + PortRulesPostMortem.EnableImagesAdvice;
     public const string CloudVisionUnavailableType = "cloud_vision_unavailable";
     public const string EndpointBarDisclaimer =
         "That is not the Client app Context bar, which can read lower. The Client app may also end a stalled turn on its own.";
 
     public static JsonObject EndpointErrorBody(string message)
     {
-        var text = string.IsNullOrWhiteSpace(message)
-            ? "This turn cannot continue."
-            : message.Trim();
+        var text = ControlLabelMarkup.ForClientApp(
+            string.IsNullOrWhiteSpace(message)
+                ? "This chat turn cannot continue."
+                : message.Trim());
         return new JsonObject
         {
             ["message"] = text,
@@ -321,7 +344,7 @@ public static class FluxMuxGatewayRouting
         }
 
         return FormatNewSlotEndpointMessage(
-            "This turn cannot continue: " + label + " cannot take pictures.",
+            PortRulesPostMortem.ChatTurnCannotContinue + label + " cannot take pictures.",
             EndpointApp(state));
     }
 
@@ -343,10 +366,17 @@ public static class FluxMuxGatewayRouting
         JsonObject payload,
         int promptChars = 0,
         string? lastServedKind = null,
-        string? lastServedCloudLabel = null)
+        string? lastServedCloudLabel = null,
+        string? portRuleDetails = null)
         => LoadedLocalCannotTakeTurn(state, payload)
             ? FormatLocalVisionUnavailableMessage(state)
-            : FormatFillingBlockedMessage(state, payload, promptChars, lastServedKind, lastServedCloudLabel);
+            : FormatFillingBlockedMessage(
+                state,
+                payload,
+                promptChars,
+                lastServedKind,
+                lastServedCloudLabel,
+                portRuleDetails);
 
     public static string FormatForwardedBasis(JsonObject state, JsonObject payload, int promptChars = 0)
     {
@@ -383,35 +413,90 @@ public static class FluxMuxGatewayRouting
         JsonObject payload,
         int promptChars = 0,
         string? lastServedKind = null,
-        string? lastServedCloudLabel = null)
+        string? lastServedCloudLabel = null,
+        string? portRuleDetails = null)
     {
         _ = payload;
         _ = promptChars;
         var body = ProxyRuntimeStateSecrets.LastServedWasCloud(lastServedKind)
             ? LocalReloadRouting.FormatCloudContextLead(lastServedCloudLabel)
             : LocalFillingBlockedMessage;
-        return FormatNewSlotEndpointMessage(body, EndpointApp(state));
+        return PortRulesPostMortem.FinishClientError(body, portRuleDetails);
     }
 
     public static string FormatLocalContextOverflowMessage(
         JsonObject? state,
         string? lastServedKind = null,
-        string? lastServedCloudLabel = null)
+        string? lastServedCloudLabel = null,
+        string? portRuleDetails = null)
     {
         var body = ProxyRuntimeStateSecrets.LastServedWasCloud(lastServedKind)
             ? LocalReloadRouting.FormatCloudContextLead(lastServedCloudLabel)
             : LocalContextOverflowMessage;
-        return FormatNewSlotEndpointMessage(body, EndpointApp(state));
+        return PortRulesPostMortem.FinishClientError(body, portRuleDetails);
     }
 
     public static string FormatLocalVisionUnavailableMessage(JsonObject? state)
         => FormatNewSlotEndpointMessage(LocalVisionUnavailableMessage, EndpointApp(state));
 
+    public static string FormatThinkOnlyMessage(JsonObject? state)
+        => FormatThinkOnlyMessage(state, PortForwardingRules.Defaults);
+
+    public static string FormatThinkOnlyMessage(JsonObject? state, PortForwardingRules? rules)
+    {
+        _ = state;
+        return PortRulesPostMortem.WithStopAdvice(PortRulesPostMortem.FormatThinkOnly(rules));
+    }
+
+    public static string FormatRepeatedToolMessage(JsonObject? state, string? command = null)
+    {
+        _ = state;
+        _ = command;
+        return PortRulesPostMortem.WithStopAdvice(PortRulesPostMortem.FormatRepeatedCommand());
+    }
+
+    public static string FormatToolMillMessage(JsonObject? state)
+        => FormatToolMillMessage(state, omitted: 0, rapidChurn: false, rapidStreak: 0, rules: null);
+
+    public static string FormatToolMillMessage(
+        JsonObject? state,
+        int omitted,
+        bool rapidChurn,
+        int rapidStreak,
+        PortForwardingRules? rules)
+    {
+        _ = state;
+        return PortRulesPostMortem.WithStopAdvice(
+            PortRulesPostMortem.FormatMill(omitted, rapidChurn, rapidStreak, rules));
+    }
+
+    public static string FormatRepeatedToolConsentReason(string? command)
+    {
+        var snippet = TruncateCommand(command);
+        if (string.IsNullOrWhiteSpace(snippet))
+        {
+            return RepeatedToolConsentReason;
+        }
+
+        return "The Client app repeated the same command (" + snippet + "). llama-server was not asked for another copy. Keep current model ends this turn. Switch sends this turn to the ready cloud.";
+    }
+
+    private static string TruncateCommand(string? command)
+    {
+        var text = (command ?? string.Empty).Trim();
+        if (text.Length <= 80)
+        {
+            return text;
+        }
+
+        return text.Substring(0, 79) + "...";
+    }
+
     public static string FormatNewSlotEndpointMessage(string message, string? endpointApp)
     {
         var body = string.IsNullOrWhiteSpace(message) ? string.Empty : message.Trim();
         _ = endpointApp;
-        return body + " " + ClineSwitchSurvivalPolicy.FormatFailedTurnAdvice();
+        return PortRulesPostMortem.WithStopAdvice(body);
     }
 
     public static bool IsHarnessApp(string? endpointApp)

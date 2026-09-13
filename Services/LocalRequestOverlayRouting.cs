@@ -61,6 +61,13 @@ public static class LocalRequestOverlayRouting
     }
 
     public static void Apply(JsonObject payload, JsonObject? overlay)
+        => Apply(payload, overlay, PortForwardingRules.Defaults, clientMaxTokens: 0);
+
+    public static void Apply(
+        JsonObject payload,
+        JsonObject? overlay,
+        PortForwardingRules rules,
+        int clientMaxTokens)
     {
         if (overlay is null)
         {
@@ -74,10 +81,35 @@ public static class LocalRequestOverlayRouting
         }
 
         var overlayMax = ParseInt(Str(overlay, "max_tokens"), 0);
-        if (overlayMax > 0)
+        var chosen = ChooseMaxTokens(clientMaxTokens, overlayMax, rules?.ClientMaxTokensMode);
+        if (chosen > 0)
         {
-            payload["max_tokens"] = overlayMax;
+            payload["max_tokens"] = chosen;
         }
+
+        // Thinking depth follows the live Quick Select slot (local_reasoning),
+        // not whichever overlay Pick chose for temperature / max tokens.
+    }
+
+    public static int ChooseMaxTokens(int clientMax, int overlayMax, string? mode)
+    {
+        var normalized = PortForwardingRules.NormalizeClientMaxTokensMode(mode);
+        if (normalized == PortForwardingRules.ClientMaxTokensClient)
+        {
+            return clientMax > 0 ? clientMax : overlayMax;
+        }
+
+        if (normalized == PortForwardingRules.ClientMaxTokensSmaller)
+        {
+            if (clientMax > 0 && overlayMax > 0)
+            {
+                return Math.Min(clientMax, overlayMax);
+            }
+
+            return clientMax > 0 ? clientMax : overlayMax;
+        }
+
+        return overlayMax > 0 ? overlayMax : clientMax;
     }
 
     /// <summary>
@@ -204,7 +236,7 @@ public static class LocalRequestOverlayRouting
         => text.StartsWith("data:image", StringComparison.OrdinalIgnoreCase)
            || text.StartsWith("data:application/octet-stream;base64,", StringComparison.OrdinalIgnoreCase);
 
-    public static bool PromptExceedsContext(JsonObject payload, int hotContext, int headroom = 256)
+    public static bool PromptExceedsContext(JsonObject payload, int hotContext, int headroom = LocalHistoryCompaction.Headroom)
     {
         if (hotContext <= 0)
         {
@@ -214,7 +246,7 @@ public static class LocalRequestOverlayRouting
         return EstimatePromptTokens(payload) + 1 + Math.Max(0, headroom) > hotContext;
     }
 
-    public static int ClampMaxTokensToContext(JsonObject payload, int hotContext, int headroom = 256)
+    public static int ClampMaxTokensToContext(JsonObject payload, int hotContext, int headroom = LocalHistoryCompaction.Headroom)
     {
         var requested = ParseInt(Str(payload, "max_tokens"), 0);
         if (hotContext <= 0)

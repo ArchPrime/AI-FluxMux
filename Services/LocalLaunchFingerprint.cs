@@ -34,7 +34,6 @@ public static class LocalLaunchFingerprint
             settings["LocalCacheRam"]?.ToString() ?? string.Empty,
             settings["LocalFit"]?.ToString() ?? string.Empty,
             settings["LocalSwaFull"]?.ToString() ?? string.Empty,
-            settings["LocalReasoning"]?.ToString() ?? string.Empty,
             settings["LocalReasoningEffort"]?.ToString() ?? string.Empty,
             settings["LocalReasoningBudget"]?.ToString() ?? string.Empty,
             settings["LocalMultiGpuMode"]?.ToString() ?? "Auto",

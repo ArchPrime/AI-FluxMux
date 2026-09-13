@@ -1,4 +1,6 @@
+using FluxMux.Avalonia.Services;
 using System;
+using System.Globalization;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
@@ -112,6 +114,30 @@ public partial class RouteSlotViewModel : ObservableObject
     public partial string AttributeSummary { get; set; } = string.Empty;
 
     [ObservableProperty]
+    public partial string RequestReasoning { get; set; } = "Off";
+
+    [ObservableProperty]
+    public partial decimal RequestTemperature { get; set; } = 0.3m;
+
+    [ObservableProperty]
+    public partial string RequestMaxTokens { get; set; } = "2048";
+
+    public string[] RequestReasoningOptions => LocalReasoningRequestPolicy.SlotOptions;
+
+    public ObservableCollection<string> RequestMaxTokenOptions => _owner.LocalMaxTokenOptions;
+
+    public bool ShowRequestOverlay
+    {
+        get
+        {
+            var route = SelectedValidatedProfile?.RouteType ?? RouteType;
+            return route.Equals("Local", StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    public bool ShowRequestReasoning => ShowRequestOverlay;
+
+    [ObservableProperty]
     public partial string ProfileSyncNote { get; set; } = string.Empty;
 
     [ObservableProperty]
@@ -187,7 +213,10 @@ public partial class RouteSlotViewModel : ObservableObject
         string localVariant,
         bool isDefaultProfileValidated,
         string endpointValidatedUtc,
-        string validatedProfileKey = "")
+        string validatedProfileKey = "",
+        string requestReasoning = "",
+        string requestTemperature = "",
+        string requestMaxTokens = "")
     {
         _isHydrating = true;
         RouteType = routeType;
@@ -200,6 +229,13 @@ public partial class RouteSlotViewModel : ObservableObject
         EndpointValidatedUtc = endpointValidatedUtc;
         TryApplyValidatedProfileKey(validatedProfileKey);
         SyncSelectedValidatedProfile();
+        RequestReasoning = string.IsNullOrWhiteSpace(requestReasoning)
+            ? "Off"
+            : LocalReasoningRequestPolicy.TryNormalize(requestReasoning, out var level)
+                ? level
+                : LocalReasoningRequestPolicy.FromProfile(requestReasoning);
+        RequestTemperature = ParseRequestTemperature(requestTemperature, 0.3m);
+        RequestMaxTokens = CoerceRequestMaxTokens(requestMaxTokens);
         _isHydrating = false;
         NotifyRouteStateChanged();
     }
@@ -389,8 +425,49 @@ public partial class RouteSlotViewModel : ObservableObject
         }
 
         NotifyRouteStateChanged();
+        OnPropertyChanged(nameof(ShowRequestOverlay));
+        OnPropertyChanged(nameof(ShowRequestReasoning));
         _owner.OnQuickSelectSlotDraftChanged(this);
+        if (value is not null
+            && value.RouteType.Equals("Local", StringComparison.OrdinalIgnoreCase))
+        {
+            _owner.SeedQuickSelectSlotRequestOverlay(this, value);
+        }
     }
+
+    partial void OnRequestReasoningChanged(string value)
+        => NotifyRequestOverlayChanged();
+
+    partial void OnRequestTemperatureChanged(decimal value)
+        => NotifyRequestOverlayChanged();
+
+    partial void OnRequestMaxTokensChanged(string value)
+        => NotifyRequestOverlayChanged();
+
+    private void NotifyRequestOverlayChanged()
+    {
+        if (_isHydrating)
+        {
+            return;
+        }
+
+        _owner.OnQuickSelectSlotRequestOverlayChanged(this);
+    }
+
+    internal void SeedRequestOverlay(string? reasoning, string? temperature, string? maxTokens)
+    {
+        var wasHydrating = _isHydrating;
+        _isHydrating = true;
+        RequestReasoning = LocalReasoningRequestPolicy.TryNormalize(reasoning, out var level)
+            ? level
+            : LocalReasoningRequestPolicy.FromProfile(reasoning);
+        RequestTemperature = ParseRequestTemperature(temperature, RequestTemperature);
+        RequestMaxTokens = CoerceRequestMaxTokens(maxTokens, RequestMaxTokens);
+        _isHydrating = wasHydrating;
+    }
+
+    internal void SeedRequestReasoning(string? reasoning)
+        => SeedRequestOverlay(reasoning, RequestTemperature.ToString(CultureInfo.InvariantCulture), RequestMaxTokens);
 
     internal bool TryCommitSelectedProfile()
     {
@@ -500,6 +577,46 @@ public partial class RouteSlotViewModel : ObservableObject
         OnPropertyChanged(nameof(CanSaveSlot));
         OnPropertyChanged(nameof(CanLaunchSavedAssignment));
         OnPropertyChanged(nameof(SavedAssignmentKey));
+        OnPropertyChanged(nameof(ShowRequestOverlay));
+        OnPropertyChanged(nameof(ShowRequestReasoning));
         _owner.RefreshQuickSelectSlotFacts(this);
+    }
+
+    private decimal ParseRequestTemperature(string? value, decimal fallback)
+    {
+        if (double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+            && parsed >= 0
+            && parsed <= 2)
+        {
+            return (decimal)parsed;
+        }
+
+        return fallback;
+    }
+
+    private string CoerceRequestMaxTokens(string? value, string? fallback = null)
+    {
+        var options = _owner.LocalMaxTokenOptions;
+        var text = (value ?? string.Empty).Trim();
+        if (options.Any(option => option.Equals(text, StringComparison.OrdinalIgnoreCase)))
+        {
+            return options.First(option => option.Equals(text, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed > 0)
+        {
+            var closest = options
+                .Select(option => (option, n: int.TryParse(option, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number) ? number : 0))
+                .Where(item => item.n > 0)
+                .OrderBy(item => Math.Abs(item.n - parsed))
+                .Select(item => item.option)
+                .FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(closest))
+            {
+                return closest;
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(fallback) ? "2048" : fallback;
     }
 }

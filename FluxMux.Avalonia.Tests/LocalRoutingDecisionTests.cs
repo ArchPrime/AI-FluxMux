@@ -400,7 +400,7 @@ public sealed class LocalRoutingDecisionTests
             neededContext: 42000,
             candidate);
 
-        Assert.StartsWith("This turn cannot continue:", prompt, StringComparison.Ordinal);
+        Assert.StartsWith("This chat turn cannot continue:", prompt, StringComparison.Ordinal);
         Assert.Contains("Context is too small", prompt);
         Assert.Contains("alternative model with a larger Context (131,072)", prompt);
         Assert.Contains("long ctx · qwen3.6-q4.gguf", prompt);
@@ -449,14 +449,14 @@ public sealed class LocalRoutingDecisionTests
             neededContext: 0,
             candidate);
 
-        Assert.Contains("the request included a picture, and Images is off", prompt);
+        Assert.Contains("the request included a picture, and **Images** is off", prompt);
         Assert.Contains("alternative model with Images on (vision test 2 · qwen.gguf)", prompt);
         Assert.Contains("Do you want to switch to this model?", prompt);
         Assert.Equal(1, CountOccurrences(prompt, "vision test 2"));
         Assert.DoesNotContain("Currently loaded:", prompt, StringComparison.Ordinal);
         Assert.DoesNotContain("needs about", prompt, StringComparison.Ordinal);
         Assert.DoesNotContain("Local |", prompt, StringComparison.Ordinal);
-        Assert.Contains("If Harness is also using Port", prompt, StringComparison.Ordinal);
+        Assert.Contains("reconnecting", prompt, StringComparison.Ordinal);
 
         var harnessPrompt = LocalReloadRouting.BuildOfferReason(
             hotModel: "qwen.gguf",
@@ -470,7 +470,7 @@ public sealed class LocalRoutingDecisionTests
             candidate,
             harnessNeedsRelaunch: true);
         Assert.Contains(RouteRecoveryPolicy.HarnessRelaunchFromNewSlot, harnessPrompt);
-        Assert.Contains("If Harness is also using Port", harnessPrompt, StringComparison.Ordinal);
+        Assert.Contains("reconnecting", harnessPrompt, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -757,8 +757,37 @@ public sealed class LocalRoutingDecisionTests
 
         var text = LocalProfileAttributeSummary.FormatLocal(settings);
         Assert.Contains("Images on", text);
-        Assert.Contains("thinking off", text);
+        Assert.Contains("Reasoning off", text);
         Assert.Contains("ctx 54,272", text);
+    }
+
+    [Fact]
+    public void Leftover_picture_clear_does_not_retract_a_context_reload_offer()
+    {
+        Assert.False(LocalReloadRouting.ShouldClearLeftoverVisionMiss(
+            pending: true,
+            storedNeedVision: false,
+            currentNeedVision: false,
+            currentNeedThinking: false,
+            currentPromptExceeds: false));
+        Assert.True(LocalReloadRouting.ShouldClearLeftoverVisionMiss(
+            pending: true,
+            storedNeedVision: true,
+            currentNeedVision: false,
+            currentNeedThinking: false,
+            currentPromptExceeds: false));
+        Assert.False(LocalReloadRouting.ShouldClearLeftoverVisionMiss(
+            pending: false,
+            storedNeedVision: true,
+            currentNeedVision: false,
+            currentNeedThinking: false,
+            currentPromptExceeds: false));
+        Assert.False(LocalReloadRouting.ShouldClearLeftoverVisionMiss(
+            pending: true,
+            storedNeedVision: true,
+            currentNeedVision: true,
+            currentNeedThinking: false,
+            currentPromptExceeds: false));
     }
 
     private static JsonObject OverlayState(params (string Variant, double Temperature, int MaxTokens)[] overlays)

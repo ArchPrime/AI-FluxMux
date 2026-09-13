@@ -181,6 +181,7 @@ public partial class MainViewModel : ViewModelBase
     private readonly FluxMuxConfigService _configService;
     private readonly DependencyAuditService _dependencyAuditService;
     private readonly FluxMuxRuntimeService _runtimeService;
+    public PortForwardingRulesViewModel PortRules { get; }
     private FluxMuxConfigDocument _config;
     private readonly string _secretsPath;
     private string _lastHealthDetail = string.Empty;
@@ -275,6 +276,10 @@ public partial class MainViewModel : ViewModelBase
         _runtimeService = runtimeService;
         _harnessWebHost.ProcessExited += OnHarnessWebProcessExited;
         _config = _configService.Load();
+        PortRules = new PortForwardingRulesViewModel(
+            PortForwardingRulesStore.BesideConfig(_configService.ConfigPath),
+            _runtimeService.SetPortForwardingRules);
+        PortRules.Load();
         var configDir = Path.GetDirectoryName(_configService.ConfigPath) ?? string.Empty;
         _secretsPath = Path.Combine(configDir, "fluxmux_secrets.json");
         CloudCredentialsHelpText = "Cloud credentials file: " + _secretsPath + " (preferred). Fallback keys can also be read from: " + _configService.ConfigPath;
@@ -297,7 +302,15 @@ public partial class MainViewModel : ViewModelBase
         }
         _runtimeService.IdleTimeoutNotice += message =>
         {
-            SafeUiInvoke(() => StatusMessage = message);
+            SafeUiInvoke(() => ApplyLocalParkedAfterIdle(message));
+        };
+        _runtimeService.PortRulesPostMortemNotice += message =>
+        {
+            SafeUiInvoke(() => ApplyPortRulesPostMortem(message));
+        };
+        _runtimeService.PortRulesTelemetryNotice += snap =>
+        {
+            SafeUiInvoke(() => ApplyPortRulesTelemetry(snap));
         };
 
         var startupNotice = _runtimeService.ConsumeStartupRuntimeNotice();
@@ -353,7 +366,11 @@ public partial class MainViewModel : ViewModelBase
         {
         }
 
-        _harnessWebHost.Stop((int)HarnessWebPort);
+        if (DeepSeekHarnessLaunchPolicy.ShouldStopManagedWebOnFluxMuxExit())
+        {
+            _harnessWebHost.Stop((int)HarnessWebPort);
+        }
+
         _harnessLaunchedByThisFluxMuxSession = false;
 
         try
@@ -558,6 +575,7 @@ public partial class MainViewModel : ViewModelBase
     private bool _harnessWebStopIntentional;
     private int _harnessStatusProbeCounter;
     private bool _harnessLaunchedByThisFluxMuxSession;
+    private DateTimeOffset? _harnessStartedUtc;
     private int _harnessReconcileBusy;
 
     public bool CanStopHarnessWeb => ShowHarnessSetupPanel && IsHarnessWebRunning;
@@ -579,13 +597,13 @@ public partial class MainViewModel : ViewModelBase
         IsHarnessWebRunning ? "Open Harness chat" : "Start Harness web";
 
     public string HarnessWebChatButtonTooltip =>
-        "Experimental. Syncs Harness settings for the loaded profile, then opens or starts Harness web chat."
+        "Experimental. Syncs Harness settings for the loaded profile, then starts or opens Harness web on a new session — not the last dead chat."
         + (IsHarnessWebProcessTracked
-            ? " Harness is already running — opens the browser again."
+            ? " Harness is already running — opens a new session in the browser."
             : IsHarnessWebFromPriorFluxMuxSession
-                ? " Harness web from a prior AI-FluxMux run is still up — opens the browser again."
+                ? " Harness web from a prior AI-FluxMux run is still up — opens a new session in the browser."
                 : IsHarnessWebRunning
-                    ? " Harness web is already up — opens the browser again."
+                    ? " Harness web is already up — opens a new session in the browser."
                     : " Also starts dsh web if nothing is listening on the Harness web UI port.");
 
     public string HarnessLaunchModeText => string.IsNullOrWhiteSpace(_harnessWebHost.LaunchMode)
@@ -858,6 +876,13 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        var port = (int)HarnessWebPort;
+        if (DeepSeekHarnessWebHost.IsPortListening(port))
+        {
+            await OpenSyncedHarnessChatAsync(token, startedByFluxMux: false).ConfigureAwait(true);
+            return;
+        }
+
         var merge = DeepSeekHarnessSetup.MergeIntoSettingsFile(BuildHarnessSetupOptions());
         if (!merge.Success)
         {
@@ -869,13 +894,24 @@ public partial class MainViewModel : ViewModelBase
         StatusMessage = merge.Message;
         RefreshHarnessYamlSurfaces();
 
-        var port = (int)HarnessWebPort;
         try
         {
             var status = await DeepSeekHarnessSetup.ProbeWebUiStatusAsync(port, token).ConfigureAwait(true);
             var haveAuthUrl = DeepSeekHarnessWebHost.TryReadWebAuthUrlFromLaunchLog(port, out _);
+            var lastServed = _runtimeService.ReadLastServedRoute();
+            DateTimeOffset? lastTurnUtc = DeepSeekHarnessLaunchPolicy.TryParseServedUtc(
+                    lastServed?.UpdatedUtc,
+                    out var parsedServed)
+                ? parsedServed
+                : null;
             var startedByFluxMux = false;
-            if (DeepSeekHarnessSetup.NeedsFreshWebAuth(status, haveAuthUrl))
+            if (DeepSeekHarnessLaunchPolicy.ShouldRestartWebForFreshAuth(
+                    DeepSeekHarnessWebHost.IsPortListening(port),
+                    DeepSeekHarnessSetup.NeedsFreshWebAuth(status, haveAuthUrl),
+                    _runtimeService.InFlightChatCount,
+                    lastTurnUtc,
+                    _harnessStartedUtc,
+                    DateTimeOffset.UtcNow))
             {
                 HarnessWebUiStatusText = "Restarting DeepSeek Harness web so the chat page can open…";
                 _harnessWebHost.Stop(port);
@@ -891,6 +927,7 @@ public partial class MainViewModel : ViewModelBase
 
                 startedByFluxMux = true;
                 _harnessLaunchedByThisFluxMuxSession = true;
+                _harnessStartedUtc = DateTimeOffset.UtcNow;
                 RefreshHarnessProcessState();
             }
             else if (!DeepSeekHarnessSetup.IsWebUiReadyToOpen(status, haveAuthUrl)
@@ -906,6 +943,7 @@ public partial class MainViewModel : ViewModelBase
 
                 startedByFluxMux = true;
                 _harnessLaunchedByThisFluxMuxSession = true;
+                _harnessStartedUtc = DateTimeOffset.UtcNow;
                 HarnessWebUiStatusText = "DeepSeek Harness is starting on " + HarnessChatUrl + "…";
                 RefreshHarnessProcessState();
             }
@@ -981,9 +1019,29 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var openUrl = DeepSeekHarnessSetup.ResolveOpenChatUrl(port);
-        HarnessWebUiStatusText = "Harness web UI is ready on "
-            + HarnessChatUrl
-            + ". Harness settings were updated to match the loaded local profile capacity.";
+        DeepSeekHarnessSetup.TryExtractWebAuthToken(openUrl, out var authToken);
+        var sessionId = await DeepSeekHarnessSetup.TryCreateWebSessionAsync(
+            port,
+            authToken,
+            DeepSeekHarnessSetup.ResolveWorkspaceDirectory(_configService.ConfigPath),
+            token).ConfigureAwait(true);
+        if (token.IsCancellationRequested)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            openUrl = DeepSeekHarnessSetup.ResolveOpenChatUrl(port, sessionId);
+        }
+
+        HarnessWebUiStatusText = string.IsNullOrWhiteSpace(sessionId)
+            ? "Harness web UI is ready on "
+              + HarnessChatUrl
+              + ". That page may reopen the last chat — click New session in Harness."
+            : "Opened a new Harness session on "
+              + HarnessChatUrl
+              + ". Earlier Workspace chats were archived so this page should stay blank.";
         _harnessSyncedProfileFingerprint = BuildHarnessProfileFingerprint();
         OpenExternalLink(openUrl);
         SetHarnessWebUiReachable(true);
@@ -1030,6 +1088,7 @@ public partial class MainViewModel : ViewModelBase
         _harnessWebStopIntentional = true;
         _harnessWebHost.Stop((int)HarnessWebPort);
         _harnessLaunchedByThisFluxMuxSession = false;
+        _harnessStartedUtc = null;
         SetHarnessWebUiReachable(false);
         HarnessWebUiStatusText = "Stopped DeepSeek Harness web started by AI-FluxMux.";
         StatusMessage = "DeepSeek Harness web stopped.";
@@ -1051,6 +1110,7 @@ public partial class MainViewModel : ViewModelBase
             }
 
             _harnessLaunchedByThisFluxMuxSession = false;
+            _harnessStartedUtc = null;
             SetHarnessWebUiReachable(false);
             HarnessWebUiStatusText = "DeepSeek Harness web exited. Click Harness web chat on the active Quick Select slot to launch it again.";
             if (_harnessWebWasReachableThisSession)
@@ -1486,6 +1546,24 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        var lastServed = _runtimeService.ReadLastServedRoute();
+        DateTimeOffset? lastTurnUtc = DeepSeekHarnessLaunchPolicy.TryParseServedUtc(
+                lastServed?.UpdatedUtc,
+                out var parsedServed)
+            ? parsedServed
+            : null;
+        if (!DeepSeekHarnessLaunchPolicy.ShouldStopManagedWebForHygiene(
+                DeepSeekHarnessWebHost.IsPortListening((int)HarnessWebPort),
+                _runtimeService.InFlightChatCount,
+                lastTurnUtc,
+                DateTimeOffset.UtcNow))
+        {
+            HarnessWebUiStatusText = string.IsNullOrWhiteSpace(harnessStatusText)
+                ? DeepSeekHarnessLaunchPolicy.PreserveHygieneMessage
+                : harnessStatusText;
+            return;
+        }
+
         _harnessStartCts?.Cancel();
         var port = (int)HarnessWebPort;
         _harnessSyncedProfileFingerprint = string.Empty;
@@ -1583,13 +1661,15 @@ public partial class MainViewModel : ViewModelBase
         _harnessSyncedProfileFingerprint = harnessFingerprint;
         _clineSyncedContextFingerprint = fingerprint;
 
-        var changed = batch.Results.FirstOrDefault(result => result.Changed && !string.IsNullOrWhiteSpace(result.Message));
-        if (changed.Changed
+        var preferHarness = SelectedEndpointApp.Equals("DeepSeek Harness", StringComparison.OrdinalIgnoreCase)
+            || HarnessWebIsInPlay;
+        var changed = EndpointSettingsSync.PickOperatorNotice(batch.Results, preferHarness);
+        if (changed is { Changed: true } notice
             && !StatusMessage.Contains("Harness settings were updated for the new profile", StringComparison.Ordinal))
         {
             StatusMessage = StatusMessage.Equals(LocalLaunchStatus.RouteReady, StringComparison.OrdinalIgnoreCase)
-                ? LocalLaunchStatus.RouteReady + " " + changed.Message
-                : changed.Message;
+                ? LocalLaunchStatus.RouteReady + " " + notice.Message
+                : notice.Message;
         }
     }
 
@@ -2179,10 +2259,21 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial string RecoverySwitchCloudTooltip { get; set; } = RouteRecoveryPolicy.FormatSwitchTooltip("Cline", cloud: true, turnContinues: false);
 
-    public string RecoveryWaitLongerLabel => RouteRecoveryPolicy.WaitLongerLabel;
+    [ObservableProperty]
+    public partial string RecoveryWaitLongerLabel { get; set; } = RouteRecoveryPolicy.WaitLongerLabel;
+
+    [ObservableProperty]
+    public partial string RecoveryWaitLongerTooltip { get; set; } = RouteRecoveryPolicy.FormatWaitLongerTooltip(null);
 
     [ObservableProperty]
     public partial bool RecoveryWaitLongerVisible { get; set; }
+
+    [ObservableProperty]
+    public partial bool RecoverySteerVisible { get; set; }
+
+    public string RecoverySteerLabel => RouteRecoveryPolicy.SteerLabel;
+
+    public string RecoverySteerTooltip => RouteRecoveryPolicy.FormatSteerTooltip();
 
     [ObservableProperty]
     public partial bool RecoveryHarnessRelaunchVisible { get; set; }
@@ -2370,9 +2461,21 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand]
     private void ContinueWaitingRecovery()
     {
+        var pause = RouteRecoveryPolicy.IsPortRulePauseSource(_runtimeService.ReadCloudRecommend()?.Source);
         _runtimeService.AnswerHangWait();
         HideRecoveryPrompt();
-        StatusMessage = "Continuing to wait on this turn. llama-server is still working. The same choices will appear again if it stays quiet.";
+        StatusMessage = pause
+            ? "Sending this turn anyway."
+            : "Continuing to wait on this turn. llama-server is still working. The same choices will appear again if it stays quiet.";
+        PostRecoveryFollowThrough(RefreshCloudRecommendBanner);
+    }
+
+    [RelayCommand]
+    private void SteerPortRuleRecovery()
+    {
+        _runtimeService.AnswerPortRuleSteer();
+        HideRecoveryPrompt();
+        StatusMessage = "Released this turn so you can steer in the Client app.";
         PostRecoveryFollowThrough(RefreshCloudRecommendBanner);
     }
 
@@ -2408,16 +2511,40 @@ public partial class MainViewModel : ViewModelBase
     private void HideRecoveryPrompt()
     {
         HideCloudRecommendSurfaces();
+        LocalReloadRecommendVisible = false;
         RecoveryReplacementVisible = false;
+    }
+
+    /// <summary>
+    /// Operator closed the popup or started Launch/Restart instead of
+    /// answering. Release the held turn and drop the Diagnostics copy so
+    /// that banner cannot stay up after the popup is gone.
+    /// </summary>
+    internal void DismissPendingIntervention()
+    {
+        var hadCloud = CloudRecommendVisible || _runtimeService.ReadCloudRecommend() is not null;
+        var hadLocal = LocalReloadRecommendVisible || _runtimeService.ReadLocalReloadRecommend() is not null;
+        if (hadCloud)
+        {
+            ResumeCurrentModelRecovery();
+        }
+
+        if (hadLocal)
+        {
+            DeclineLocalReloadRecommend();
+        }
     }
 
     private void HideCloudRecommendSurfaces()
     {
         CloudRecommendVisible = false;
         RecoveryWaitLongerVisible = false;
+        RecoverySteerVisible = false;
         RecoverySwitchLocalVisible = false;
         RecoverySwitchCloudVisible = false;
         RecoveryHarnessRelaunchVisible = false;
+        RecoveryWaitLongerLabel = RouteRecoveryPolicy.WaitLongerLabel;
+        RecoveryWaitLongerTooltip = RouteRecoveryPolicy.FormatWaitLongerTooltip(null);
         RecoveryResumeLabel = RouteRecoveryPolicy.ResumeWaitingLabel;
     }
 
@@ -2875,8 +3002,7 @@ public partial class MainViewModel : ViewModelBase
 
     private void RefreshLastRouteExplanation()
     {
-        var snapshot = _runtimeService.ReadLastRouteExplanation();
-        var next = snapshot?.Line ?? string.Empty;
+        var next = BuildLastRouteExplanationText();
         if (!string.Equals(LastRouteExplanationText, next, StringComparison.Ordinal))
         {
             LastRouteExplanationText = next;
@@ -2887,6 +3013,68 @@ public partial class MainViewModel : ViewModelBase
         }
 
         OnPropertyChanged(nameof(ShowLastRouteExplanationText));
+    }
+
+    private string BuildLastRouteExplanationText()
+    {
+        var localAlive = _runtimeService.IsManagedLocalAlive();
+        var cloudActive = _runtimeService.IsCloudRouteActive();
+        if (!localAlive && !cloudActive)
+        {
+            return string.Empty;
+        }
+
+        string summary;
+        string loadedVariant;
+        string loadedModel;
+        if (PreferApprovedCloudRoute() || (!localAlive && cloudActive))
+        {
+            summary = LocalProfileAttributeSummary.FormatCloud(
+                GetLiveCloudProfileSettings(_mountedCloudVariant, _mountedCloudProvider, _mountedCloudModel));
+            loadedVariant = _mountedCloudVariant;
+            loadedModel = _mountedCloudModel;
+        }
+        else
+        {
+            var slot = _activeQuickSelectSlot;
+            summary = LocalProfileAttributeSummary.FormatLocal(
+                GetLiveLocalProfileSettings(_runningLocalVariant, _runningLocalModel),
+                slot?.RequestReasoning,
+                slot?.RequestTemperature.ToString(CultureInfo.InvariantCulture),
+                slot?.RequestMaxTokens);
+            loadedVariant = _runningLocalVariant;
+            loadedModel = _runningLocalModel;
+        }
+
+        var snapshot = _runtimeService.ReadLastRouteExplanation();
+        if (snapshot is not { } turn
+            || string.IsNullOrWhiteSpace(turn.Model)
+            || !turn.Model.Equals(loadedModel, StringComparison.OrdinalIgnoreCase))
+        {
+            return GatewayRouteExplanation.FormatStatusDetails(
+                modelLoaded: true,
+                attributeSummary: summary,
+                hasMatchingLastTurn: false,
+                differingOverlayVariant: null,
+                compactApplied: false,
+                reloadOffered: false,
+                cloudConsent: false);
+        }
+
+        var differingOverlay = !string.IsNullOrWhiteSpace(turn.OverlayVariant)
+            && !ProfileConfigVariantName(turn.OverlayVariant)
+                .Equals(ProfileConfigVariantName(loadedVariant), StringComparison.OrdinalIgnoreCase)
+            ? turn.OverlayVariant
+            : null;
+
+        return GatewayRouteExplanation.FormatStatusDetails(
+            modelLoaded: true,
+            attributeSummary: summary,
+            hasMatchingLastTurn: true,
+            differingOverlayVariant: differingOverlay,
+            compactApplied: turn.CompactApplied,
+            reloadOffered: turn.ReloadOffered,
+            cloudConsent: turn.CloudConsent);
     }
 
     private void NoteActiveQuickSelectInFlightTransition()
@@ -3049,9 +3237,12 @@ public partial class MainViewModel : ViewModelBase
         var localKnown = _runtimeService.IsManagedLocalAlive()
             || !string.IsNullOrWhiteSpace(_runningLocalModel)
             || !string.IsNullOrWhiteSpace(reload?.Model);
-        var nextWaitLonger = RouteRecoveryPolicy.IsLocalHangSource(snapshot.Source);
+        var portPause = RouteRecoveryPolicy.IsPortRulePauseSource(snapshot.Source);
+        var nextWaitLonger = RouteRecoveryPolicy.IsLocalHangSource(snapshot.Source) || portPause;
         var returnToLocal = CloudReturnToLocalPolicy.IsReturnToLocalSource(snapshot.Source);
         var liveConsent = RouteRecoveryPolicy.IsHotHopSource(snapshot.Source);
+        var toolLoop = RouteRecoveryPolicy.IsToolLoopSource(snapshot.Source);
+        var switchContinues = liveConsent || toolLoop;
         var pictureMiss = (snapshot.Reason ?? string.Empty)
             .StartsWith(FluxMuxGatewayRouting.LocalCannotCloudConsentReason, StringComparison.Ordinal);
         var readyCloudTakesImages = CloudProfileAllowsImages(_mountedCloudVariant, _mountedCloudProvider, _mountedCloudModel);
@@ -3069,19 +3260,24 @@ public partial class MainViewModel : ViewModelBase
             nextWaitLonger,
             snapshot.Source);
         var nextResumeLabel = RouteRecoveryPolicy.FormatResumeLabel(snapshot.Source);
+        var nextWaitLongerLabel = RouteRecoveryPolicy.FormatWaitLongerLabel(snapshot.Source);
+        var nextWaitLongerTooltip = RouteRecoveryPolicy.FormatWaitLongerTooltip(snapshot.Source);
         var nextSwitchLocalLabel = RouteRecoveryPolicy.FormatSwitchLabel(localLabel, switchNeedsRelaunch);
         var nextSwitchCloudLabel = RouteRecoveryPolicy.FormatSwitchLabel(cloudLabel, switchNeedsRelaunch);
-        var nextResumeTooltip = RouteRecoveryPolicy.FormatResumeTooltip(SelectedEndpointApp, liveConsent);
-        var nextSwitchLocalTooltip = RouteRecoveryPolicy.FormatSwitchTooltip(SelectedEndpointApp, cloud: false, liveConsent);
-        var nextSwitchCloudTooltip = RouteRecoveryPolicy.FormatSwitchTooltip(SelectedEndpointApp, cloud: true, liveConsent);
+        var nextResumeTooltip = RouteRecoveryPolicy.FormatResumeTooltip(SelectedEndpointApp, liveConsent, snapshot.Source);
+        var nextSwitchLocalTooltip = RouteRecoveryPolicy.FormatSwitchTooltip(SelectedEndpointApp, cloud: false, switchContinues);
+        var nextSwitchCloudTooltip = RouteRecoveryPolicy.FormatSwitchTooltip(SelectedEndpointApp, cloud: true, switchContinues);
         var nextText = snapshot.Reason ?? string.Empty;
 
         if (CloudRecommendVisible
             && RecoveryWaitLongerVisible == nextWaitLonger
+            && RecoverySteerVisible == portPause
             && RecoverySwitchLocalVisible == nextSwitchLocal
             && RecoverySwitchCloudVisible == nextSwitchCloud
             && RecoveryHarnessRelaunchVisible == nextHarnessHint
             && string.Equals(RecoveryResumeLabel, nextResumeLabel, StringComparison.Ordinal)
+            && string.Equals(RecoveryWaitLongerLabel, nextWaitLongerLabel, StringComparison.Ordinal)
+            && string.Equals(RecoveryWaitLongerTooltip, nextWaitLongerTooltip, StringComparison.Ordinal)
             && string.Equals(RecoveryResumeTooltip, nextResumeTooltip, StringComparison.Ordinal)
             && string.Equals(RecoverySwitchLocalTooltip, nextSwitchLocalTooltip, StringComparison.Ordinal)
             && string.Equals(RecoverySwitchCloudTooltip, nextSwitchCloudTooltip, StringComparison.Ordinal)
@@ -3095,10 +3291,13 @@ public partial class MainViewModel : ViewModelBase
 
         CloudRecommendVisible = true;
         RecoveryWaitLongerVisible = nextWaitLonger;
+        RecoverySteerVisible = portPause;
         RecoverySwitchLocalVisible = nextSwitchLocal;
         RecoverySwitchCloudVisible = nextSwitchCloud;
         RecoveryHarnessRelaunchVisible = nextHarnessHint;
         RecoveryResumeLabel = nextResumeLabel;
+        RecoveryWaitLongerLabel = nextWaitLongerLabel;
+        RecoveryWaitLongerTooltip = nextWaitLongerTooltip;
         RecoveryResumeTooltip = nextResumeTooltip;
         RecoverySwitchLocalLabel = nextSwitchLocalLabel;
         RecoverySwitchCloudLabel = nextSwitchCloudLabel;
@@ -5130,6 +5329,7 @@ public partial class MainViewModel : ViewModelBase
             RememberMountedLocal(model, variant);
             LocalRouteIndicatorState = RouteIndicatorState.Live;
             RegisterCompatibleQuickSelectLocalOverlays(model);
+            ApplyLiveLocalRequestSettingsFor(model, variant);
             StatusMessage = $"{slotLabel}: this profile is already running on the public endpoint.";
             StartMountedEndpointHealthMonitor();
             UpdateRoutingPoolStatus();
@@ -5269,6 +5469,10 @@ public partial class MainViewModel : ViewModelBase
         StatusMessage = LocalLaunchStatus.RouteReady;
         LocalRouteIndicatorState = RouteIndicatorState.Live;
         RememberMountedLocal(model, variant);
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            SetLocalVariantEndpointValidated(model, variant, validated: true);
+        }
         var isDefaultVariant = NormalizeVariantName(variant).Equals(BaseVariantDisplayName, StringComparison.OrdinalIgnoreCase);
         if (!string.IsNullOrWhiteSpace(model) && isDefaultVariant)
         {
@@ -5285,6 +5489,7 @@ public partial class MainViewModel : ViewModelBase
         StartMountedEndpointHealthMonitor();
         StopLocalLaunchCountdownMonitor();
         RegisterCompatibleQuickSelectLocalOverlays(model);
+        ApplyLiveLocalRequestSettingsFor(model, variant);
         UpdateRoutingPoolStatus();
         RefreshLocalProfilePresentationAfterRuntimeChange(model, variant);
     }
@@ -5318,10 +5523,16 @@ public partial class MainViewModel : ViewModelBase
         }
 
         RememberMountedLocal(model ?? string.Empty, variant);
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            SetLocalVariantEndpointValidated(model, variant, validated: true);
+        }
+
+        ApplyLiveLocalRequestSettingsFor(model, variant);
         LocalRouteIndicatorState = RouteIndicatorState.Live;
         RegisterCompatibleQuickSelectLocalOverlays(model);
         var overlayName = NormalizeVariantName(variant);
-        StatusMessage = $"{slotLabel}: kept the running local model and attached '{overlayName}' request settings (temperature / max tokens). Context, GPU layers, KV cache, and template already match.";
+        StatusMessage = $"{slotLabel}: kept the running local model and attached '{overlayName}'.";
         StartMountedEndpointHealthMonitor();
         UpdateRoutingPoolStatus();
         return true;
@@ -5329,11 +5540,50 @@ public partial class MainViewModel : ViewModelBase
 
     private void RegisterLocalRequestOverlay(string? model, string? variant)
     {
-        var settings = ResolveLocalVariantObjectFromConfig(model, variant ?? string.Empty);
-        var temperature = ParseDouble(settings["LocalTemperature"]?.ToString(), 0.3);
-        var maxTokens = ParseInt(settings["OverrideMaxTokens"]?.ToString(), 2048);
-        _runtimeService.UpsertLocalRequestOverlay(NormalizeVariantName(variant), temperature, maxTokens);
+        var overlay = ResolveRequestOverlayForLocal(model, variant);
+        _runtimeService.UpsertLocalRequestOverlay(
+            NormalizeVariantName(variant),
+            overlay.Temperature,
+            overlay.MaxTokens,
+            overlay.Reasoning);
     }
+
+    private void ApplyLiveLocalRequestSettingsFor(string? model, string? variant)
+    {
+        var overlay = ResolveRequestOverlayForLocal(model, variant);
+        _runtimeService.ApplyLiveLocalRequestSettings(
+            NormalizeVariantName(variant),
+            overlay.Temperature,
+            overlay.MaxTokens,
+            overlay.Reasoning);
+    }
+
+    private (double Temperature, int MaxTokens, string Reasoning) ResolveRequestOverlayForLocal(string? model, string? variant)
+    {
+        var settings = ResolveLocalVariantObjectFromConfig(model, variant ?? string.Empty);
+        var profileTemperature = ParseDouble(settings["LocalTemperature"]?.ToString(), 0.3);
+        var profileMaxTokens = ParseInt(settings["OverrideMaxTokens"]?.ToString(), 2048);
+        var profileReasoning = LocalReasoningRequestPolicy.FromProfile(settings["LocalReasoning"]?.ToString());
+        var slot = QuickSelectSlots.FirstOrDefault(item =>
+            item.HasSavedAssignment
+            && item.IsLocalRoute
+            && item.LocalModel.Equals(model ?? string.Empty, StringComparison.OrdinalIgnoreCase)
+            && NormalizeVariantName(item.LocalVariant).Equals(NormalizeVariantName(variant), StringComparison.OrdinalIgnoreCase));
+        if (slot is null)
+        {
+            return (profileTemperature, profileMaxTokens, profileReasoning);
+        }
+
+        return (
+            (double)slot.RequestTemperature,
+            ParseInt(slot.RequestMaxTokens, profileMaxTokens),
+            LocalReasoningRequestPolicy.TryNormalize(slot.RequestReasoning, out var level)
+                ? level
+                : LocalReasoningRequestPolicy.FromProfile(slot.RequestReasoning));
+    }
+
+    private string ResolveRequestReasoningForLocal(string? model, string? variant)
+        => ResolveRequestOverlayForLocal(model, variant).Reasoning;
 
     private void RegisterCompatibleQuickSelectLocalOverlays(string? model)
     {
@@ -7197,7 +7447,13 @@ public partial class MainViewModel : ViewModelBase
         ApplyLocalVariantSettings(variantName, reloadEditor: false);
         if (IsLocalProfileCurrentlyLoaded(SelectedLocalProfile, variantName))
         {
+            var live = BuildLocalVariantSettingsObject();
             _runtimeService.ApplyProfileForwardCompactSetting(SelectedLocalProfile, ProfileConfigVariantName(variantName));
+            _runtimeService.ApplyLiveLocalRequestSettings(
+                variantName,
+                ParseDouble(live["LocalTemperature"]?.ToString(), 0.3),
+                ParseInt(live["OverrideMaxTokens"]?.ToString(), 2048),
+                ResolveRequestReasoningForLocal(SelectedLocalProfile, variantName));
         }
         SaveCurrentSelections();
         CaptureLocalVariantEditorBaseline();
@@ -7424,13 +7680,18 @@ public partial class MainViewModel : ViewModelBase
                 }
             }
 
+            var failureWarning = ok
+                ? null
+                : FirstNonEmpty(
+                    FirstNonEmpty(publicProbe?.Details ?? string.Empty, result.Details),
+                    DefaultEndpointWarningTooltip);
             var stamped = SetLocalVariantEndpointValidated(
                 model,
                 variantName,
                 validated: ok,
-                warning: ok ? null : FirstNonEmpty(
-                    FirstNonEmpty(publicProbe?.Details ?? string.Empty, result.Details),
-                    DefaultEndpointWarningTooltip));
+                warning: failureWarning,
+                keepValidatedStamp: !ok
+                    && LocalLaunchStartupRetry.LooksTransientStartupFailure(failureWarning));
             RefreshLocalVariantTreeItemSummariesInPlace();
             RefreshProfileWarningSurfaces();
             UpdateLocalLaunchTelemetrySummary();
@@ -9270,7 +9531,7 @@ public partial class MainViewModel : ViewModelBase
                 localGgufs.Add(parts[0].Trim());
                 localLaunchStyles.Add(GetLocalLaunchCriticalFingerprint(profile));
                 localRequestStyles.Add(
-                    $"{ParseDouble(profile["LocalTemperature"]?.ToString(), 0.3):0.###}|{ParseInt(profile["OverrideMaxTokens"]?.ToString(), 2048)}");
+                    $"{ParseDouble(profile["LocalTemperature"]?.ToString(), 0.3):0.###}|{ParseInt(profile["OverrideMaxTokens"]?.ToString(), 2048)}|{LocalReasoningLaunchPolicy.NormalizeMode(profile["LocalReasoning"]?.ToString())}");
             }
         }
 
@@ -9301,7 +9562,7 @@ public partial class MainViewModel : ViewModelBase
 
         var overlays = _runtimeService.GetLocalRequestOverlays();
         var overlayStyles = overlays
-            .Select(item => $"{item.Temperature:0.###}|{item.MaxTokens}")
+            .Select(item => $"{item.Temperature:0.###}|{item.MaxTokens}|{item.Reasoning}")
             .Distinct(StringComparer.Ordinal)
             .Count();
         var localHot = _runtimeService.IsManagedLocalAlive();
@@ -9503,16 +9764,49 @@ public partial class MainViewModel : ViewModelBase
                && !string.IsNullOrWhiteSpace(profile["EndpointValidatedUtc"]?.ToString());
     }
 
+    private bool HasSavedProfileEndpointWarning(string collectionName, string key)
+    {
+        return _config.Root[collectionName] is JsonObject profiles
+               && profiles[key] is JsonObject profile
+               && !string.IsNullOrWhiteSpace(profile[ProfileEndpointValidationStamp.WarningKey]?.ToString());
+    }
+
+    private bool IsSavedProfileListedInQuickSelect(string collectionName, string key)
+    {
+        var assigned = collectionName.Equals("CloudProfiles", StringComparison.OrdinalIgnoreCase)
+            ? CloudProfileKeyIsAssignedToQuickSelect(key)
+            : LocalProfileKeyIsAssignedToQuickSelect(key);
+        return QuickSelectProfileOffer.KeepInSlotList(
+            IsSavedProfileEndpointValidated(collectionName, key),
+            HasSavedProfileEndpointWarning(collectionName, key),
+            assigned);
+    }
+
+    private bool CloudProfileKeyIsAssignedToQuickSelect(string key)
+    {
+        var parts = key.Split("::");
+        return parts.Length >= 3
+               && IsCloudProfileInQuickSelect(parts[0], parts[1], parts[2]);
+    }
+
+    private bool LocalProfileKeyIsAssignedToQuickSelect(string key)
+    {
+        var parts = key.Split("::", 2, StringSplitOptions.TrimEntries);
+        return parts.Length >= 2
+               && IsLocalProfileInQuickSelect(parts[0], parts[1]);
+    }
+
     private bool SetLocalVariantEndpointValidated(string variantName, bool validated, string? warning = null)
         => SetLocalVariantEndpointValidated(SelectedLocalProfile, variantName, validated, warning);
 
-    private bool SetLocalVariantEndpointValidated(string? model, string variantName, bool validated, string? warning = null)
+    private bool SetLocalVariantEndpointValidated(string? model, string variantName, bool validated, string? warning = null, bool keepValidatedStamp = false)
     {
         return SetProfileEndpointValidated(
             "LocalProfiles",
             $"{(model ?? string.Empty).Trim()}::{ProfileConfigVariantName(variantName)}",
             validated,
-            warning);
+            warning,
+            keepValidatedStamp);
     }
 
     private void SetCloudVariantEndpointValidated(string variantName, bool validated, string? warning = null)
@@ -9534,11 +9828,15 @@ public partial class MainViewModel : ViewModelBase
 
     private void NoteLocalProfileConnectionFailure(string model, string variant, string reason)
     {
+        var key = $"{(model ?? string.Empty).Trim()}::{ProfileConfigVariantName(variant)}";
+        var keepStamp = IsSavedProfileEndpointValidated("LocalProfiles", key)
+            && LocalLaunchStartupRetry.LooksTransientStartupFailure(reason);
         SetProfileEndpointValidated(
             "LocalProfiles",
-            $"{(model ?? string.Empty).Trim()}::{ProfileConfigVariantName(variant)}",
+            key,
             validated: false,
-            warning: reason);
+            warning: reason,
+            keepValidatedStamp: keepStamp);
         RefreshProfileWarningSurfaces();
     }
 
@@ -9667,7 +9965,12 @@ public partial class MainViewModel : ViewModelBase
     private static string CompactEndpointWarning(string? details)
         => LocalHealthGuidance.FormatProfilePanelWarning(details);
 
-    private bool SetProfileEndpointValidated(string collectionName, string targetKey, bool validated, string? warning = null)
+    private bool SetProfileEndpointValidated(
+        string collectionName,
+        string targetKey,
+        bool validated,
+        string? warning = null,
+        bool keepValidatedStamp = false)
     {
         if (_config.Root[collectionName] is not JsonObject profiles)
         {
@@ -9681,11 +9984,12 @@ public partial class MainViewModel : ViewModelBase
             return false;
         }
 
-        ProfileEndpointValidationStamp.Apply(profile, validated, warning);
+        ProfileEndpointValidationStamp.Apply(profile, validated, warning, keepValidatedStamp);
 
         _configService.Save(_config);
         UpdateRoutingPoolStatus();
-        return validated;
+        return validated
+            || (!string.IsNullOrWhiteSpace(profile[ProfileEndpointValidationStamp.ValidatedUtcKey]?.ToString()));
     }
 
     private static bool ProfileSettingsDiffer(JsonObject? saved, JsonObject pending)
@@ -9910,60 +10214,23 @@ public partial class MainViewModel : ViewModelBase
         return null;
     }
 
-    private void RefreshValidatedQuickSelectProfiles()
+    private ValidatedQuickSelectProfileOption CreateValidatedQuickSelectOption(
+        bool isLocal,
+        string provider,
+        string model,
+        string variant)
     {
-        var options = new Dictionary<string, ValidatedQuickSelectProfileOption>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var key in _config.GetObjectKeys("CloudProfiles"))
+        var isDefault = variant.Equals(BaseVariantDisplayName, StringComparison.OrdinalIgnoreCase);
+        var warning = ResolveProfileWarningForOption(isLocal, provider, model, variant);
+        var logo = CorporateLogoCatalog.Resolve(isLocal ? string.Empty : provider, model);
+        if (isLocal)
         {
-            var parts = key.Split("::");
-            if (parts.Length < 3 || !IsSavedProfileEndpointValidated("CloudProfiles", key))
-            {
-                continue;
-            }
-
-            var provider = parts[0].Trim();
-            var model = parts[1].Trim();
-            var variant = parts[2].Trim();
-            var isDefault = variant.Equals(BaseVariantDisplayName, StringComparison.OrdinalIgnoreCase);
-            var warning = ResolveProfileWarningForOption(isLocal: false, provider, model, variant);
-            var logo = CorporateLogoCatalog.Resolve(provider, model);
-            var option = new ValidatedQuickSelectProfileOption
-            {
-                RouteType = "Cloud",
-                Provider = provider,
-                Model = model,
-                Variant = variant,
-                DisplayName = isDefault
-                    ? $"Cloud | {provider} | {model} (default)"
-                    : $"Cloud | {provider} | {model}: {variant}",
-                LogoAssetKey = logo?.AssetKey,
-                LogoCompanyName = logo?.CompanyName ?? string.Empty,
-                ShowMissingFileWarning = warning.Show,
-                MissingFileWarningTooltip = warning.Show ? warning.Tooltip : DefaultEndpointWarningTooltip
-            };
-            options.TryAdd(option.Key, option);
-        }
-
-        foreach (var key in _config.GetObjectKeys("LocalProfiles"))
-        {
-            var parts = key.Split("::", 2, StringSplitOptions.TrimEntries);
-            if (parts.Length < 2 || !IsSavedProfileEndpointValidated("LocalProfiles", key))
-            {
-                continue;
-            }
-
-            var model = parts[0];
-            var variant = parts[1];
-            var isDefault = variant.Equals(BaseVariantDisplayName, StringComparison.OrdinalIgnoreCase);
-            var warning = ResolveProfileWarningForOption(isLocal: true, provider: string.Empty, model, variant);
-            var logo = CorporateLogoCatalog.Resolve(provider: string.Empty, model);
             var settings = GetLiveLocalProfileSettings(variant, model);
             var images = (settings?["LocalVisionEnabled"]?.ToString() ?? string.Empty)
                 .Equals("Enabled", StringComparison.OrdinalIgnoreCase)
                 ? " \u00b7 images"
                 : string.Empty;
-            var option = new ValidatedQuickSelectProfileOption
+            return new ValidatedQuickSelectProfileOption
             {
                 RouteType = "Local",
                 Model = model,
@@ -9976,6 +10243,57 @@ public partial class MainViewModel : ViewModelBase
                     ? $"Local | (default) \u00b7 {model}{images}"
                     : $"Local | {variant} \u00b7 {model}{images}"
             };
+        }
+
+        return new ValidatedQuickSelectProfileOption
+        {
+            RouteType = "Cloud",
+            Provider = provider,
+            Model = model,
+            Variant = variant,
+            DisplayName = isDefault
+                ? $"Cloud | {provider} | {model} (default)"
+                : $"Cloud | {provider} | {model}: {variant}",
+            LogoAssetKey = logo?.AssetKey,
+            LogoCompanyName = logo?.CompanyName ?? string.Empty,
+            ShowMissingFileWarning = warning.Show,
+            MissingFileWarningTooltip = warning.Show ? warning.Tooltip : DefaultEndpointWarningTooltip
+        };
+    }
+
+    private void RefreshValidatedQuickSelectProfiles()
+    {
+        var options = new Dictionary<string, ValidatedQuickSelectProfileOption>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var key in _config.GetObjectKeys("CloudProfiles"))
+        {
+            var parts = key.Split("::");
+            if (parts.Length < 3 || !IsSavedProfileListedInQuickSelect("CloudProfiles", key))
+            {
+                continue;
+            }
+
+            var option = CreateValidatedQuickSelectOption(
+                isLocal: false,
+                provider: parts[0].Trim(),
+                model: parts[1].Trim(),
+                variant: parts[2].Trim());
+            options.TryAdd(option.Key, option);
+        }
+
+        foreach (var key in _config.GetObjectKeys("LocalProfiles"))
+        {
+            var parts = key.Split("::", 2, StringSplitOptions.TrimEntries);
+            if (parts.Length < 2 || !IsSavedProfileListedInQuickSelect("LocalProfiles", key))
+            {
+                continue;
+            }
+
+            var option = CreateValidatedQuickSelectOption(
+                isLocal: true,
+                provider: string.Empty,
+                model: parts[0],
+                variant: parts[1]);
             options.TryAdd(option.Key, option);
         }
 
@@ -10173,8 +10491,43 @@ public partial class MainViewModel : ViewModelBase
 
     private static bool IsRouteNotStartedResult(RuntimeActionResult result)
     {
-        return result.Status.Contains("not started", StringComparison.OrdinalIgnoreCase)
-            || result.Details.Contains("not started", StringComparison.OrdinalIgnoreCase);
+        return LocalHealthGuidance.IsRouteNotStarted(result.Status, result.Details);
+    }
+
+    private void ApplyLocalParkedAfterIdle(string message)
+    {
+        StatusMessage = message;
+        ConnectionHealthText = message;
+        LocalRouteIndicatorState = RouteIndicatorState.Off;
+        RefreshRouteSlotIndicators();
+        UpdateRoutingPoolStatus();
+    }
+
+    private void ApplyPortRulesPostMortem(string message)
+    {
+        var text = (message ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        AppendDiagnosticEntry("PORT", text, "AI-FluxMux");
+    }
+
+    private string _lastPortRulesTelemetryDiagnostic = string.Empty;
+
+    private void ApplyPortRulesTelemetry(PortRulesTelemetry snap)
+    {
+        PortRules.ApplyTelemetry(snap);
+        var line = (snap ?? PortRulesTelemetry.Empty).CompactDiagnosticLine(PortRules.ToRules());
+        if (string.IsNullOrWhiteSpace(line)
+            || string.Equals(line, _lastPortRulesTelemetryDiagnostic, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastPortRulesTelemetryDiagnostic = line;
+        AppendDiagnosticEntry("PORT", line, "AI-FluxMux");
     }
 
     private static string DescribeRouteIndicatorState(RouteIndicatorState state)
@@ -10546,6 +10899,7 @@ public partial class MainViewModel : ViewModelBase
         IsModelActive = LocalRouteIndicatorState is RouteIndicatorState.Live or RouteIndicatorState.Amber
             || CloudRouteIndicatorState is RouteIndicatorState.Live or RouteIndicatorState.Amber;
         RefreshQuickSelectSlotActiveStates(state);
+        RefreshLastRouteExplanation();
     }
 
     private void RefreshQuickSelectSlotActiveStates(RouteIndicatorState activeState)
@@ -11260,6 +11614,9 @@ public partial class MainViewModel : ViewModelBase
                          .Take(QuickSelectSlotLimit))
             {
                 var slot = new RouteSlotViewModel(this, node["slotId"]?.ToString() ?? string.Empty, QuickSelectSlots.Count + 1);
+                var storedReasoning = node["requestReasoning"]?.ToString() ?? string.Empty;
+                var storedTemperature = node["requestTemperature"]?.ToString() ?? string.Empty;
+                var storedMaxTokens = node["requestMaxTokens"]?.ToString() ?? string.Empty;
                 slot.Hydrate(
                     NormalizeSelectionRouteType(node["routeType"]?.ToString()),
                     node["provider"]?.ToString() ?? string.Empty,
@@ -11269,7 +11626,19 @@ public partial class MainViewModel : ViewModelBase
                     FirstNonEmpty(node["localVariant"]?.ToString() ?? string.Empty, BaseVariantDisplayName),
                     ParseBool(node["validatedDefaultProfile"]?.ToString(), false),
                     node["endpointValidatedUtc"]?.ToString() ?? string.Empty,
-                    node["validatedProfileKey"]?.ToString() ?? string.Empty);
+                    node["validatedProfileKey"]?.ToString() ?? string.Empty,
+                    storedReasoning,
+                    storedTemperature,
+                    storedMaxTokens);
+                if (slot.IsLocalRoute)
+                {
+                    var settings = GetLiveLocalProfileSettings(slot.LocalVariant, slot.LocalModel);
+                    slot.SeedRequestOverlay(
+                        string.IsNullOrWhiteSpace(storedReasoning) ? settings?["LocalReasoning"]?.ToString() : storedReasoning,
+                        string.IsNullOrWhiteSpace(storedTemperature) ? settings?["LocalTemperature"]?.ToString() : storedTemperature,
+                        string.IsNullOrWhiteSpace(storedMaxTokens) ? settings?["OverrideMaxTokens"]?.ToString() : storedMaxTokens);
+                }
+
                 QuickSelectSlots.Add(slot);
             }
         }
@@ -11417,6 +11786,29 @@ public partial class MainViewModel : ViewModelBase
         StatusMessage = $"Deleted Selection {deletedNumber}.";
     }
 
+    public void ReorderQuickSelectSlot(RouteSlotViewModel dragged, RouteSlotViewModel target)
+    {
+        if (!QuickSelectSlots.Contains(dragged)
+            || !QuickSelectSlots.Contains(target)
+            || ReferenceEquals(dragged, target))
+        {
+            return;
+        }
+
+        var fromIndex = QuickSelectSlots.IndexOf(dragged);
+        var toIndex = QuickSelectSlots.IndexOf(target);
+        if (fromIndex < 0 || toIndex < 0 || fromIndex == toIndex)
+        {
+            return;
+        }
+
+        QuickSelectSlots.Move(fromIndex, toIndex);
+        RefreshQuickSelectSlotMetadata();
+    }
+
+    public void PersistQuickSelectSlotOrder()
+        => PersistQuickSelectSlots(saveDocument: true);
+
     internal string? DescribeQuickSelectConflict(RouteSlotViewModel slot, ValidatedQuickSelectProfileOption profile)
     {
         foreach (var other in QuickSelectSlots)
@@ -11444,6 +11836,14 @@ public partial class MainViewModel : ViewModelBase
             {
                 available.Add(option);
             }
+        }
+
+        if (slot.HasSavedAssignment
+            && !available.Any(option => SameQuickSelectIdentity(slot, option)))
+        {
+            available.Insert(0, slot.IsCloudRoute
+                ? CreateValidatedQuickSelectOption(isLocal: false, slot.CloudProvider, slot.CloudModel, slot.CloudVariant)
+                : CreateValidatedQuickSelectOption(isLocal: true, string.Empty, slot.LocalModel, slot.LocalVariant));
         }
 
         return available
@@ -11599,6 +11999,42 @@ public partial class MainViewModel : ViewModelBase
             && ProfileConfigVariantName(slot.LocalVariant).Equals(ProfileConfigVariantName(variant), StringComparison.OrdinalIgnoreCase));
     }
 
+    internal void SeedQuickSelectSlotRequestOverlay(
+        RouteSlotViewModel slot,
+        ValidatedQuickSelectProfileOption profile)
+    {
+        if (!profile.RouteType.Equals("Local", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var settings = GetLiveLocalProfileSettings(profile.Variant, profile.Model);
+        slot.SeedRequestOverlay(
+            settings?["LocalReasoning"]?.ToString(),
+            settings?["LocalTemperature"]?.ToString(),
+            settings?["OverrideMaxTokens"]?.ToString());
+    }
+
+    internal void OnQuickSelectSlotRequestOverlayChanged(RouteSlotViewModel slot)
+    {
+        if (!QuickSelectSlots.Contains(slot))
+        {
+            return;
+        }
+
+        PersistQuickSelectSlots(saveDocument: true);
+        RefreshQuickSelectSlotFacts(slot);
+        if (!slot.IsLocalRoute
+            || !slot.IsActiveRuntimeSlot
+            || !slot.HasSavedAssignment
+            || !_runtimeService.IsManagedLocalAlive())
+        {
+            return;
+        }
+
+        ApplyLiveLocalRequestSettingsFor(slot.LocalModel, slot.LocalVariant);
+    }
+
     internal void OnQuickSelectSlotDraftChanged(RouteSlotViewModel slot)
     {
         if (!QuickSelectSlots.Contains(slot))
@@ -11695,6 +12131,7 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        DismissPendingIntervention();
         SetActiveQuickSelectSlot(slot);
         if (slot.IsCloudRoute)
         {
@@ -11735,6 +12172,7 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        DismissPendingIntervention();
         SetActiveQuickSelectSlot(slot);
         if (slot.IsCloudRoute)
         {
@@ -12034,6 +12472,11 @@ public partial class MainViewModel : ViewModelBase
     {
         var attention = health.Status.Contains("needs attention", StringComparison.OrdinalIgnoreCase);
         var inFlight = _runtimeService.InFlightChatCount > 0;
+        if (IsRouteNotStartedResult(health))
+        {
+            return new PolledLocalHealthDecision(0, RouteIndicatorState.Off, ClearReport: false, null, null);
+        }
+
         if (health.IsSuccess)
         {
             return new PolledLocalHealthDecision(0, RouteIndicatorState.Live, ClearReport: true, null, null);
@@ -12217,7 +12660,10 @@ public partial class MainViewModel : ViewModelBase
         var localSettings = GetLiveLocalProfileSettings(localVariant, localModel);
         slot.AttributeSummary = LocalProfileAttributeSummary.FormatLocalSuitability(
             localSettings,
-            BuildQuickSelectSuitabilityHints(slot, localSettings, isLocal: true));
+            BuildQuickSelectSuitabilityHints(slot, localSettings, isLocal: true),
+            slot.RequestReasoning,
+            slot.RequestTemperature.ToString(CultureInfo.InvariantCulture),
+            slot.RequestMaxTokens);
         var localWarning = ResolveProfileWarning(isLocal: true, localModel, localSettings);
         slot.IsEndpointTrusted = localSettings is not null && !localWarning.Show;
         slot.ProfileSyncNote = localSettings is null
@@ -12265,6 +12711,15 @@ public partial class MainViewModel : ViewModelBase
             if (slot.HasSavedAssignment)
             {
                 persistedSlot["validatedProfileKey"] = slot.SavedAssignmentKey;
+            }
+
+            if (slot.IsLocalRoute)
+            {
+                persistedSlot["requestReasoning"] = LocalReasoningRequestPolicy.TryNormalize(slot.RequestReasoning, out var level)
+                    ? level
+                    : LocalReasoningRequestPolicy.FromProfile(slot.RequestReasoning);
+                persistedSlot["requestTemperature"] = slot.RequestTemperature.ToString(CultureInfo.InvariantCulture);
+                persistedSlot["requestMaxTokens"] = slot.RequestMaxTokens;
             }
 
             slots.Add(persistedSlot);

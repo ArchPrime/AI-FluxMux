@@ -1,6 +1,6 @@
 {
   "protocol": "FluxMux",
-  "version": "0.2 beta",
+  "version": "0.2.1 beta",
   "notes": "Optional. Shown after Check for updates.",
   "downloadUrl": "https://example.com/AI-FluxMux-setup.exe",
   "helpUrl": "https://example.com/Help.html",

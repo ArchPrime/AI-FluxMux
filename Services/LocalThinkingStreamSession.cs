@@ -26,15 +26,42 @@ public sealed class LocalThinkingStreamSession
     ];
 
     private bool _insideThink;
+    private bool _openedThinkTag;
+    private readonly int _maxTokens;
     private readonly StringBuilder _prefix = new();
 
     public bool StripAllThinking { get; }
 
-    public LocalThinkingStreamSession(string? reasoningMode)
+    public bool SawThinking { get; private set; }
+
+    public bool SawVisibleContent { get; private set; }
+
+    public bool SawToolCalls { get; private set; }
+
+    public bool InsideThink => _insideThink;
+
+    public bool OpenedThinkTag => _openedThinkTag;
+
+    public bool IsThinkOnly
+        => StripAllThinking && SawThinking && !SawVisibleContent && !SawToolCalls;
+
+    public bool IsThinkCutOff
+        => !StripAllThinking && SawThinking && !SawVisibleContent && !SawToolCalls;
+
+    public bool WroteThinkOnlyNotice { get; private set; }
+
+    public void MarkThinkOnlyNoticeWritten() => WroteThinkOnlyNotice = true;
+
+    public string? ReasoningMode { get; }
+
+    public LocalThinkingStreamSession(string? reasoningMode, int maxTokens = 0)
     {
+        ReasoningMode = reasoningMode;
+        _maxTokens = maxTokens;
         var mode = LocalReasoningLaunchPolicy.NormalizeMode(reasoningMode);
-        // On: only empty blocks are cleaned elsewhere; keep nonempty think text.
-        StripAllThinking = !LocalReasoningLaunchPolicy.IsOn(mode);
+        // Thinking on (On / Low / Medium / XHigh): only empty blocks are cleaned
+        // elsewhere; keep nonempty think text.
+        StripAllThinking = !LocalReasoningLaunchPolicy.IsThinkingEnabled(mode);
     }
 
     public bool FilterCompletionJson(JsonObject root)
@@ -61,6 +88,23 @@ public sealed class LocalThinkingStreamSession
             {
                 changed = true;
             }
+
+            if (IsThinkOnly
+                && LocalThinkOnlyReply.ApplyNoticeToFinishedChoice(
+                    choice,
+                    LocalThinkOnlyReply.FormatClientMessage()))
+            {
+                WroteThinkOnlyNotice = true;
+                changed = true;
+            }
+            else if (IsThinkCutOff
+                && LocalThinkOnlyReply.ApplyNoticeToFinishedChoice(
+                    choice,
+                    LocalThinkBudgetNotice.FormatClientMessage(ReasoningMode, _maxTokens)))
+            {
+                WroteThinkOnlyNotice = true;
+                changed = true;
+            }
         }
 
         return changed;
@@ -74,26 +118,33 @@ public sealed class LocalThinkingStreamSession
         }
 
         var changed = false;
+        if (message["tool_calls"] is JsonArray { Count: > 0 }
+            || message["function_call"] is JsonObject)
+        {
+            SawToolCalls = true;
+        }
+
         if (StripAllThinking)
         {
             if (message.ContainsKey("reasoning_content"))
             {
                 message.Remove("reasoning_content");
+                SawThinking = true;
                 changed = true;
             }
 
             if (message.ContainsKey("reasoning"))
             {
                 message.Remove("reasoning");
+                SawThinking = true;
                 changed = true;
             }
         }
-        else if (message["reasoning_content"] is JsonValue emptyReasoning
-                 && emptyReasoning.TryGetValue<string>(out var reasoning)
-                 && string.IsNullOrWhiteSpace(reasoning))
+        else if (message.ContainsKey("reasoning_content")
+            || message.ContainsKey("reasoning"))
         {
-            message.Remove("reasoning_content");
-            changed = true;
+            SawThinking = true;
+            _insideThink = true;
         }
 
         if (message["content"] is JsonValue contentValue
@@ -120,12 +171,16 @@ public sealed class LocalThinkingStreamSession
 
         if (!StripAllThinking)
         {
-            return LocalThinkingContentFilter.StripEmptyThinkingFromText(text);
+            // Per-chunk empty-think cleanup Trim() ate space-only deltas, so
+            // Harness/Cline showed words jammed together inside <think>.
+            NoteThinkProgress(text);
+            return text;
         }
 
         var input = _prefix.Length == 0 ? text : _prefix + text;
         _prefix.Clear();
         var output = new StringBuilder(input.Length);
+        var startedInsideThink = _insideThink;
         var i = 0;
         while (i < input.Length)
         {
@@ -148,6 +203,7 @@ public sealed class LocalThinkingStreamSession
 
                 output.Append(input, i, open - i);
                 _insideThink = true;
+                SawThinking = true;
                 i = open + openTag.Length;
                 continue;
             }
@@ -169,7 +225,97 @@ public sealed class LocalThinkingStreamSession
             i = close + closeTag.Length;
         }
 
-        return output.ToString();
+        var filtered = output.ToString();
+        if (startedInsideThink || _insideThink || !string.Equals(filtered, input, StringComparison.Ordinal))
+        {
+            SawThinking = true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(filtered))
+        {
+            SawVisibleContent = true;
+        }
+
+        return filtered;
+    }
+
+    private void NoteThinkProgress(string text)
+    {
+        var wasInside = _insideThink;
+        NoteThinkTags(text);
+        if (_openedThinkTag)
+        {
+            if (!_insideThink && !string.IsNullOrWhiteSpace(text))
+            {
+                if (wasInside)
+                {
+                    if (!string.IsNullOrWhiteSpace(TextAfterLastClose(text)))
+                    {
+                        SawVisibleContent = true;
+                    }
+                }
+                else
+                {
+                    SawVisibleContent = true;
+                }
+            }
+
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(text))
+        {
+            _insideThink = false;
+            SawVisibleContent = true;
+        }
+    }
+
+    private void NoteThinkTags(string text)
+    {
+        var i = 0;
+        while (i < text.Length)
+        {
+            if (!_insideThink)
+            {
+                var open = IndexOfAnyTag(text, i, OpenTags, out var openTag);
+                if (open < 0)
+                {
+                    break;
+                }
+
+                _insideThink = true;
+                _openedThinkTag = true;
+                SawThinking = true;
+                i = open + openTag.Length;
+                continue;
+            }
+
+            var close = IndexOfAnyTag(text, i, CloseTags, out var closeTag);
+            if (close < 0)
+            {
+                break;
+            }
+
+            _insideThink = false;
+            i = close + closeTag.Length;
+        }
+    }
+
+    private static string TextAfterLastClose(string text)
+    {
+        var last = -1;
+        var tagLength = 0;
+        foreach (var tag in CloseTags)
+        {
+            var idx = text.LastIndexOf(tag, StringComparison.OrdinalIgnoreCase);
+            if (idx > last)
+            {
+                last = idx;
+                tagLength = tag.Length;
+            }
+        }
+
+        return last < 0 ? string.Empty : text[(last + tagLength)..];
     }
 
     private static int IndexOfAnyTag(string input, int start, string[] tags, out string matched)

@@ -26,6 +26,8 @@ public sealed class LocalReasoningPayloadPolicyTests
         var forwarded = payload["messages"]![1]!["content"]!.GetValue<string>();
         Assert.DoesNotContain(thinkBlock, forwarded);
         Assert.False(payload["chat_template_kwargs"]!["enable_thinking"]!.GetValue<bool>());
+        Assert.Equal(0, payload["chat_template_kwargs"]!["thinking_budget"]!.GetValue<int>());
+        Assert.Equal(0, payload["thinking_budget"]!.GetValue<int>());
         Assert.False(payload.ContainsKey("enable_thinking"));
         Assert.False(payload.ContainsKey("reasoning"));
     }
@@ -46,6 +48,23 @@ public sealed class LocalReasoningPayloadPolicyTests
 
         Assert.Contains(thinkBlock, payload["messages"]![0]!["content"]!.GetValue<string>());
         Assert.True(payload["chat_template_kwargs"]!["enable_thinking"]!.GetValue<bool>());
+        Assert.Equal("medium", payload["chat_template_kwargs"]!["reasoning_effort"]!.GetValue<string>());
+        Assert.Equal("medium", payload["reasoning_effort"]!.GetValue<string>());
+    }
+
+    [Theory]
+    [InlineData("Low", "low")]
+    [InlineData("Medium", "medium")]
+    [InlineData("XHigh", "xhigh")]
+    public void Slot_levels_enable_thinking_and_set_effort(string level, string effort)
+    {
+        var payload = new JsonObject();
+
+        Assert.False(LocalReasoningPayloadPolicy.ApplyToPayload(payload, level));
+
+        Assert.True(payload["chat_template_kwargs"]!["enable_thinking"]!.GetValue<bool>());
+        Assert.Equal(effort, payload["chat_template_kwargs"]!["reasoning_effort"]!.GetValue<string>());
+        Assert.Equal(effort, payload["reasoning_effort"]!.GetValue<string>());
     }
 
     [Fact]
@@ -64,5 +83,22 @@ public sealed class LocalReasoningPayloadPolicyTests
 
         Assert.False(payload.ContainsKey("enable_thinking"));
         Assert.False(payload.ContainsKey("chat_template_kwargs"));
+        Assert.False(payload.ContainsKey("thinking_budget"));
+    }
+
+    [Fact]
+    public void ApplyThinkingBudget_caps_low_and_leaves_xhigh_uncapped()
+    {
+        var low = new JsonObject { ["max_tokens"] = 16384 };
+        LocalReasoningPayloadPolicy.ApplyToPayload(low, "Low");
+        LocalReasoningPayloadPolicy.ApplyThinkingBudget(low, "Low");
+        Assert.Equal(2048, low["thinking_budget"]!.GetValue<int>());
+        Assert.Equal(2048, low["chat_template_kwargs"]!["thinking_budget"]!.GetValue<int>());
+
+        var xhigh = new JsonObject { ["max_tokens"] = 32768 };
+        LocalReasoningPayloadPolicy.ApplyToPayload(xhigh, "XHigh");
+        LocalReasoningPayloadPolicy.ApplyThinkingBudget(xhigh, "XHigh");
+        Assert.False(xhigh.ContainsKey("thinking_budget"));
+        Assert.False(xhigh["chat_template_kwargs"]!.AsObject().ContainsKey("thinking_budget"));
     }
 }

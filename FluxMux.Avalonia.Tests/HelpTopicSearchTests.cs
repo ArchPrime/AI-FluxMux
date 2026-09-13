@@ -69,6 +69,24 @@ public sealed class HelpTopicSearchTests
     }
 
     [Fact]
+    public void A_topic_id_still_finds_the_topic_after_the_title_changes()
+    {
+        var topics = new[]
+        {
+            new HelpTopicEntry
+            {
+                Title = "Forwarding rules",
+                Id = "topic.port_rules",
+                Section = "Setting up"
+            }
+        };
+
+        Assert.Equal("Forwarding rules", HelpTopicSearch.FindByReference(topics, "topic.port_rules")?.Title);
+        Assert.Equal("Forwarding rules", HelpTopicSearch.FindByReference(topics, "topic_port_rules")?.Title);
+        Assert.Equal("Forwarding rules", HelpTopicSearch.FindByReference(topics, "Forwarding rules")?.Title);
+    }
+
+    [Fact]
     public void A_word_bookmark_still_finds_the_topic()
     {
         var topics = Reference();

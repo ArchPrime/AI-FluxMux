@@ -57,7 +57,17 @@ public static class LocalChatImageNormalizer
         {
             foreach (var message in messages.OfType<JsonObject>())
             {
-                PromoteInlineImageUrls(message);
+                var role = message["role"]?.ToString();
+                if (!LocalChatPayloadSignals.MessageRoleCanCarryPictures(role))
+                {
+                    continue;
+                }
+
+                if (LocalChatPayloadSignals.MessageRoleMayHaveInlineImageUrls(role))
+                {
+                    PromoteInlineImageUrls(message);
+                }
+
                 converted += await NormalizeMessageAsync(message, client, cache, log, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -224,11 +234,24 @@ public static class LocalChatImageNormalizer
     private static bool LooksLikeImagePart(JsonObject part)
     {
         var type = (part["type"]?.ToString() ?? string.Empty).Trim().ToLowerInvariant();
-        return type.Contains("image", StringComparison.Ordinal)
+        if (type.Contains("image", StringComparison.Ordinal)
             || part["image_url"] is not null
             || part["image"] is not null
-            || part["input_image"] is not null
-            || part["source"] is JsonObject;
+            || part["input_image"] is not null)
+        {
+            return true;
+        }
+
+        if (part["source"] is JsonObject source)
+        {
+            var media = (source["media_type"]?.ToString() ?? source["mediaType"]?.ToString() ?? string.Empty)
+                .Trim()
+                .ToLowerInvariant();
+            return media.StartsWith("image/", StringComparison.Ordinal)
+                || type.Equals("image", StringComparison.Ordinal);
+        }
+
+        return false;
     }
 
     private static JsonObject CreateImageUrlPart(string url)

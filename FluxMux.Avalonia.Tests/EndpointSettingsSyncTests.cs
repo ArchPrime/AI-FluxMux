@@ -119,6 +119,44 @@ public sealed class EndpointSettingsSyncTests
     }
 
     [Fact]
+    public void Operator_notice_skips_cline_when_harness_is_in_play()
+    {
+        var cline = new EndpointSettingsSyncResult(
+            EndpointAdapterCatalog.ClineId,
+            true,
+            true,
+            false,
+            "Cline Auto compact was turned off so FluxMux Compact can run. Start a new Cline task.");
+        var harness = new EndpointSettingsSyncResult(
+            EndpointAdapterCatalog.HarnessId,
+            true,
+            true,
+            false,
+            "Harness settings were updated for the loaded local profile capacity.");
+
+        var notice = EndpointSettingsSync.PickOperatorNotice([cline, harness], preferHarness: true);
+        Assert.NotNull(notice);
+        Assert.Equal(EndpointAdapterCatalog.HarnessId, notice.Value.Id);
+        Assert.Contains("Harness settings", notice.Value.Message, StringComparison.Ordinal);
+
+        Assert.Null(EndpointSettingsSync.PickOperatorNotice([cline], preferHarness: true));
+    }
+
+    [Fact]
+    public void Operator_notice_keeps_cline_when_cline_is_the_client_app()
+    {
+        var cline = new EndpointSettingsSyncResult(
+            EndpointAdapterCatalog.ClineId,
+            true,
+            true,
+            false,
+            "Cline Auto compact was turned off so FluxMux Compact can run. Start a new Cline task.");
+        var notice = EndpointSettingsSync.PickOperatorNotice([cline], preferHarness: false);
+        Assert.NotNull(notice);
+        Assert.Equal(EndpointAdapterCatalog.ClineId, notice.Value.Id);
+    }
+
+    [Fact]
     public void Orchestrator_runs_every_enabled_adapter()
     {
         var first = new StubAdapter("a");

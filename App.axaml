@@ -23,6 +23,10 @@
                     <SolidColorBrush x:Key="FluxSecondaryForeground" Color="#334155" />
                     <SolidColorBrush x:Key="FluxLinkForeground" Color="#0563C1" />
                     <SolidColorBrush x:Key="FluxSplitter" Color="#98A2B3" />
+                    <SolidColorBrush x:Key="FluxChromeBackground" Color="#98A2B3" />
+                    <SolidColorBrush x:Key="FluxChromeEdge" Color="#475467" />
+                    <SolidColorBrush x:Key="FluxSashGrip" Color="#F9FAFB" />
+                    <SolidColorBrush x:Key="FluxSashHover" Color="#2563EB" />
                     <SolidColorBrush x:Key="FluxListItemBackground" Color="#F8FAFC" />
                     <SolidColorBrush x:Key="FluxListItemBorder" Color="#CBD5E1" />
                     <SolidColorBrush x:Key="FluxListItemHoverBackground" Color="#EFF6FF" />
@@ -67,6 +71,10 @@
                     <SolidColorBrush x:Key="FluxSecondaryForeground" Color="#D0D5DD" />
                     <SolidColorBrush x:Key="FluxLinkForeground" Color="#93C5FD" />
                     <SolidColorBrush x:Key="FluxSplitter" Color="#475467" />
+                    <SolidColorBrush x:Key="FluxChromeBackground" Color="#475467" />
+                    <SolidColorBrush x:Key="FluxChromeEdge" Color="#0C111C" />
+                    <SolidColorBrush x:Key="FluxSashGrip" Color="#E4E7EC" />
+                    <SolidColorBrush x:Key="FluxSashHover" Color="#3B82F6" />
                     <SolidColorBrush x:Key="FluxListItemBackground" Color="#152033" />
                     <SolidColorBrush x:Key="FluxListItemBorder" Color="#344054" />
                     <SolidColorBrush x:Key="FluxListItemHoverBackground" Color="#1E3A5F" />
@@ -126,6 +134,36 @@
             <Setter Property="Padding" Value="8,1" />
             <Setter Property="MinHeight" Value="0" />
             <Setter Property="Foreground" Value="{DynamicResource FluxSecondaryForeground}" />
+        </Style>
+        <Style Selector="Button.helpTopicLink">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Padding" Value="4,0" />
+            <Setter Property="MinHeight" Value="0" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Foreground" Value="{DynamicResource FluxLinkForeground}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="ComboBox">
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Padding" Value="8,4" />
+        </Style>
+        <Style Selector="NumericUpDown">
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+        <!-- Fluent defaults ExpanderMinHeight to 48 (touch). Match ComboBox / button rows. -->
+        <Style Selector="Expander.fieldHeight">
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+        </Style>
+        <Style Selector="Expander.fieldHeight /template/ ToggleButton#ExpanderHeader">
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="Padding" Value="8,0,0,0" />
         </Style>
     </Application.Styles>
 </Application>

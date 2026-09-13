@@ -155,7 +155,7 @@ public static class HelpHtmlViewBuilder
 
             var topicPanel = new StackPanel();
             topicPanel.Classes.Add("helpTopic");
-            topicPanel.Tag = topic.Title;
+            topicPanel.Tag = new HelpTopicAnchor { Title = topic.Title, Id = topic.Id };
             var followsSection = topic.LeadIn.Count > 0
                 && topic.LeadIn[^1] is HelpBannerBlock { Level: <= 1 };
             var titleBlock = new TextBlock

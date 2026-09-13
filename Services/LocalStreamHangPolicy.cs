@@ -11,6 +11,8 @@ namespace FluxMux.Avalonia.Services;
 public static class LocalStreamHangPolicy
 {
     public const int FirstByteSeconds = 25;
+    public const int ThinkTokensPerSecond = 20;
+    public const int MaxThinkFirstByteSeconds = 180;
     public const int StallSeconds = 45;
     public const int WaitLongerSeconds = 90;
     public const int DecisionSeconds = 45;
@@ -19,13 +21,21 @@ public static class LocalStreamHangPolicy
     public const int CopyTimeoutExtendSeconds = WaitLongerSeconds + DecisionSeconds + 30;
     public const string FirstByteReason = "first_byte";
     public const string StallReason = "stall";
+    public const string RecoveredStatus = "recovered";
 
     public static string HangWaitMessage => FormatHangWaitMessage(null);
 
     public const string HangAbortMessage =
-        "This turn was aborted: the local model did not start a reply in time. This Cline turn is over. Start a new Cline task if the same error would repeat. If Harness is also using Port, do not continue that Harness chat — start a fresh Harness chat from Quick Select.";
+        PortRulesPostMortem.ChatTurnCannotContinue
+        + "llama-server did not start a reply in time. "
+        + PortRulesPostMortem.NarrowerChatAdvice
+        + " "
+        + PortRulesPostMortem.PortRuleStopAdvice;
     public const string HangAbortHint =
-        "AI-FluxMux ended this stream so the Client app can stop waiting. Cline may still look busy; another message in this task still sends the old thread. If Harness is also using Port, Deep Dive can look busy too. llama-server is parked so the AI-FluxMux window stays usable. Start a new Cline task. If Harness is also using Port, start a fresh Harness chat from Quick Select. You may need to use a stronger model, or ask a simpler question.";
+        "AI-FluxMux ended this stream so the Client app can stop waiting. llama-server is parked so the AI-FluxMux window stays usable. "
+        + PortRulesPostMortem.NarrowerChatAdvice
+        + " "
+        + PortRulesPostMortem.PortRuleStopAdvice;
 
     public static string FormatHangWaitMessage(string? endpointApp)
     {
@@ -33,15 +43,26 @@ public static class LocalStreamHangPolicy
         var wait = ControlLabelMarkup.Mark(RouteRecoveryPolicy.WaitLongerLabel);
         var keep = ControlLabelMarkup.Mark(RouteRecoveryPolicy.ResumeWaitingLabel);
         var switchTo = ControlLabelMarkup.Mark(RouteRecoveryPolicy.SwitchLabelPrefix);
-        return "llama-server is still quiet. Models that think first (for example Qwen) can sit without sending tokens for a while. Note that AI-FluxMux is watching llama-server, not the Client app. Cline may end a stalled turn on its own. Harness may end a stalled turn, or may look like it is still working normally. Choose "
+        return "llama-server is still quiet. Models that think first (for example Qwen) can sit without sending tokens for a while. Note that AI-FluxMux is watching llama-server, not the Client app. The Client app may keep working (tools, screenshots) while this prompt is open, and this prompt closes if llama-server starts sending. Choose "
             + wait + " to keep this turn open. The same choices will appear again if llama-server stays quiet. If you choose "
-            + keep + " or " + switchTo + " the other ready model, start a new Cline task if the same stall would repeat. If Harness is also using Port, start a fresh Harness chat from Quick Select. You may need to use a stronger model, or ask a simpler question.";
+            + keep + " or " + switchTo + " the other ready model, "
+            + PortRulesPostMortem.NarrowerChatAdvice
+            + " "
+            + PortRulesPostMortem.PortRuleStopAdvice;
     }
 
     public static string FormatHangAbortMessage(string? endpointApp)
+        => FormatHangAbortMessage(endpointApp, portRuleDetails: null);
+
+    public static string FormatHangAbortMessage(string? endpointApp, string? portRuleDetails)
     {
         _ = endpointApp;
-        return HangAbortMessage;
+        if (string.IsNullOrWhiteSpace(portRuleDetails))
+        {
+            return HangAbortMessage;
+        }
+
+        return PortRulesPostMortem.WithStopAdvice(portRuleDetails);
     }
 
     public static string FormatHangAbortHint(string? endpointApp)
@@ -51,10 +72,50 @@ public static class LocalStreamHangPolicy
     }
 
     public static int ClampCopyTimeoutSeconds(int estimatedSeconds)
-        => Math.Max(MinCopyTimeoutSeconds, Math.Min(MaxCopyTimeoutSeconds, estimatedSeconds));
+        => ClampCopyTimeoutSeconds(estimatedSeconds, thinkBudget: 0, PortForwardingRules.Defaults);
+
+    public static int ClampCopyTimeoutSeconds(int estimatedSeconds, int? thinkBudget)
+        => ClampCopyTimeoutSeconds(estimatedSeconds, thinkBudget, PortForwardingRules.Defaults);
+
+    public static int ClampCopyTimeoutSeconds(int estimatedSeconds, int? thinkBudget, PortForwardingRules rules)
+    {
+        var live = (rules ?? PortForwardingRules.Defaults).Clamp();
+        var firstByte = (int)FirstByteDeadlineForThinkBudget(thinkBudget, live).TotalSeconds;
+        var min = Math.Max(
+            live.MinCopyTimeoutSeconds,
+            firstByte + live.DecisionSeconds + live.WaitLongerSeconds + live.DecisionSeconds);
+        return Math.Max(min, Math.Min(MaxCopyTimeoutSeconds, estimatedSeconds));
+    }
+
+    /// <summary>
+    /// Low/Medium sit in think without SSE bytes. Do not open the hang
+    /// dialog until that budget could have been spent.
+    /// </summary>
+    public static TimeSpan FirstByteDeadlineForThinkBudget(int? thinkBudget)
+        => FirstByteDeadlineForThinkBudget(thinkBudget, PortForwardingRules.Defaults);
+
+    public static TimeSpan FirstByteDeadlineForThinkBudget(int? thinkBudget, PortForwardingRules rules)
+    {
+        var live = (rules ?? PortForwardingRules.Defaults).Clamp();
+        if (thinkBudget is null)
+        {
+            return TimeSpan.FromSeconds(live.WaitLongerSeconds);
+        }
+
+        if (thinkBudget.Value <= 0)
+        {
+            return TimeSpan.FromSeconds(live.FirstByteSeconds);
+        }
+
+        var seconds = (int)Math.Ceiling(thinkBudget.Value / (double)live.ThinkTokensPerSecond);
+        return TimeSpan.FromSeconds(Math.Clamp(seconds, live.FirstByteSeconds, live.MaxThinkFirstByteSeconds));
+    }
 
     public static void ExtendCopyTimeout(CancellationTokenSource timeoutCts)
-        => timeoutCts.CancelAfter(TimeSpan.FromSeconds(CopyTimeoutExtendSeconds));
+        => ExtendCopyTimeout(timeoutCts, PortForwardingRules.Defaults);
+
+    public static void ExtendCopyTimeout(CancellationTokenSource timeoutCts, PortForwardingRules rules)
+        => timeoutCts.CancelAfter(TimeSpan.FromSeconds((rules ?? PortForwardingRules.Defaults).Clamp().CopyTimeoutExtendSeconds));
 
     public static bool ShouldAbort(
         bool gotUpstreamBytes,
@@ -92,25 +153,50 @@ public static class LocalStreamHangPolicy
         reason = string.Empty;
         return false;
     }
+
+    public static bool StreamRecovered(
+        bool gotUpstreamBytes,
+        TimeSpan sinceLastUpstreamByte,
+        TimeSpan stallDeadline)
+        => gotUpstreamBytes && sinceLastUpstreamByte < stallDeadline;
 }
 
 public sealed class LocalStreamHangClock
 {
+    public LocalStreamHangClock()
+        : this(PortForwardingRules.Defaults)
+    {
+    }
+
+    public LocalStreamHangClock(PortForwardingRules rules)
+    {
+        Rules = (rules ?? PortForwardingRules.Defaults).Clamp();
+        FirstByteDeadline = TimeSpan.FromSeconds(Rules.FirstByteSeconds);
+        StallDeadline = TimeSpan.FromSeconds(Rules.StallSeconds);
+    }
+
+    public PortForwardingRules Rules { get; }
+
     public DateTime CopyStartUtc { get; set; } = DateTime.UtcNow;
 
     public DateTime LastByteUtc { get; set; } = DateTime.UtcNow;
 
-    public TimeSpan FirstByteDeadline { get; set; } = TimeSpan.FromSeconds(LocalStreamHangPolicy.FirstByteSeconds);
+    public TimeSpan FirstByteDeadline { get; set; }
 
-    public TimeSpan StallDeadline { get; set; } = TimeSpan.FromSeconds(LocalStreamHangPolicy.StallSeconds);
+    public TimeSpan StallDeadline { get; set; }
+
+    public string LastAbortReason { get; set; } = string.Empty;
+
+    public int WaitLongerCount { get; set; }
 
     public void NoteByte() => LastByteUtc = DateTime.UtcNow;
 
     public void ResetForWaitLonger()
     {
+        WaitLongerCount++;
         CopyStartUtc = DateTime.UtcNow;
         LastByteUtc = DateTime.UtcNow;
-        FirstByteDeadline = TimeSpan.FromSeconds(LocalStreamHangPolicy.WaitLongerSeconds);
-        StallDeadline = TimeSpan.FromSeconds(LocalStreamHangPolicy.WaitLongerSeconds);
+        FirstByteDeadline = TimeSpan.FromSeconds(Rules.WaitLongerSeconds);
+        StallDeadline = TimeSpan.FromSeconds(Rules.WaitLongerSeconds);
     }
 }

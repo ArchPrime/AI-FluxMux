@@ -30,4 +30,13 @@ public sealed class ControlLabelMarkupTests
             "Click Health again.",
             ControlLabelMarkup.Strip("Click **Health** again."));
     }
+
+    [Fact]
+    public void ForClientApp_strips_markers_so_Cline_does_not_show_asterisks()
+    {
+        Assert.Equal(
+            "raise Mill at omitted",
+            ControlLabelMarkup.ForClientApp("raise **Mill at omitted**"));
+        Assert.DoesNotContain("**", ControlLabelMarkup.ForClientApp(PortRulesPostMortem.MillBreakAdvice));
+    }
 }

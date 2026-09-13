@@ -71,8 +71,23 @@ public sealed class HelpTableBlock : HelpBlock
 public sealed class HelpTopic
 {
     public required string Title { get; init; }
+
+    /// <summary>
+    /// Stable machine id from a hidden Heading 3 that starts with
+    /// <see cref="HelpTopicIds.Prefix"/>. The Heading 2 title can change when
+    /// Help.html is updated; UI jumps and in-Help links keep this id.
+    /// </summary>
+    public string Id { get; init; } = string.Empty;
+
     public IReadOnlyList<HelpBlock> LeadIn { get; init; } = [];
     public IReadOnlyList<HelpBlock> Blocks { get; init; } = [];
+}
+
+/// <summary>Stable Help topic ids that settings can jump to after a copy update.</summary>
+public static class HelpTopicIds
+{
+    public const string Prefix = "topic.";
+    public const string PortRules = "topic.port_rules";
 }
 
 public sealed class HelpDocument
@@ -90,6 +105,7 @@ public sealed class HelpDocument
 /// <summary>
 /// Reads Word "Web Page, Filtered" HTML. Heading 2 becomes a Help index topic.
 /// Heading 2 "Interface notes" is omitted from that index; Heading 3 there is a UI note id.
+/// A Heading 3 whose text is <c>topic.*</c> under a real topic is that topic's id and is not shown.
 /// </summary>
 public static class HelpHtmlParser
 {
@@ -132,6 +148,7 @@ public static class HelpHtmlParser
         var preamble = new List<HelpBlock>();
         var topics = new List<HelpTopic>();
         string? topicTitle = null;
+        var topicId = string.Empty;
         var topicBlocks = new List<HelpBlock>();
         var topicLeadIn = new List<HelpBlock>();
         var pendingLeadIn = new List<HelpBlock>();
@@ -161,18 +178,19 @@ public static class HelpHtmlParser
         void FlushTopic()
         {
             FlushWordList();
-            if (string.IsNullOrWhiteSpace(topicTitle))
+            if (!string.IsNullOrWhiteSpace(topicTitle))
             {
-                return;
+                topics.Add(new HelpTopic
+                {
+                    Title = topicTitle,
+                    Id = topicId,
+                    LeadIn = topicLeadIn.ToList(),
+                    Blocks = topicBlocks.ToList()
+                });
             }
 
-            topics.Add(new HelpTopic
-            {
-                Title = topicTitle,
-                LeadIn = topicLeadIn.ToList(),
-                Blocks = topicBlocks.ToList()
-            });
             topicTitle = null;
+            topicId = string.Empty;
             topicBlocks = new List<HelpBlock>();
             topicLeadIn = new List<HelpBlock>();
         }
@@ -293,6 +311,16 @@ public static class HelpHtmlParser
                     if (TryParseUiNoteId(text, out var id))
                     {
                         noteId = id;
+                    }
+
+                    return;
+                }
+
+                if (TryParseTopicId(text, out var topicKey))
+                {
+                    if (string.IsNullOrWhiteSpace(topicId))
+                    {
+                        topicId = topicKey;
                     }
 
                     return;
@@ -449,6 +477,20 @@ public static class HelpHtmlParser
 
         id = token;
         return true;
+    }
+
+    /// <summary>
+    /// A Heading 3 whose only job is a stable topic id, so a Word or feed update
+    /// can rename the Heading 2 title without breaking a setting Help link.
+    /// </summary>
+    public static bool TryParseTopicId(string? heading, out string id)
+    {
+        if (!TryParseUiNoteId(heading, out id))
+        {
+            return false;
+        }
+
+        return id.StartsWith(HelpTopicIds.Prefix, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

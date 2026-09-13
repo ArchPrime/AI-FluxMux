@@ -7,7 +7,11 @@ namespace FluxMux.Avalonia.Services;
 
 public static class LocalProfileAttributeSummary
 {
-    public static string FormatLocal(JsonObject? settings)
+    public static string FormatLocal(
+        JsonObject? settings,
+        string? requestReasoning = null,
+        string? requestTemperature = null,
+        string? requestMaxTokens = null)
     {
         if (settings is null)
         {
@@ -15,7 +19,7 @@ public static class LocalProfileAttributeSummary
         }
 
         var images = EnabledLabel(settings["LocalVisionEnabled"]?.ToString(), "Images");
-        var thinking = OnOffLabel(settings["LocalReasoning"]?.ToString(), "thinking");
+        var reasoning = ReasoningLabel(settings["LocalReasoning"]?.ToString(), requestReasoning);
         var context = CompactInt(settings["OverrideContext"]?.ToString(), "ctx");
         var gpu = settings["LocalGpuOffloadMode"]?.ToString();
         if (string.IsNullOrWhiteSpace(gpu))
@@ -23,14 +27,23 @@ public static class LocalProfileAttributeSummary
             gpu = "GPU Auto";
         }
 
-        var temperature = CompactDecimal(settings["LocalTemperature"]?.ToString(), "0.3");
-        var maxTokens = CompactInt(settings["OverrideMaxTokens"]?.ToString(), "max");
-        return $"{images} \u00b7 {thinking} \u00b7 {context} \u00b7 {gpu} \u00b7 temp {temperature} \u00b7 {maxTokens}";
+        var temperature = CompactDecimal(
+            string.IsNullOrWhiteSpace(requestTemperature) ? settings["LocalTemperature"]?.ToString() : requestTemperature,
+            "0.3");
+        var maxTokens = CompactInt(
+            string.IsNullOrWhiteSpace(requestMaxTokens) ? settings["OverrideMaxTokens"]?.ToString() : requestMaxTokens,
+            "max");
+        return $"{images} \u00b7 {reasoning} \u00b7 {context} \u00b7 {gpu} \u00b7 temp {temperature} \u00b7 {maxTokens}";
     }
 
-    public static string FormatLocalSuitability(JsonObject? settings, IReadOnlyList<string>? runtimeHints = null)
+    public static string FormatLocalSuitability(
+        JsonObject? settings,
+        IReadOnlyList<string>? runtimeHints = null,
+        string? requestReasoning = null,
+        string? requestTemperature = null,
+        string? requestMaxTokens = null)
     {
-        var summary = FormatLocal(settings);
+        var summary = FormatLocal(settings, requestReasoning, requestTemperature, requestMaxTokens);
         if (string.IsNullOrWhiteSpace(summary) || runtimeHints is null || runtimeHints.Count == 0)
         {
             return summary;
@@ -84,6 +97,21 @@ public static class LocalProfileAttributeSummary
         => (value ?? string.Empty).Equals("On", StringComparison.OrdinalIgnoreCase)
             ? $"{noun} on"
             : $"{noun} off";
+
+    private static string ReasoningLabel(string? profileReasoning, string? requestReasoning)
+    {
+        if (string.IsNullOrWhiteSpace(requestReasoning))
+        {
+            return OnOffLabel(profileReasoning, "Reasoning");
+        }
+
+        var level = LocalReasoningRequestPolicy.TryNormalize(requestReasoning, out var slotLevel)
+            ? slotLevel
+            : LocalReasoningRequestPolicy.FromProfile(requestReasoning);
+        return level.Equals("Off", StringComparison.OrdinalIgnoreCase)
+            ? "Reasoning off"
+            : $"Reasoning {level}";
+    }
 
     private static string CompactInt(string? value, string prefix)
     {

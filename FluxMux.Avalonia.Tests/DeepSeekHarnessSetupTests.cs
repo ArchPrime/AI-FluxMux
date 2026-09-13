@@ -118,6 +118,167 @@ public sealed class DeepSeekHarnessSetupTests
     }
 
     [Fact]
+    public void ResolveOpenChatUrl_can_ask_Harness_for_a_named_session()
+    {
+        Assert.Equal(
+            "http://127.0.0.1:3080/?session=session-new",
+            DeepSeekHarnessSetup.AppendQuery(DeepSeekHarnessSetup.BuildChatUrl(3080), "session", "session-new"));
+        Assert.True(DeepSeekHarnessSetup.TryExtractWebAuthToken(
+            "http://127.0.0.1:3080/?token=_Rxx2GlCMH60CsoNoXM6p7fg6rgTDvA6bjsCUT9d2_E",
+            out var token));
+        Assert.Equal("_Rxx2GlCMH60CsoNoXM6p7fg6rgTDvA6bjsCUT9d2_E", token);
+        Assert.Equal(
+            "http://127.0.0.1:3080/?token=_Rxx2GlCMH60CsoNoXM6p7fg6rgTDvA6bjsCUT9d2_E&session=session-new",
+            DeepSeekHarnessSetup.AppendQuery(
+                "http://127.0.0.1:3080/?token=_Rxx2GlCMH60CsoNoXM6p7fg6rgTDvA6bjsCUT9d2_E",
+                "session",
+                "session-new"));
+        Assert.Equal(
+            "http://127.0.0.1:3080/api/session/create?token=abc",
+            DeepSeekHarnessSetup.BuildSessionCreateUrl(3080, "abc"));
+        Assert.Equal(
+            "http://127.0.0.1:3080/api/session/create",
+            DeepSeekHarnessSetup.BuildSessionCreateUrl(3080));
+    }
+
+    [Fact]
+    public void BuildSessionCreateRequestJson_prefers_workspace_id_over_cwd()
+    {
+        var withWorkspace = DeepSeekHarnessSetup.BuildSessionCreateRequestJson(
+            @"C:\AI_Workbench\Workspace",
+            "cca2c76f-7511-401e-8a60-c9006fb5a0a4",
+            "fluxmux-1");
+        Assert.Contains("\"method\":\"session/create\"", withWorkspace, StringComparison.Ordinal);
+        Assert.Contains("\"workspaceId\":\"cca2c76f-7511-401e-8a60-c9006fb5a0a4\"", withWorkspace, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"cwd\"", withWorkspace, StringComparison.Ordinal);
+
+        var withCwd = DeepSeekHarnessSetup.BuildSessionCreateRequestJson(
+            @"C:\AI_Workbench\Workspace",
+            null,
+            "fluxmux-2");
+        Assert.Contains("\"cwd\":\"C:\\\\AI_Workbench\\\\Workspace\"", withCwd, StringComparison.Ordinal);
+        Assert.DoesNotContain("workspaceId", withCwd, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReadCreatedSessionId_accepts_the_Harness_create_shapes()
+    {
+        Assert.Equal("session-1", DeepSeekHarnessSetup.ReadCreatedSessionId("{\"sessionId\":\"session-1\"}"));
+        Assert.Equal("session-2", DeepSeekHarnessSetup.ReadCreatedSessionId("{\"result\":{\"sessionId\":\"session-2\"}}"));
+        Assert.Equal(
+            "session-3",
+            DeepSeekHarnessSetup.ReadCreatedSessionId(
+                "{\"type\":\"server-response\",\"rpcId\":\"fluxmux-1\",\"result\":{\"ok\":true,\"value\":{\"sessionId\":\"session-3\",\"agentPreset\":\"standard\"}}}"));
+        Assert.Null(DeepSeekHarnessSetup.ReadCreatedSessionId("{\"error\":\"no\"}"));
+        Assert.Null(DeepSeekHarnessSetup.ReadCreatedSessionId("{\"result\":{\"ok\":false}}"));
+    }
+
+    [Fact]
+    public void ReadWorkspaceIdForPath_matches_the_Harness_workspace_store()
+    {
+        const string store = """
+            {
+              "tables": {
+                "workspaces": {
+                  "cca2c76f-7511-401e-8a60-c9006fb5a0a4": {
+                    "path": "C:\\AI_Workbench\\Workspace",
+                    "title": "Workspace"
+                  }
+                }
+              }
+            }
+            """;
+
+        Assert.Equal(
+            "cca2c76f-7511-401e-8a60-c9006fb5a0a4",
+            DeepSeekHarnessSetup.ReadWorkspaceIdForPath(store, @"C:\AI_Workbench\Workspace\"));
+        Assert.Null(DeepSeekHarnessSetup.ReadWorkspaceIdForPath(store, @"C:\AI_Workbench\Other"));
+        Assert.Null(DeepSeekHarnessSetup.ReadWorkspaceIdForPath(store, null));
+    }
+
+    [Fact]
+    public void SessionProjectionLooksInterrupted_is_a_short_empty_reply_not_a_long_chat()
+    {
+        const string interrupted = """
+            {
+              "record": {
+                "rows": {
+                  "sessionListMetadata": { "val": { "blank": false } },
+                  "sessionStats": { "val": { "steps": 1 } },
+                  "turnOutline": {
+                    "val": {
+                      "turns": [
+                        { "prompt": "fix the car racing game", "response": "" }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+        const string mill = """
+            {
+              "record": {
+                "rows": {
+                  "sessionListMetadata": { "val": { "blank": false } },
+                  "sessionStats": { "val": { "steps": 86 } },
+                  "turnOutline": {
+                    "val": {
+                      "turns": [
+                        { "prompt": "fix the car racing game", "response": "" }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+        const string blank = """
+            {
+              "record": {
+                "rows": {
+                  "sessionListMetadata": { "val": { "blank": true } },
+                  "sessionStats": { "val": { "steps": 0 } },
+                  "turnOutline": { "val": { "turns": [] } }
+                }
+              }
+            }
+            """;
+
+        Assert.True(DeepSeekHarnessSetup.SessionProjectionLooksInterrupted(interrupted));
+        Assert.True(DeepSeekHarnessSetup.SessionProjectionLooksOccupied(interrupted));
+        Assert.False(DeepSeekHarnessSetup.SessionProjectionLooksInterrupted(mill));
+        Assert.True(DeepSeekHarnessSetup.SessionProjectionLooksOccupied(mill));
+        Assert.False(DeepSeekHarnessSetup.SessionProjectionLooksInterrupted(blank));
+        Assert.False(DeepSeekHarnessSetup.SessionProjectionLooksOccupied(blank));
+        Assert.Contains(
+            "workspace/archiveSession",
+            DeepSeekHarnessSetup.BuildWorkspaceArchiveRequestJson("session-dead"),
+            StringComparison.Ordinal);
+        Assert.Equal(
+            new[] { "session-a", "session-c" },
+            DeepSeekHarnessSetup.ReadWorkspaceSessionIds(
+                """
+                {
+                  "tables": {
+                    "workspaces": {
+                      "ws-1": { "sessionIds": ["session-a", "session-c"] }
+                    }
+                  }
+                }
+                """,
+                "ws-1"));
+    }
+
+    [Fact]
+    public void ResolveWorkspaceDirectory_uses_the_folder_above_vscode()
+    {
+        Assert.Equal(
+            @"C:\AI_Workbench\Workspace",
+            DeepSeekHarnessSetup.ResolveWorkspaceDirectory(@"C:\AI_Workbench\Workspace\.vscode\fluxmux_config.json"));
+    }
+
+    [Fact]
     public void TryParseWebAuthUrl_reads_the_token_url_dsh_web_prints()
     {
         Assert.True(DeepSeekHarnessSetup.TryParseWebAuthUrl(

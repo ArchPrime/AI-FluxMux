@@ -1,4 +1,3 @@
-using System.Text.Json.Nodes;
 using FluxMux.Avalonia.Services;
 using Xunit;
 
@@ -12,6 +11,11 @@ public sealed class LocalReasoningLaunchPolicyTests
     [InlineData("Auto", "Auto")]
     [InlineData("AUTO", "Auto")]
     [InlineData("Off", "Off")]
+    [InlineData("Low", "Low")]
+    [InlineData("medium", "Medium")]
+    [InlineData("XHigh", "XHigh")]
+    [InlineData("xhigh", "XHigh")]
+    [InlineData("High", "XHigh")]
     [InlineData("", "Off")]
     [InlineData(null, "Off")]
     public void NormalizeMode_maps_known_values(string? input, string expected)
@@ -26,5 +30,13 @@ public sealed class LocalReasoningLaunchPolicyTests
 
         Assert.True(LocalReasoningLaunchPolicy.IsOn("On"));
         Assert.True(LocalReasoningLaunchPolicy.IsAuto("auto"));
+        Assert.False(LocalReasoningLaunchPolicy.IsOn("Medium"));
+        Assert.True(LocalReasoningLaunchPolicy.IsThinkingEnabled("Medium"));
+        Assert.True(LocalReasoningLaunchPolicy.IsThinkingEnabled("On"));
+        Assert.False(LocalReasoningLaunchPolicy.IsThinkingEnabled("Off"));
     }
+
+    [Fact]
+    public void ProcessLaunchMode_is_auto_so_On_Off_can_change_without_reload()
+        => Assert.Equal("Auto", LocalReasoningLaunchPolicy.ProcessLaunchMode());
 }

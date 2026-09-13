@@ -47,11 +47,16 @@
                                 Margin="0,0,8,8"
                                 IsVisible="{Binding RecoveryWaitLongerVisible}"
                                 Command="{Binding ContinueWaitingRecoveryCommand}"
-                                ToolTip.Tip="Keep this Client-app turn open. llama-server keeps working. The same choices appear again if it stays quiet." />
+                                ToolTip.Tip="{Binding RecoveryWaitLongerTooltip}" />
                         <Button Content="{Binding RecoveryResumeLabel}"
                                 Margin="0,0,8,8"
                                 Command="{Binding ResumeCurrentModelRecoveryCommand}"
                                 ToolTip.Tip="{Binding RecoveryResumeTooltip}" />
+                        <Button Content="{Binding RecoverySteerLabel}"
+                                Margin="0,0,8,8"
+                                IsVisible="{Binding RecoverySteerVisible}"
+                                Command="{Binding SteerPortRuleRecoveryCommand}"
+                                ToolTip.Tip="{Binding RecoverySteerTooltip}" />
                         <Button Content="{Binding RecoverySwitchLocalLabel}"
                                 Margin="0,0,8,8"
                                 IsVisible="{Binding RecoverySwitchLocalVisible}"

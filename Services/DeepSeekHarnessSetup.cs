@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Text;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -118,6 +120,436 @@ public static class DeepSeekHarnessSetup
     public static string BuildChatUrl(int webPort)
         => $"http://127.0.0.1:{Math.Clamp(webPort, 1, 65535)}";
 
+    public static string ResolveWorkspaceStorePath()
+        => Path.Combine(ResolveDshHomeDirectory(), "storages", "workspace.json");
+
+    public static string BuildSessionCreateUrl(int webPort, string? authToken = null)
+    {
+        var url = BuildChatUrl(webPort) + "/api/session/create";
+        return string.IsNullOrWhiteSpace(authToken)
+            ? url
+            : AppendQuery(url, "token", authToken.Trim());
+    }
+
+    public static string BuildHarnessRpcRequestJson(string method, JsonObject? request, string? rpcId = null)
+    {
+        return new JsonObject
+        {
+            ["type"] = "client-request",
+            ["rpcId"] = string.IsNullOrWhiteSpace(rpcId) ? "fluxmux-" + Guid.NewGuid().ToString("N") : rpcId.Trim(),
+            ["method"] = method,
+            ["payload"] = new JsonObject
+            {
+                ["args"] = new JsonObject
+                {
+                    ["request"] = request ?? new JsonObject()
+                }
+            }
+        }.ToJsonString();
+    }
+
+    public static string BuildSessionCreateRequestJson(string? cwd, string? workspaceId, string? rpcId = null)
+    {
+        var request = new JsonObject();
+        if (!string.IsNullOrWhiteSpace(workspaceId))
+        {
+            request["workspaceId"] = workspaceId.Trim();
+        }
+        else if (!string.IsNullOrWhiteSpace(cwd))
+        {
+            request["cwd"] = cwd.Trim();
+        }
+
+        return BuildHarnessRpcRequestJson("session/create", request, rpcId);
+    }
+
+    public static string BuildWorkspaceArchiveRequestJson(string sessionId, string? rpcId = null)
+        => BuildHarnessRpcRequestJson(
+            "workspace/archiveSession",
+            new JsonObject { ["sessionId"] = sessionId.Trim() },
+            rpcId);
+
+    public static string BuildSessionCreateApiUrl(int webPort)
+        => BuildChatUrl(webPort) + "/api/session/create";
+
+    public static string BuildWorkspaceArchiveApiUrl(int webPort)
+        => BuildChatUrl(webPort) + "/api/workspace/archiveSession";
+
+    public static string ResolveSessionProjectionPath(string sessionId)
+        => Path.Combine(
+            ResolveDshHomeDirectory(),
+            "storages",
+            "session_projcache",
+            "sessions",
+            sessionId.Trim() + ".json");
+
+    public static IReadOnlyList<string> ReadWorkspaceSessionIds(string? storeJson, string? workspaceId)
+    {
+        var ids = new List<string>();
+        if (string.IsNullOrWhiteSpace(storeJson))
+        {
+            return ids;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(storeJson) is not JsonObject root
+                || root["tables"]?["workspaces"] is not JsonObject workspaces)
+            {
+                return ids;
+            }
+
+            JsonObject? target = null;
+            if (!string.IsNullOrWhiteSpace(workspaceId) && workspaces[workspaceId] is JsonObject named)
+            {
+                target = named;
+            }
+            else
+            {
+                foreach (var property in workspaces)
+                {
+                    if (property.Value is JsonObject first)
+                    {
+                        target = first;
+                        break;
+                    }
+                }
+            }
+
+            if (target?["sessionIds"] is not JsonArray array)
+            {
+                return ids;
+            }
+
+            foreach (var item in array)
+            {
+                var id = item?.ToString();
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    ids.Add(id.Trim());
+                }
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return ids;
+    }
+
+    public static bool SessionProjectionLooksOccupied(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(json) is not JsonObject root)
+            {
+                return false;
+            }
+
+            var rows = root["record"]?["rows"] as JsonObject ?? root["rows"] as JsonObject;
+            if (rows is null)
+            {
+                return false;
+            }
+
+            if (rows["sessionListMetadata"]?["val"]?["blank"]?.GetValue<bool>() == true)
+            {
+                return false;
+            }
+
+            var title = rows["title"]?["val"]?.ToString();
+            if (!string.IsNullOrWhiteSpace(title))
+            {
+                return true;
+            }
+
+            var steps = rows["sessionStats"]?["val"]?["steps"]?.GetValue<int>() ?? 0;
+            if (steps > 0)
+            {
+                return true;
+            }
+
+            return rows["turnOutline"]?["val"]?["turns"] is JsonArray turns && turns.Count > 0;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    public static bool SessionProjectionLooksInterrupted(string? json)
+    {
+        if (!SessionProjectionLooksOccupied(json))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(json!) is not JsonObject root)
+            {
+                return false;
+            }
+
+            var rows = root["record"]?["rows"] as JsonObject ?? root["rows"] as JsonObject;
+            if (rows is null)
+            {
+                return false;
+            }
+
+            var steps = rows["sessionStats"]?["val"]?["steps"]?.GetValue<int>() ?? 0;
+            if (steps > 2)
+            {
+                return false;
+            }
+
+            if (rows["turnOutline"]?["val"]?["turns"] is not JsonArray turns || turns.Count == 0)
+            {
+                return false;
+            }
+
+            var last = turns[turns.Count - 1] as JsonObject;
+            var prompt = last?["prompt"]?.ToString();
+            var response = last?["response"]?.ToString() ?? string.Empty;
+            return !string.IsNullOrWhiteSpace(prompt) && string.IsNullOrWhiteSpace(response);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    public static IReadOnlyList<string> CollectSessionsToArchiveForFreshStart(
+        IEnumerable<string>? sessionIds,
+        string? keepSessionId)
+    {
+        var archive = new List<string>();
+        if (sessionIds is null)
+        {
+            return archive;
+        }
+
+        foreach (var raw in sessionIds)
+        {
+            var id = (raw ?? string.Empty).Trim();
+            if (id.Length == 0
+                || (!string.IsNullOrWhiteSpace(keepSessionId)
+                    && id.Equals(keepSessionId.Trim(), StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            try
+            {
+                var path = ResolveSessionProjectionPath(id);
+                if (File.Exists(path) && SessionProjectionLooksOccupied(File.ReadAllText(path)))
+                {
+                    archive.Add(id);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        return archive;
+    }
+
+    public static string? ReadWorkspaceIdForPath(string? storeJson, string? cwd)
+    {
+        if (string.IsNullOrWhiteSpace(storeJson) || string.IsNullOrWhiteSpace(cwd))
+        {
+            return null;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(storeJson) is not JsonObject root
+                || root["tables"]?["workspaces"] is not JsonObject workspaces)
+            {
+                return null;
+            }
+
+            foreach (var property in workspaces)
+            {
+                var path = property.Value?["path"]?.ToString();
+                if (SameDirectory(path, cwd))
+                {
+                    return string.IsNullOrWhiteSpace(property.Key) ? null : property.Key;
+                }
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return null;
+    }
+
+    public static string? TryReadWorkspaceIdForDirectory(string? cwd)
+    {
+        try
+        {
+            var path = ResolveWorkspaceStorePath();
+            return File.Exists(path)
+                ? ReadWorkspaceIdForPath(File.ReadAllText(path), cwd)
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool SameDirectory(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        try
+        {
+            var a = Path.GetFullPath(left.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            var b = Path.GetFullPath(right.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static bool TryExtractWebAuthToken(string? url, out string token)
+    {
+        token = string.Empty;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || string.IsNullOrWhiteSpace(uri.Query))
+        {
+            return false;
+        }
+
+        foreach (var pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = pair.IndexOf('=');
+            var key = eq < 0 ? pair : pair[..eq];
+            if (!key.Equals("token", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            token = eq < 0 ? string.Empty : Uri.UnescapeDataString(pair[(eq + 1)..]);
+            return !string.IsNullOrWhiteSpace(token);
+        }
+
+        return false;
+    }
+
+    public static string AppendQuery(string url, string name, string value)
+    {
+        var prefix = (url ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(prefix) || string.IsNullOrWhiteSpace(name))
+        {
+            return prefix;
+        }
+
+        var pair = Uri.EscapeDataString(name) + "=" + Uri.EscapeDataString(value ?? string.Empty);
+        if (prefix.Contains('?', StringComparison.Ordinal))
+        {
+            return prefix + "&" + pair;
+        }
+
+        if (Uri.TryCreate(prefix, UriKind.Absolute, out var uri)
+            && (uri.AbsolutePath == "/" || string.IsNullOrEmpty(uri.AbsolutePath.Trim('/'))))
+        {
+            return prefix.TrimEnd('/') + "/?" + pair;
+        }
+
+        return prefix + "?" + pair;
+    }
+
+    public static string? ReadCreatedSessionId(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(json) is not JsonObject root)
+            {
+                return null;
+            }
+
+            foreach (var node in EnumerateSessionIdObjects(root))
+            {
+                var id = node["sessionId"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    return id.Trim();
+                }
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<JsonObject> EnumerateSessionIdObjects(JsonObject root)
+    {
+        yield return root;
+        if (root["result"] is JsonObject result)
+        {
+            yield return result;
+            if (result["value"] is JsonObject resultValue)
+            {
+                yield return resultValue;
+            }
+        }
+
+        if (root["value"] is JsonObject value)
+        {
+            yield return value;
+        }
+
+        if (root["data"] is JsonObject data)
+        {
+            yield return data;
+        }
+    }
+
+    public static string? ResolveWorkspaceDirectory(string? configPath)
+    {
+        var directory = Path.GetDirectoryName(configPath);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return null;
+        }
+
+        if (string.Equals(Path.GetFileName(directory), ".vscode", StringComparison.OrdinalIgnoreCase))
+        {
+            return Directory.GetParent(directory)?.FullName;
+        }
+
+        return directory;
+    }
+
     public static bool TryParseWebAuthUrl(string? text, int webPort, out string url)
     {
         url = string.Empty;
@@ -140,10 +572,90 @@ public static class DeepSeekHarnessSetup
         return true;
     }
 
-    public static string ResolveOpenChatUrl(int webPort)
-        => DeepSeekHarnessWebHost.TryReadWebAuthUrlFromLaunchLog(webPort, out var authUrl)
+    public static string ResolveOpenChatUrl(int webPort, string? sessionId = null)
+    {
+        var url = DeepSeekHarnessWebHost.TryReadWebAuthUrlFromLaunchLog(webPort, out var authUrl)
             ? authUrl
             : BuildChatUrl(webPort);
+        return string.IsNullOrWhiteSpace(sessionId) ? url : AppendQuery(url, "session", sessionId.Trim());
+    }
+
+    public static async Task<string?> TryCreateWebSessionAsync(
+        int webPort,
+        string? authToken,
+        string? cwd,
+        CancellationToken cancellationToken = default)
+    {
+        var port = Math.Clamp(webPort, 1, 65535);
+        var workspaceId = TryReadWorkspaceIdForDirectory(cwd);
+        try
+        {
+            using var handler = new HttpClientHandler { UseCookies = true, CookieContainer = new CookieContainer() };
+            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+            if (!string.IsNullOrWhiteSpace(authToken))
+            {
+                using var gate = await client.GetAsync(
+                    AppendQuery(BuildChatUrl(port), "token", authToken.Trim()),
+                    cancellationToken).ConfigureAwait(false);
+                if (!gate.IsSuccessStatusCode && (int)gate.StatusCode != 401)
+                {
+                    return null;
+                }
+            }
+
+            var createdId = await SendHarnessRpcAsync(
+                client,
+                port,
+                BuildSessionCreateApiUrl(port),
+                BuildSessionCreateRequestJson(cwd, workspaceId),
+                cancellationToken).ConfigureAwait(false);
+            createdId = ReadCreatedSessionId(createdId);
+
+            IReadOnlyList<string> sessionIds = [];
+            try
+            {
+                var storePath = ResolveWorkspaceStorePath();
+                if (File.Exists(storePath))
+                {
+                    sessionIds = ReadWorkspaceSessionIds(File.ReadAllText(storePath), workspaceId);
+                }
+            }
+            catch
+            {
+            }
+
+            foreach (var archiveId in CollectSessionsToArchiveForFreshStart(sessionIds, createdId))
+            {
+                await SendHarnessRpcAsync(
+                    client,
+                    port,
+                    BuildWorkspaceArchiveApiUrl(port),
+                    BuildWorkspaceArchiveRequestJson(archiveId),
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            return createdId;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task<string?> SendHarnessRpcAsync(
+        HttpClient client,
+        int port,
+        string url,
+        string body,
+        CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.Host = "127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture);
+        request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+        using var response = await client.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var text = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        return response.IsSuccessStatusCode ? text : null;
+    }
 
     public static bool IsWebUiListeningStatus(int statusCode)
         => (statusCode >= 200 && statusCode < 300) || statusCode == 401 || statusCode == 403;

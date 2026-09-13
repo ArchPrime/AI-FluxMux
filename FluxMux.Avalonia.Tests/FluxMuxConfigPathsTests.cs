@@ -42,4 +42,18 @@ public sealed class FluxMuxConfigPathsTests
             path => string.Equals(path, project, System.StringComparison.OrdinalIgnoreCase));
         Assert.Equal(expected, resolved);
     }
+
+    [Fact]
+    public void Port_rules_follow_the_config_folder()
+    {
+        var workspace = Path.Combine(@"C:\dev\Workspace", ".vscode", FluxMuxConfigPaths.ConfigFileName);
+        var exists = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase) { workspace };
+        var resolved = FluxMuxConfigPaths.ResolvePortRulesPath(
+            @"C:\dev\Workspace\FluxMux.Avalonia\bin\Debug\net10.0",
+            @"C:\Users\demo\AppData\Roaming",
+            exists.Contains);
+        Assert.Equal(
+            Path.Combine(@"C:\dev\Workspace", ".vscode", FluxMuxConfigPaths.PortRulesFileName),
+            resolved);
+    }
 }
