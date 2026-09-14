@@ -493,9 +493,9 @@ public sealed class HelpHtmlParserTests
         Assert.Contains("Dynamic Model Routing", document.UiNotes["quickselect.hot_routing"], StringComparison.Ordinal);
         Assert.True(HelpHtmlViewBuilder.IsCopyrightHelpTopic("Copyright and licence"));
         Assert.False(HelpHtmlViewBuilder.IsCopyrightHelpTopic("What is AI-FluxMux?"));
-        Assert.True(HelpHtmlViewBuilder.TrySplitProductTitle("AI-FluxMux v0.2.1 beta", out var name, out var version));
+        Assert.True(HelpHtmlViewBuilder.TrySplitProductTitle("AI-FluxMux v0.2.2 beta", out var name, out var version));
         Assert.Equal("AI-FluxMux", name);
-        Assert.Equal("v0.2.1 beta", version);
+        Assert.Equal("v0.2.2 beta", version);
         var html = File.ReadAllText(path);
         Assert.True(IsBold(html, "Continue waiting"));
         Assert.True(IsBold(html, "Keep current model — end this turn"));

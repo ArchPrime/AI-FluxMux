@@ -13,7 +13,7 @@
         x:DataType="vm:MainViewModel"
         x:Name="RootWindow"
         Icon="/Assets/Logos/AI-FluxMux.ico"
-    Title="AI-FluxMux v0.2.1 beta"
+    Title="AI-FluxMux v0.2.2 beta"
     MinWidth="640"
     MinHeight="600"
         WindowStartupLocation="Manual"

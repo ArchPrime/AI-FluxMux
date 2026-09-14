@@ -1,4 +1,4 @@
-# AI-FluxMux 0.2.1 beta
+# AI-FluxMux 0.2.2 beta
 
 Desktop router for local (llama-server + GGUF) and cloud models. An OpenAI-compatible **Client app** (Cline, Harness, and similar) connects to **Port** `http://127.0.0.1:5001`.
 
@@ -13,7 +13,7 @@ Desktop router for local (llama-server + GGUF) and cloud models. An OpenAI-compa
 
 ## Install (Release zip)
 
-1. Download `AI-FluxMux-0.2.1-beta.zip` from the [GitHub Release](https://github.com/ArchPrime/AI-FluxMux/releases).
+1. Download `AI-FluxMux-0.2.2-beta.zip` from the [GitHub Release](https://github.com/ArchPrime/AI-FluxMux/releases).
 2. Unzip to a folder you own (for example `C:\AI-FluxMux`). Do not use Program Files — Help updates write next to the program, and Windows will refuse that there.
 3. Double-click `FluxMux.Avalonia.exe`. If Windows SmartScreen appears, choose **More info**, then **Run anyway**. This build is not code-signed.
 4. Open the **Help** tab and follow **1 Install AI-FluxMux**, then **2 Install llama-server**, then your local model folder and Client app (Cline or DeepSeek Harness).
@@ -30,7 +30,7 @@ Do not copy `fluxmux_config.json` or `fluxmux_secrets.json` from a development P
 Publishing into `artifacts\publish` is safe while the Debug window is open:
 
 ```
-dotnet publish -c Release -p:PublishProfile=win-x64-selfcontained -o artifacts\publish\AI-FluxMux-0.2.1-beta
+dotnet publish -c Release -p:PublishProfile=win-x64-selfcontained -o artifacts\publish\AI-FluxMux-0.2.2-beta
 ```
 
 Zip that folder. Do not launch the daily app from `artifacts\`.

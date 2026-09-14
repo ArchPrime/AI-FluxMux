@@ -1,4 +1,4 @@
-AI-FluxMux 0.2.1 beta
+AI-FluxMux 0.2.2 beta
 =====================
 
 1. Unzip this folder to a place you own (for example C:\AI-FluxMux). Do not use Program Files — Help updates write next to the program.
