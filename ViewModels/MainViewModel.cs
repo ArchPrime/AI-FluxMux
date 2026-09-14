@@ -3606,11 +3606,13 @@ public partial class MainViewModel : ViewModelBase
 
     public LiveUtilizationGaugeViewModel CpuGauge { get; } = new() { Title = "CPU util" };
 
+    public const string GpuVramScanningText = "scanning....";
+
     [ObservableProperty]
     public partial string VramStatusText { get; set; } = "Open this panel to load graphics-card memory and display adapters.";
 
     [ObservableProperty]
-    public partial string VramProcessListHeaderText { get; set; } = "Programs using the graphics card (high to low):";
+    public partial string VramProcessListHeaderText { get; set; } = "Programs using the main graphics card (high to low):";
 
     [ObservableProperty]
     public partial ObservableCollection<VramProcessListItem> VramProcessRows { get; set; } = new();
@@ -3625,34 +3627,96 @@ public partial class MainViewModel : ViewModelBase
     public partial bool HasGpuAdapterRows { get; set; }
 
     [ObservableProperty]
+    public partial bool GpuVramScanning { get; set; }
+
+    [ObservableProperty]
+    public partial bool ShowGpuAdapterEmptyMessage { get; set; }
+
+    [ObservableProperty]
+    public partial bool ShowGpuAdapterList { get; set; }
+
+    [ObservableProperty]
     public partial ObservableCollection<DisplayAdapterListItem> GpuAdapterRows { get; set; } = new();
 
-    [RelayCommand]
-    private async Task RefreshVramStatusAsync()
-    {
-        StatusMessage = "Checking graphics-card memory...";
-        var result = await _runtimeService.GetVramStatusAsync();
-        ApplyVramStatusResult(result);
-        StatusMessage = result.Status;
-    }
+    [ObservableProperty]
+    public partial bool ShowDesktopGpuPreference { get; set; }
+
+    [ObservableProperty]
+    public partial string SelectedDesktopGpu { get; set; } = WindowsGpuPreference.MainGraphicsCardLabel;
+
+    [ObservableProperty]
+    public partial string DesktopGpuStatusText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial bool DesktopGpuBusy { get; set; }
+
+    public IReadOnlyList<string> DesktopGpuChoices { get; } = WindowsGpuPreference.Choices;
+
+    private bool CanScanGpuVram() => !GpuVramScanning;
+
+    [RelayCommand(CanExecute = nameof(CanScanGpuVram))]
+    private Task RefreshVramStatusAsync() => ScanGpuVramFlyoutAsync();
 
     [RelayCommand]
-    private async Task LoadGpuVramFlyoutAsync()
+    private Task LoadGpuVramFlyoutAsync() => ScanGpuVramFlyoutAsync();
+
+    private async Task ScanGpuVramFlyoutAsync()
     {
-        StatusMessage = "Checking graphics cards and memory...";
-        var adapters = await _runtimeService.GetGpuAdaptersAsync();
-        ApplyGpuAdapterResult(adapters);
-        var result = await _runtimeService.GetVramStatusAsync();
-        ApplyVramStatusResult(result);
-        StatusMessage = result.IsSuccess ? "Graphics cards and memory updated" : result.Status;
+        if (GpuVramScanning)
+        {
+            return;
+        }
+
+        BeginGpuVramScan();
+        try
+        {
+            StatusMessage = "Checking graphics cards and memory...";
+            await Task.Yield();
+            var adapters = default(RuntimeActionResult);
+            var result = default(RuntimeActionResult);
+            await Task.Run(() =>
+            {
+                adapters = _runtimeService.GetGpuAdaptersAsync().GetAwaiter().GetResult();
+                result = _runtimeService.GetVramStatusAsync().GetAwaiter().GetResult();
+            }).ConfigureAwait(true);
+            ApplyGpuAdapterResult(adapters!);
+            RefreshDesktopGpuPreferenceFromRegistry();
+            ApplyVramStatusResult(result!);
+            StatusMessage = result!.IsSuccess ? "Graphics cards and memory updated" : result.Status;
+        }
+        finally
+        {
+            EndGpuVramScan();
+        }
+    }
+
+    private void BeginGpuVramScan()
+    {
+        GpuVramScanning = true;
+        HasGpuAdapterRows = false;
+        HasVramProcessList = false;
+        ShowGpuAdapterEmptyMessage = false;
+        ShowGpuAdapterList = false;
+        GpuAdapterRows.Clear();
+        VramProcessRows.Clear();
+        VramStatusText = GpuVramScanningText;
+        RefreshVramStatusCommand.NotifyCanExecuteChanged();
+    }
+
+    private void EndGpuVramScan()
+    {
+        GpuVramScanning = false;
+        ShowGpuAdapterList = HasGpuAdapterRows;
+        ShowGpuAdapterEmptyMessage = !HasGpuAdapterRows;
+        RefreshVramStatusCommand.NotifyCanExecuteChanged();
     }
 
     private void ApplyVramStatusResult(RuntimeActionResult result)
     {
         VramStatusText = result.Details;
         VramProcessListHeaderText = result.GpuCardCount > 1
-            ? "Programs using graphics cards (combined across cards, high to low):"
-            : "Programs using the graphics card (high to low):";
+            ? "Programs using main graphics cards (combined, high to low):"
+            : "Programs using the main graphics card (high to low):";
         VramProcessRows.Clear();
         foreach (var row in result.VramProcessItems)
         {
@@ -3671,6 +3735,90 @@ public partial class MainViewModel : ViewModelBase
         }
 
         HasGpuAdapterRows = GpuAdapterRows.Count > 0;
+        ShowDesktopGpuPreference = WindowsGpuPreference.HasHybridGraphics(GpuAdapterRows);
+        if (!GpuVramScanning)
+        {
+            ShowGpuAdapterList = HasGpuAdapterRows;
+            ShowGpuAdapterEmptyMessage = !HasGpuAdapterRows;
+        }
+
+        ApplyDesktopGpuCommand.NotifyCanExecuteChanged();
+    }
+
+    private void RefreshDesktopGpuPreferenceFromRegistry()
+    {
+        if (!ShowDesktopGpuPreference)
+        {
+            DesktopGpuStatusText = string.Empty;
+            return;
+        }
+
+        try
+        {
+            var current = WindowsGpuPreference.Read();
+            SelectedDesktopGpu = current.Label;
+            DesktopGpuStatusText = "Current "
+                + WindowsGpuPreference.AffinityModeLabel
+                + ": "
+                + ControlLabelMarkup.Mark(current.Label)
+                + ".";
+        }
+        catch (Exception ex)
+        {
+            DesktopGpuStatusText = "Could not read "
+                + ControlLabelMarkup.Mark(WindowsGpuPreference.AffinityModeLabel)
+                + ". "
+                + ex.Message;
+        }
+    }
+
+    private bool CanApplyDesktopGpu()
+        => ShowDesktopGpuPreference && !DesktopGpuBusy;
+
+    [RelayCommand(CanExecute = nameof(CanApplyDesktopGpu))]
+    private async Task ApplyDesktopGpuAsync()
+    {
+        if (!CanApplyDesktopGpu())
+        {
+            return;
+        }
+
+        var preference = WindowsGpuPreference.PreferenceForLabel(SelectedDesktopGpu);
+        DesktopGpuBusy = true;
+        ApplyDesktopGpuCommand.NotifyCanExecuteChanged();
+        StatusMessage = "Updating " + WindowsGpuPreference.AffinityModeLabel + "...";
+        DesktopGpuStatusText = "Updating "
+            + ControlLabelMarkup.Mark(WindowsGpuPreference.AffinityModeLabel)
+            + ". This can take a few seconds.";
+        try
+        {
+            var llamaServerPath = LocalServerExecutablePath;
+            var result = await Task.Run(() => WindowsGpuPreference.Apply(
+                preference,
+                string.IsNullOrWhiteSpace(llamaServerPath) ? null : [llamaServerPath])).ConfigureAwait(true);
+            SelectedDesktopGpu = result.Label;
+            DesktopGpuStatusText =
+                "Desktop apps are now set to "
+                + ControlLabelMarkup.Mark(result.Label)
+                + ". Restart Windows so they pick this up";
+            StatusMessage = WindowsGpuPreference.AffinityModeLabel
+                + " set to "
+                + result.Label
+                + ". Restart Windows.";
+        }
+        catch (Exception ex)
+        {
+            DesktopGpuStatusText = "Could not update "
+                + ControlLabelMarkup.Mark(WindowsGpuPreference.AffinityModeLabel)
+                + ". "
+                + ex.Message;
+            StatusMessage = WindowsGpuPreference.AffinityModeLabel + " update failed.";
+        }
+        finally
+        {
+            DesktopGpuBusy = false;
+            ApplyDesktopGpuCommand.NotifyCanExecuteChanged();
+        }
     }
 
     [RelayCommand]
@@ -3679,6 +3827,7 @@ public partial class MainViewModel : ViewModelBase
         StatusMessage = "Checking graphics cards...";
         var result = await _runtimeService.GetGpuAdaptersAsync();
         ApplyGpuAdapterResult(result);
+        RefreshDesktopGpuPreferenceFromRegistry();
         StatusMessage = result.Status;
     }
 

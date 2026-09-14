@@ -8169,17 +8169,13 @@ public sealed class FluxMuxRuntimeService
 		return $"({group.InstanceCount} {countWord})";
 	}
 
-	private sealed record GpuProcessUse(string FriendlyName, int Megabytes, int InstanceCount = 1, bool MissingAmount = false);
+	private sealed record GpuProcessUse(string FriendlyName, int Megabytes, int InstanceCount = 1, bool MissingAmount = false, int Pid = 0);
 
 	private List<GpuProcessUse> CollectGpuProcessUses()
 	{
-		List<GpuProcessUse> windowsUses = CollectWindowsGpuLocalUsage();
-		if (windowsUses.Count > 0)
-		{
-			return windowsUses;
-		}
-
-		Dictionary<int, GpuProcessUse> byPid = new Dictionary<int, GpuProcessUse>();
+		var windows = CollectWindowsGpuLocalUsage()
+			.Select(use => (use.Pid, use.FriendlyName, use.Megabytes));
+		var compute = new List<(int Pid, string Name, int Megabytes)>();
 		foreach (var row in ParseNvidiaComputeApps())
 		{
 			if (row.Mb <= 0)
@@ -8187,18 +8183,12 @@ public sealed class FluxMuxRuntimeService
 				continue;
 			}
 
-			string friendlyName = FriendlyGpuProcessName(row.Name, row.Pid);
-			if (byPid.TryGetValue(row.Pid, out GpuProcessUse? existing))
-			{
-				byPid[row.Pid] = existing with { Megabytes = existing.Megabytes + row.Mb };
-			}
-			else
-			{
-				byPid[row.Pid] = new GpuProcessUse(friendlyName, row.Mb);
-			}
+			compute.Add((row.Pid, FriendlyGpuProcessName(row.Name, row.Pid), row.Mb));
 		}
 
-		return byPid.Values.ToList();
+		return GpuProcessMemoryAggregator.UnionPreferringLargerMegabytes(windows, compute)
+			.Select(entry => new GpuProcessUse(entry.Value.Name, entry.Value.Megabytes, Pid: entry.Key))
+			.ToList();
 	}
 
 	private static List<GpuProcessUse> CollectWindowsGpuLocalUsage()
@@ -8258,7 +8248,9 @@ public sealed class FluxMuxRuntimeService
 				perPid[pid] = perPid.GetValueOrDefault(pid) + bytes;
 			}
 
-			Dictionary<int, long> mergedByPid = GpuProcessMemoryAggregator.MergePerProcessAcrossGpus(bytesByGpuThenPid.Values);
+            Dictionary<int, long> mergedByPid = GpuProcessMemoryAggregator.MergeDedicatedGpuProcesses(
+                bytesByGpuThenPid,
+                ReadGpuAdapterMemoryByKey());
 			if (mergedByPid.Count == 0)
 			{
 				return result;
@@ -8282,7 +8274,57 @@ public sealed class FluxMuxRuntimeService
 				{
 				}
 
-				result.Add(new GpuProcessUse(FriendlyGpuProcessName(processName, entry.Key), mb));
+				result.Add(new GpuProcessUse(FriendlyGpuProcessName(processName, entry.Key), mb, Pid: entry.Key));
+			}
+		}
+		catch
+		{
+		}
+
+		return result;
+	}
+
+	[System.Runtime.Versioning.SupportedOSPlatform("windows")]
+	private static Dictionary<string, (long DedicatedBytes, long SharedBytes)> ReadGpuAdapterMemoryByKey()
+	{
+		var result = new Dictionary<string, (long DedicatedBytes, long SharedBytes)>(StringComparer.OrdinalIgnoreCase);
+		try
+		{
+			if (!PerformanceCounterCategory.Exists("GPU Adapter Memory"))
+			{
+				return result;
+			}
+
+			var category = new PerformanceCounterCategory("GPU Adapter Memory");
+			foreach (string instance in category.GetInstanceNames())
+			{
+				var key = GpuProcessMemoryAggregator.NormalizeGpuKey(instance);
+				if (string.IsNullOrWhiteSpace(key))
+				{
+					continue;
+				}
+
+				long dedicated = 0;
+				long shared = 0;
+				try
+				{
+					using var dedicatedCounter = new PerformanceCounter("GPU Adapter Memory", "Dedicated Usage", instance, readOnly: true);
+					dedicated = dedicatedCounter.RawValue;
+				}
+				catch
+				{
+				}
+
+				try
+				{
+					using var sharedCounter = new PerformanceCounter("GPU Adapter Memory", "Shared Usage", instance, readOnly: true);
+					shared = sharedCounter.RawValue;
+				}
+				catch
+				{
+				}
+
+				result[key] = (dedicated, shared);
 			}
 		}
 		catch
@@ -8402,7 +8444,7 @@ public sealed class FluxMuxRuntimeService
 			"cursor" => "Cursor",
 			"code" => "VS Code",
 			"devenv" => "Visual Studio",
-			"llama-server" or "llama-server-cuda" => "AI-FluxMux local model",
+			"llama-server" or "llama-server-cuda" => "llama-server",
 			"fluxmux.avalonia" => "AI-FluxMux",
 			"nvcontainer" or "nvidia web helper" or "nvidia overlay" or "nvsphelper64" => "NVIDIA overlay",
 			"discord" => "Discord",

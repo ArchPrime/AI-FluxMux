@@ -727,6 +727,47 @@ public sealed class HelpHtmlParserTests
         }
     }
 
+    [Fact]
+    public void Shipped_help_html_explains_windows_gpu_affinity_mode()
+    {
+        var document = HelpHtmlParser.Load(FindShippedHelp());
+        var note = document.UiNotes["gpuvram.desktop_gpu"];
+        var html = File.ReadAllText(FindShippedHelp());
+        Assert.Contains("experimental", note, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("motherboard graphics ports", note, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("main graphics card", note, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("restart Windows", note, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Don't close this!", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("listed separately", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("Cloud-only", note, StringComparison.Ordinal);
+        Assert.Contains("Windows GPU affinity", note, StringComparison.Ordinal);
+        Assert.DoesNotContain(ControlLabelMarkup.Mark("Windows GPU affinity"), note, StringComparison.Ordinal);
+        Assert.Contains(ControlLabelMarkup.Mark("Motherboard GPU"), note, StringComparison.Ordinal);
+        Assert.Contains(ControlLabelMarkup.Mark("Apply"), note, StringComparison.Ordinal);
+        Assert.Contains(ControlLabelMarkup.Mark("Refresh VRAM"), note, StringComparison.Ordinal);
+        Assert.Contains(ControlLabelMarkup.Mark("Discrete GPU"), note, StringComparison.Ordinal);
+        Assert.Contains("Apply " + ControlLabelMarkup.Mark("Discrete GPU") + " mode", note, StringComparison.Ordinal);
+        Assert.DoesNotContain(ControlLabelMarkup.Mark("Apply") + " " + ControlLabelMarkup.Mark("Discrete GPU"), note, StringComparison.Ordinal);
+        Assert.DoesNotContain(ControlLabelMarkup.Mark("Discrete GPU mode"), note, StringComparison.Ordinal);
+        Assert.DoesNotContain("KVM", note, StringComparison.Ordinal);
+        Assert.Contains("BIOS", note, StringComparison.Ordinal);
+        Assert.Contains("Don't close this!", note, StringComparison.Ordinal);
+        Assert.Contains("Local AI models benefit from as much VRAM as possible.", note, StringComparison.Ordinal);
+        Assert.Contains(HelpHtmlParser.NoteBullet, note, StringComparison.Ordinal);
+        Assert.Contains('\n', note);
+        Assert.DoesNotContain("Desktop GPU", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("5090", note, StringComparison.Ordinal);
+        Assert.DoesNotContain("Thunderbolt", note, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Windows GPU affinity", VisibleText(html), StringComparison.Ordinal);
+        Assert.DoesNotContain("Windows GPU affinity mode", VisibleText(html), StringComparison.Ordinal);
+        Assert.False(IsBold(html, "Windows GPU affinity"));
+        Assert.True(IsBold(html, "Motherboard GPU"));
+        Assert.True(IsBold(html, "Refresh VRAM"));
+        Assert.True(IsBold(html, "Discrete GPU"));
+        Assert.Contains("<strong>Discrete GPU</strong> mode", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Desktop GPU", VisibleText(html), StringComparison.Ordinal);
+    }
+
     private static IEnumerable<HelpInline> Inlines(HelpBlock block) => block switch
     {
         HelpParagraphBlock paragraph => paragraph.Inlines,

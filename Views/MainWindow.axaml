@@ -2772,10 +2772,20 @@
                                                     <Border Height="1"
                                                             Margin="0,0,0,2"
                                                             Background="{DynamicResource FluxMutedBorder}" />
-                                                    <TextBlock TextWrapping="Wrap" Opacity="0.82"
-                                                               Text="To give your local models as much graphics-card memory as possible, you can plug your monitor(s) into your built-in motherboard graphics ports rather than using your main graphics card, or use a KVM switch to do that. Your Windows display and some apps may not run as smoothly, but your local models may work better. After changing to motherboard ports, a restart is sometimes needed to fully release graphics-card VRAM. A BIOS setting change is often required before the motherboard graphics chip can be run alongside the main graphics card." />
-                                                    <TextBlock TextWrapping="Wrap" Opacity="0.82"
-                                                               Text="Try closing unused browser windows and idle apps you started, then click Refresh VRAM below to see how much memory comes free. Only close web pages and apps you opened yourself. Ending Windows background processes can freeze or crash the PC." />
+                                                    <TextBlock IsVisible="{Binding GpuVramScanning}"
+                                                               Opacity="0.82"
+                                                               Text="{x:Static vm:MainViewModel.GpuVramScanningText}" />
+                                                    <views:OptionInfoNote IsVisible="{Binding ShowDesktopGpuPreference}"
+                                                                          InfoId="gpuvram.desktop_gpu"
+                                                                          StartDismissed="True"
+                                                                          NoteText="Local AI models benefit from as much VRAM as possible.&#10;&#8226; To stop Windows allocating your main GPU card's VRAM to other apps and system processes, you can try the experimental tool below, to make them use your motherboard GPU &amp; shared ordinary system RAM instead, next time they are launched.&#10;&#8226; In the Windows GPU affinity setting below, select **Motherboard GPU**, click **Apply**, then restart Windows (for best results - you can instead just restart individual apps, but this is usually less thorough).&#10;&#8226; A BIOS setting change is usually required before the motherboard graphics chip can run alongside the main graphics card. Do this first.&#10;&#8226; Monitors should be plugged into the motherboard graphics ports, not the main GPU ports. Typically they can be left there even when you switch back – in normal **Discrete GPU** mode, Windows can still usually route everything to the main GPU card via those ports (with a very small performance hit).&#10;&#8226; If you can't or don't wish to use your on-board motherboard graphics, you can still try closing any unused browser windows and idle apps you started, then click **Refresh VRAM** below to see how much memory comes free. Only close web pages and apps you opened yourself. Ending Windows background processes could freeze or crash your PC.&#10;&#8226; Note that AI-FluxMux will show up as a VRAM using process (for obvious reasons) whichever GPU affinity mode is set. Don't close this!&#10;&#8226; Your motherboard graphics chip and its ports will likely not match the performance or features of your discrete graphics card for 3D speed, refresh rate, HDR, or how many displays you can connect. Apply **Discrete GPU** mode and restart again, when you need that extra functionality back." />
+                                                    <StackPanel Spacing="8"
+                                                                IsVisible="{Binding !ShowDesktopGpuPreference}">
+                                                        <TextBlock TextWrapping="Wrap" Opacity="0.82"
+                                                                   views:MarkedText.Source="If you can't or don't wish to use your on-board motherboard graphics, you can still try closing any unused browser windows and idle apps you started, then click **Refresh VRAM** below to see how much memory comes free. Only close web pages and apps you opened yourself. Ending Windows background processes could freeze or crash your PC." />
+                                                        <TextBlock TextWrapping="Wrap" Opacity="0.82"
+                                                                   views:MarkedText.Source="Note that AI-FluxMux will show up as a VRAM using process (for obvious reasons) whichever GPU affinity mode is set. Don't close this!" />
+                                                    </StackPanel>
                                                     <StackPanel Spacing="4">
                                                         <TextBlock FontWeight="SemiBold" Text="Display adapters (currently detected)" />
                                                         <Border BorderThickness="1"
@@ -2799,7 +2809,10 @@
                                                                                FontWeight="SemiBold"
                                                                                Text="Comments" />
                                                                 </Grid>
-                                                                <ItemsControl IsVisible="{Binding HasGpuAdapterRows}"
+                                                                <TextBlock IsVisible="{Binding GpuVramScanning}"
+                                                                           Opacity="0.82"
+                                                                           Text="{x:Static vm:MainViewModel.GpuVramScanningText}" />
+                                                                <ItemsControl IsVisible="{Binding ShowGpuAdapterList}"
                                                                               ItemsSource="{Binding GpuAdapterRows}">
                                                                     <ItemsControl.ItemTemplate>
                                                                         <DataTemplate x:DataType="svc:DisplayAdapterListItem">
@@ -2824,12 +2837,35 @@
                                                                         </DataTemplate>
                                                                     </ItemsControl.ItemTemplate>
                                                                 </ItemsControl>
-                                                                <TextBlock IsVisible="{Binding !HasGpuAdapterRows}"
+                                                                <TextBlock IsVisible="{Binding ShowGpuAdapterEmptyMessage}"
                                                                            Opacity="0.82"
                                                                            TextWrapping="Wrap"
                                                                            Text="No display adapters detected, or PowerShell query failed." />
                                                             </StackPanel>
                                                         </Border>
+                                                    </StackPanel>
+                                                    <StackPanel Spacing="4"
+                                                                IsVisible="{Binding ShowDesktopGpuPreference}">
+                                                        <TextBlock FontWeight="SemiBold"
+                                                                   Text="{x:Static svc:WindowsGpuPreference.AffinityModeLabel}" />
+                                                        <Grid ColumnDefinitions="*,Auto"
+                                                              ColumnSpacing="8">
+                                                            <ComboBox MinWidth="200"
+                                                                      HorizontalAlignment="Left"
+                                                                      VerticalAlignment="Center"
+                                                                      ItemsSource="{Binding DesktopGpuChoices}"
+                                                                      SelectedItem="{Binding SelectedDesktopGpu}"
+                                                                      IsEnabled="{Binding !DesktopGpuBusy}"
+                                                                      views:MarkedText.Tip="Select **Motherboard GPU** or **Discrete GPU**. Click **Apply**, then restart Windows. llama-server stays on **Discrete GPU** mode." />
+                                                            <Button Grid.Column="1"
+                                                                    Content="Apply"
+                                                                    Command="{Binding ApplyDesktopGpuCommand}"
+                                                                    views:MarkedText.Tip="Write **Windows GPU affinity**, then restart Windows so apps pick it up." />
+                                                        </Grid>
+                                                        <TextBlock views:MarkedText.Source="{Binding DesktopGpuStatusText}"
+                                                                   TextWrapping="Wrap"
+                                                                   Opacity="0.85"
+                                                                   IsVisible="{Binding DesktopGpuStatusText, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}" />
                                                     </StackPanel>
                                                     <StackPanel Spacing="4">
                                                         <TextBlock FontWeight="SemiBold" Text="VRAM usage" />
@@ -2840,15 +2876,28 @@
                                                                 BorderBrush="{DynamicResource TextControlBorderBrush}">
                                                             <ScrollViewer VerticalScrollBarVisibility="Auto"
                                                                           HorizontalScrollBarVisibility="Disabled"
-                                                                          ToolTip.Tip="How full each graphics card is, and which programs are using graphics memory. Close unused apps, then Refresh VRAM to see the change.">
+                                                                          views:MarkedText.Tip="How full each graphics card is, and which programs are using graphics memory. Close unused apps, then click **Refresh VRAM** to see the change.">
                                                                 <StackPanel Grid.IsSharedSizeScope="True">
-                                                                    <TextBlock Text="{Binding VramStatusText}"
+                                                                    <TextBlock IsVisible="{Binding GpuVramScanning}"
+                                                                               Opacity="0.82"
+                                                                               Text="{x:Static vm:MainViewModel.GpuVramScanningText}" />
+                                                                    <TextBlock IsVisible="{Binding !GpuVramScanning}"
+                                                                               Text="{Binding VramStatusText}"
                                                                                TextWrapping="Wrap" />
+                                                                    <TextBlock Margin="0,16,0,4"
+                                                                               IsVisible="{Binding GpuVramScanning}"
+                                                                               Text="Programs using the main graphics card:"
+                                                                               TextWrapping="Wrap" />
+                                                                    <TextBlock Margin="0,0,0,10"
+                                                                               IsVisible="{Binding GpuVramScanning}"
+                                                                               Opacity="0.82"
+                                                                               Text="{x:Static vm:MainViewModel.GpuVramScanningText}" />
                                                                     <TextBlock Margin="0,16,0,10"
                                                                                IsVisible="{Binding HasVramProcessList}"
                                                                                Text="{Binding VramProcessListHeaderText}"
                                                                                TextWrapping="Wrap" />
-                                                                    <ItemsControl ItemsSource="{Binding VramProcessRows}">
+                                                                    <ItemsControl IsVisible="{Binding !GpuVramScanning}"
+                                                                                  ItemsSource="{Binding VramProcessRows}">
                                                                         <ItemsControl.ItemTemplate>
                                                                             <DataTemplate x:DataType="svc:VramProcessListItem">
                                                                                 <Grid Margin="0,1"
@@ -2882,7 +2931,8 @@
                                                                     HorizontalAlignment="Left"
                                                                     Content="Refresh VRAM"
                                                                     Command="{Binding RefreshVramStatusCommand}"
-                                                                    ToolTip.Tip="Update graphics-memory numbers after you close apps or move the display." />
+                                                                    IsEnabled="{Binding !GpuVramScanning}"
+                                                                    views:MarkedText.Tip="Update graphics-memory numbers after you close apps or move the display." />
                                                             <Button Grid.Column="1"
                                                                     HorizontalAlignment="Right"
                                                                     Content="Close"
