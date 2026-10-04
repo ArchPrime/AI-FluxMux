@@ -30,6 +30,10 @@
     <Content Include="Start here.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- The in-app llama-server updater runs this script; it must travel with the app. -->
+    <Content Include="scripts\Update-LlamaServer.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>

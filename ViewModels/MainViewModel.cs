@@ -4693,6 +4693,16 @@ public partial class MainViewModel : ViewModelBase
     public partial bool LlamaReleasePageAvailable { get; set; }
 
     [ObservableProperty]
+    public partial bool LlamaServerUpdateAvailable { get; set; }
+
+    [ObservableProperty]
+    public partial bool LlamaServerUpdating { get; set; }
+
+    [ObservableProperty]
+    public partial string LlamaServerUpdateProgressText { get; set; } =
+        "Use Check for updates to look for a newer llama-server of the same family. When one is found, Update llama-server now downloads it and swaps it in place, keeping a backup of the current folder.";
+
+    [ObservableProperty]
     public partial int SelectedMainTabIndex { get; set; }
     = 0;
 
@@ -5025,6 +5035,8 @@ public partial class MainViewModel : ViewModelBase
         LlamaServerZipAvailable = false;
         LlamaCudartZipAvailable = false;
         LlamaReleasePageAvailable = false;
+        LlamaServerUpdateAvailable = false;
+        LlamaServerUpdating = false;
         _llamaServerZipUrl = string.Empty;
         _llamaCudartZipUrl = string.Empty;
         _llamaReleaseUrl = string.Empty;
@@ -5067,6 +5079,8 @@ public partial class MainViewModel : ViewModelBase
             LlamaServerZipAvailable = !string.IsNullOrWhiteSpace(_llamaServerZipUrl);
             LlamaCudartZipAvailable = !string.IsNullOrWhiteSpace(_llamaCudartZipUrl);
             LlamaReleasePageAvailable = !string.IsNullOrWhiteSpace(_llamaReleaseUrl);
+            LlamaServerUpdateAvailable = llamaResult.NewerAvailable
+                && !string.IsNullOrWhiteSpace(_llamaServerZipUrl);
             if (llamaResult.NewerAvailable)
             {
                 StatusMessage = "A matching llama-server zip is available. Confirm this folder still matches this GPU before downloading.";
@@ -5111,6 +5125,84 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand]
     private void OpenLlamaReleasePage()
         => OpenExternalLink(string.IsNullOrWhiteSpace(_llamaReleaseUrl) ? null : _llamaReleaseUrl);
+
+    [RelayCommand(CanExecute = nameof(CanUpdateLlamaServerNow))]
+    private async Task UpdateLlamaServerNowAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_llamaServerZipUrl))
+        {
+            LlamaServerUpdateProgressText = "No matching llama-server zip is available yet. Run Check for updates first.";
+            return;
+        }
+
+        var installDir = Path.GetDirectoryName(LocalServerExecutablePath);
+        if (string.IsNullOrWhiteSpace(installDir) || !Directory.Exists(installDir))
+        {
+            LlamaServerUpdateProgressText = "The llama-server folder is not set. Choose llama-server.exe on the Servers tab first.";
+            return;
+        }
+
+        var running = LlamaServerUpdateService.GetRunningLlamaPids();
+        if (running.Count > 0)
+        {
+            LlamaServerUpdateProgressText = "llama-server is running (PID " + string.Join(", ", running)
+                + "). Stop it first, then run the update again.";
+            StatusMessage = LlamaServerUpdateProgressText;
+            return;
+        }
+
+        var confirmed = ThemedDialog.Confirm(
+            "Update llama-server now",
+            "This downloads the matching llama-server zip"
+            + (string.IsNullOrWhiteSpace(_llamaCudartZipUrl) ? string.Empty : " and the matching CUDA DLLs zip")
+            + " and swaps it into " + installDir
+            + ". The current folder is kept as a backup. Continue?",
+            "Update now",
+            "Cancel");
+        if (!confirmed)
+        {
+            return;
+        }
+
+        LlamaServerUpdating = true;
+        LlamaServerUpdateProgressText = "Starting the update...";
+        StatusMessage = "Updating llama-server...";
+        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
+        try
+        {
+            var outcome = await LlamaServerUpdateService.UpdateAsync(
+                http,
+                installDir,
+                _llamaServerZipUrl,
+                string.IsNullOrWhiteSpace(_llamaCudartZipUrl) ? null : _llamaCudartZipUrl,
+                reportProgress: message =>
+                {
+                    LlamaServerUpdateProgressText = message;
+                    StatusMessage = message;
+                });
+            LlamaServerUpdateProgressText = outcome.StatusText;
+            StatusMessage = outcome.StatusText;
+            if (outcome.Succeeded)
+            {
+                LlamaServerUpdateAvailable = false;
+            }
+        }
+        catch (Exception ex)
+        {
+            LlamaServerUpdateProgressText = "The update could not be completed: " + ex.Message;
+            StatusMessage = LlamaServerUpdateProgressText;
+        }
+        finally
+        {
+            LlamaServerUpdating = false;
+        }
+    }
+
+    private bool CanUpdateLlamaServerNow()
+        => !LlamaServerUpdating
+            && !string.IsNullOrWhiteSpace(_llamaServerZipUrl)
+            && !string.IsNullOrWhiteSpace(LocalServerExecutablePath);
 
     [RelayCommand]
     private void OpenUpdateDownload()
