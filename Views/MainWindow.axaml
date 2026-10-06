@@ -2312,88 +2312,86 @@
 
                         <GroupBox Header="AI-FluxMux updates">
                             <StackPanel Margin="8" Spacing="8">
+
+                                <!-- ============ AI-FluxMux ============ -->
+                                <TextBlock FontWeight="SemiBold" Text="AI-FluxMux" />
                                 <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
-                                    <TextBlock VerticalAlignment="Center" Text="Update feed URL" />
+                                    <TextBlock VerticalAlignment="Center" Text="Alternative source" />
                                     <TextBox Grid.Column="1"
                                              Text="{Binding UpdateFeedUrl}"
                                              PlaceholderText="https://…/fluxmux-updates.json"
-                                             ToolTip.Tip="Full http or https address of an AI-FluxMux update JSON file. Not required until you have a public host." />
+                                             ToolTip.Tip="Optional. A custom update feed URL for AI-FluxMux. Leave blank to use the default GitHub releases." />
                                 </Grid>
-                                <TextBlock TextWrapping="Wrap"
-                                           FontSize="11"
-                                           Opacity="0.85"
-                                           Text="Paste a feed URL when you have a public host. Leave this blank until then. The feed is a small JSON file: it can name a newer AI-FluxMux download, and it can replace Help.html (llama.cpp links, Harness yaml, and similar) without a new build. A sample file is fluxmux-updates.example.json in the AI-FluxMux folder." />
+                                <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding UpdateCheckStatusText}" />
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button Content="Check for updates"
-                                            Command="{Binding CheckForUpdatesCommand}">
+                                            Command="{Binding CheckForFluxMuxUpdatesCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks all three for something newer without changing anything: AI-FluxMux (GitHub releases, or the feed URL if one is set — also refreshes Help.html), llama.cpp nightlies for a newer zip of the same Windows CUDA / Vulkan / CPU family as the llama-server folder in use, and this PC's DeepSeek Harness version against the latest. Use the 'Update … now' buttons to actually install a newer version. Confirm the llama-server folder still matches this GPU before updating — hardware may have changed." />
+                                                       Text="Checks for a newer AI-FluxMux (the alternative source if set, otherwise the default GitHub releases) and reports the result. Does not install anything — use 'Update now' to install." />
                                         </ToolTip.Tip>
                                     </Button>
-                                    <Button Content="Open download page"
-                                            Command="{Binding OpenUpdateDownloadCommand}"
-                                            IsVisible="{Binding UpdateDownloadAvailable}"
-                                            ToolTip.Tip="Opens the download address found by 'Check for updates' so you can grab the installer manually. This does not install anything — use 'Update AI-FluxMux now' to let the standalone updater back up and replace the install automatically." />
-                                    <Button Content="Update AI-FluxMux now"
-                                            Command="{Binding UpdateFluxMuxNowCommand}"
-                                            ToolTip.Tip="Checks for a newer AI-FluxMux (GitHub releases, or the feed URL if one is set). If one is available, closes AI-FluxMux and runs the standalone updater to back up and replace the install, then restarts. Reports 'up to date' when nothing is newer." />
+                                    <Button Content="Update now"
+                                            Command="{Binding UpdateFluxMuxNowCommand}">
+                                        <ToolTip.Tip>
+                                            <TextBlock TextWrapping="Wrap" MaxWidth="420"
+                                                       Text="Checks for a newer AI-FluxMux. If one is available, closes AI-FluxMux and runs the standalone updater to back up and replace the install, then restarts. Reports 'up to date' when nothing is newer." />
+                                        </ToolTip.Tip>
+                                    </Button>
                                 </StackPanel>
-                                <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding UpdateCheckStatusText}" />
+                                <!-- ============ llama-server ============ -->
                                 <TextBlock FontWeight="SemiBold" Text="llama-server" />
+                                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                                    <TextBlock VerticalAlignment="Center" Text="Alternative source" />
+                                    <TextBox Grid.Column="1"
+                                             Text="{Binding LlamaUpdateSource}"
+                                             PlaceholderText="https://… (optional custom nightly source)"
+                                             ToolTip.Tip="Optional. A custom source for llama-server updates. Leave blank to use the default llama.cpp nightlies." />
+                                </Grid>
                                 <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding LlamaServerUpdateStatusText}" />
-                                <WrapPanel Orientation="Horizontal">
-                                    <Button Content="Open matching llama-server zip"
-                                            Margin="0,0,8,6"
-                                            Command="{Binding OpenLlamaServerZipCommand}"
-                                            IsVisible="{Binding LlamaServerZipAvailable}">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Content="Check for updates"
+                                            Command="{Binding CheckForLlamaServerUpdatesCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Opens the zip that matches this llama-server folder's family. Confirm that family is still correct for this PC before extracting — hardware may have changed. Extract into a new folder. Keep the old one until Launch works." />
+                                                       Text="Checks for a newer llama-server zip matching this install's family (the alternative source if set, otherwise the default llama.cpp nightlies) and reports the result. Does not install anything — use 'Update now' to install." />
                                         </ToolTip.Tip>
                                     </Button>
-                                    <Button Content="Open matching CUDA DLLs zip"
-                                            Margin="0,0,8,6"
-                                            Command="{Binding OpenLlamaCudartZipCommand}"
-                                            IsVisible="{Binding LlamaCudartZipAvailable}">
-                                        <ToolTip.Tip>
-                                            <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Opens the CUDA DLLs zip that matches this llama-server folder. Confirm CUDA 12 vs 13 still matches this GPU before extracting — hardware may have changed. Extract beside the new llama-server folder, not over the working install." />
-                                        </ToolTip.Tip>
-                                    </Button>
-                                    <Button Content="Open matching llama.cpp release"
-                                            Margin="0,0,8,6"
-                                            Command="{Binding OpenLlamaReleasePageCommand}"
-                                            IsVisible="{Binding LlamaReleasePageAvailable}">
-                                        <ToolTip.Tip>
-                                            <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Opens the llama.cpp nightly that matches this install's family. Confirm the zip you pick is still the right one for this PC — hardware may have changed. Do not use a CPU or Vulkan zip if this folder is CUDA." />
-                                        </ToolTip.Tip>
-                                        </Button>
-                                    <Button Content="Update llama-server now"
-                                            Margin="0,0,8,6"
+                                    <Button Content="Update now"
                                             Command="{Binding UpdateLlamaServerNowViaUpdaterCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks llama.cpp nightlies for a newer zip matching this install's family. If one is available, closes AI-FluxMux and runs the standalone updater to back up and replace your llama-server folder, then restarts. Reports 'up to date' when nothing is newer." />
+                                                       Text="Checks for a newer llama-server. If one is available, closes AI-FluxMux and runs the standalone updater to back up and replace your llama-server folder, then restarts. Reports 'up to date' when nothing is newer." />
                                         </ToolTip.Tip>
                                     </Button>
-                                    </WrapPanel>
-                                <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding LlamaServerUpdateProgressText}" />
+                                </StackPanel>
+                                <!-- ============ DeepSeek Harness ============ -->
                                 <TextBlock FontWeight="SemiBold" Text="DeepSeek Harness" />
+                                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                                    <TextBlock VerticalAlignment="Center" Text="Alternative source" />
+                                    <TextBox Grid.Column="1"
+                                             Text="{Binding HarnessUpdateSource}"
+                                             PlaceholderText="https://… (optional custom release source)"
+                                             ToolTip.Tip="Optional. A custom source for DeepSeek Harness updates. Leave blank to use the default GitHub releases." />
+                                </Grid>
                                 <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding HarnessUpdateStatusText}" />
-                                <Button HorizontalAlignment="Left"
-                                        Content="Open Harness releases"
-                                        Command="{Binding OpenHarnessReleasesCommand}">
-                                    <ToolTip.Tip>
-                                        <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                   Text="Opens GitHub releases for DeepSeek Harness so you can see the changelog or grab a build manually. This does not install anything — use 'Update Harness now' to let the standalone updater back up your config and update dsh via npm automatically." />
-                                    </ToolTip.Tip>
-                                </Button>
-                                <Button HorizontalAlignment="Left"
-                                        Content="Update Harness now"
-                                        Command="{Binding UpdateHarnessNowCommand}"
-                                        ToolTip.Tip="Checks this PC's DeepSeek Harness version against the latest. If a newer one exists and Node.js is available, closes AI-FluxMux and runs the standalone updater to back up your config and update dsh via npm, then restarts. Reports 'up to date' when nothing is newer." />
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Content="Check for updates"
+                                            Command="{Binding CheckForHarnessUpdatesCommand}">
+                                        <ToolTip.Tip>
+                                            <TextBlock TextWrapping="Wrap" MaxWidth="420"
+                                                       Text="Checks this PC's DeepSeek Harness version against the latest (the alternative source if set, otherwise the default GitHub releases) and reports the result. Does not install anything — use 'Update now' to install." />
+                                        </ToolTip.Tip>
+                                    </Button>
+                                    <Button Content="Update now"
+                                            Command="{Binding UpdateHarnessNowCommand}">
+                                        <ToolTip.Tip>
+                                            <TextBlock TextWrapping="Wrap" MaxWidth="420"
+                                                       Text="Checks for a newer DeepSeek Harness. If one is available and Node.js is present, closes AI-FluxMux and runs the standalone updater to back up your config and update dsh via npm, then restarts. Reports 'up to date' when nothing is newer." />
+                                        </ToolTip.Tip>
+                                    </Button>
+                                </StackPanel>
+
                             </StackPanel>
                         </GroupBox>
 
