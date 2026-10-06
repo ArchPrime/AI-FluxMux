@@ -5106,7 +5106,18 @@ public partial class MainViewModel : ViewModelBase
                 RiskLevel = YarnContextRiskLevel.Safe
             });
         }
-        LocalYarnMaxContextWizardOptions = options;
+
+        // Mutate the existing collection in place instead of replacing it. Replacing the
+        // ObservableCollection (LocalYarnMaxContextWizardOptions = options) calls SetSource on
+        // the bound ComboBox, which throws "Cannot change source while update is in progress"
+        // when this runs during a UI update (e.g. the AutoTune command flow). Clear + Add
+        // raises CollectionChanged events instead, which Avalonia handles safely.
+        LocalYarnMaxContextWizardOptions.Clear();
+        foreach (var option in options)
+        {
+            LocalYarnMaxContextWizardOptions.Add(option);
+        }
+
         // If the current selection is no longer offered, fall back to Auto.
         var currentSelection = LocalVariantYarnMaxContext;
         if (!LocalYarnMaxContextWizardOptions.Any(o => 
