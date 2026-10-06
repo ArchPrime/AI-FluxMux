@@ -16038,6 +16038,7 @@ public partial class MainViewModel : ViewModelBase
 
         var nativeCtx = advice.ModelMaxCtx;
         var yarnSuffix = string.Empty;
+        var footprintLabel = "Estimated VRAM";
         if (LocalVariantExtendContextIntoRam && nativeCtx > 0 && configuredContextTokens > nativeCtx)
         {
             // Estimate the RAM overflow: the portion of the context above the VRAM-resident
@@ -16047,13 +16048,16 @@ public partial class MainViewModel : ViewModelBase
             var vramWindow = Math.Min(advice.ContextPriorityFirst > 0 ? advice.ContextPriorityFirst : nativeCtx, (int)configuredContextTokens);
             var overflowTokens = Math.Max(0, (int)configuredContextTokens - vramWindow);
             var overflowGiB = overflowTokens * effectiveKvBytes / 1024d / 1024d / 1024d;
-            yarnSuffix = $"  |  native window {nativeCtx:N0} (YaRN extends to {configuredContextTokens:N0}, ≈{overflowGiB:0.#} GiB overflow in RAM)";
+            // When YaRN is on and the context exceeds the native window, most of the KV cache
+            // lives in RAM, not VRAM. Relabel the footprint to avoid the misleading "VRAM" claim.
+            footprintLabel = "Estimated footprint (VRAM+RAM)";
+            yarnSuffix = $"  |  native window {nativeCtx:N0} (YaRN extends to {configuredContextTokens:N0}, ≈{overflowGiB:0.#} GiB of KV in RAM)";
         }
         else if (nativeCtx > 0)
         {
             yarnSuffix = $"  |  native window {nativeCtx:N0}";
         }
-        LocalVariantFootprintText = $"Estimated VRAM  {estimatedGiB:F1} GiB  |  weights {weightsGiB:F1} GiB  +  KV {kvGiB:F1} GiB  +  runtime {runtimeGiB:F1} GiB{(projectorGiB > 0 ? $"  +  mmproj {projectorGiB:F1} GiB" : string.Empty)}  |  {configuredContextTokens:N0} configured tokens{yarnSuffix}{measuredSuffix}";
+        LocalVariantFootprintText = $"{footprintLabel}  {estimatedGiB:F1} GiB  |  weights {weightsGiB:F1} GiB  +  KV {kvGiB:F1} GiB  +  runtime {runtimeGiB:F1} GiB{(projectorGiB > 0 ? $"  +  mmproj {projectorGiB:F1} GiB" : string.Empty)}  |  {configuredContextTokens:N0} configured tokens{yarnSuffix}{measuredSuffix}";
         var liveVramSuffix = string.Empty;
         if (LocalGpuVramSample.TryRead(out _, out sampledTotalGiB, out sampledFreeGiB))
         {
