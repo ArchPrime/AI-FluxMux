@@ -4986,13 +4986,24 @@ public partial class MainViewModel : ViewModelBase
             options.AddRange(LocalYarnMaxContextOptions);
         }
 
+        // Defensive: never return an empty list (always offer at least "Auto").
+        if (options.Count == 0)
+        {
+            options.Add("Auto");
+        }
         return new ObservableCollection<string>(options);
     }
 
     /// <summary>Recomputes the wizard's hardware-bounded "how far to extend" options.</summary>
     private void RefreshYarnMaxContextWizardOptions()
     {
-        LocalYarnMaxContextWizardOptions = BuildYarnMaxContextWizardOptions();
+        var options = BuildYarnMaxContextWizardOptions();
+        // Defensive: ensure the list is never empty (always offer at least "Auto").
+        if (options.Count == 0)
+        {
+            options.Add("Auto");
+        }
+        LocalYarnMaxContextWizardOptions = options;
         // If the current selection is no longer offered, fall back to Auto.
         if (!LocalYarnMaxContextWizardOptions.Contains(LocalVariantYarnMaxContext, StringComparer.OrdinalIgnoreCase))
         {
