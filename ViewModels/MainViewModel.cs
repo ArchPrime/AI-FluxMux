@@ -4969,7 +4969,14 @@ public partial class MainViewModel : ViewModelBase
         return new ObservableCollection<string>(options);
     }
 
-    /// <summary>Recomputes the wizard's hardware-bounded "how far to extend" options.</summary>
+    /// <summary>
+    /// Advisory text for the "How far" dropdown: lists which fixed targets the RAM heuristic
+    /// flags as risky ("may not fit"). Empty string when all targets should fit.
+    /// </summary>
+    [ObservableProperty]
+    private string _localYarnMaxContextAdvisoryText = string.Empty;
+
+    /// <summary>Recomputes the wizard's hardware-bounded "how far to extend" options and advisory.</summary>
     private void RefreshYarnMaxContextWizardOptions()
     {
         var options = BuildYarnMaxContextWizardOptions();
@@ -4983,6 +4990,45 @@ public partial class MainViewModel : ViewModelBase
         if (!LocalYarnMaxContextWizardOptions.Contains(LocalVariantYarnMaxContext, StringComparer.OrdinalIgnoreCase))
         {
             LocalVariantYarnMaxContext = "Auto";
+        }
+        // Compute the advisory: which fixed targets the RAM heuristic says may not fit.
+        LocalYarnMaxContextAdvisoryText = BuildYarnMaxContextAdvisoryText();
+    }
+
+    /// <summary>
+    /// Builds the "may not fit" advisory for the "How far" options. Returns an empty string when
+    /// all fixed targets should fit, or a short list of the targets that exceed the RAM-bounded
+    /// ceiling.
+    /// </summary>
+    private string BuildYarnMaxContextAdvisoryText()
+    {
+        try
+        {
+            var advice = CurrentLocalHardwareAdvice();
+            if (advice.ModelMaxCtx <= 0)
+            {
+                return string.Empty;
+            }
+
+            int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(
+                advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
+
+            var risky = new List<string>();
+            if (512 * 1024 > ramBounded) risky.Add("512K");
+            if (768 * 1024 > ramBounded) risky.Add("768K");
+            if (1024 * 1024 > ramBounded) risky.Add("1M");
+
+            if (risky.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            return "⚠ May not fit on this PC: " + string.Join(", ", risky)
+                + ". You can still try them — if the model runs out of memory, AI-FluxMux will offer a smaller context.";
+        }
+        catch
+        {
+            return string.Empty;
         }
     }
 
@@ -6213,6 +6259,13 @@ public partial class MainViewModel : ViewModelBase
                     model,
                     variant,
                     FirstNonEmpty(result.Details, result.Status));
+                // Graceful OOM recovery: if the launch failed on out-of-memory, offer
+                // one-click actions (smaller context / retry / smaller model) instead of
+                // leaving the user with a bare status line.
+                if (LooksLikeLocalOomFailure(result.Details, result.Status))
+                {
+                    _ = HandleLocalOomRecoveryAsync(model, variant);
+                }
             }
         }
 
@@ -6224,6 +6277,97 @@ public partial class MainViewModel : ViewModelBase
         {
             StartLocalReadinessMonitor((int)OrchestratorPort, model, variant, launchStartedUtc);
         }
+    }
+
+    /// <summary>
+    /// Detects whether a local launch failure looks like an out-of-memory (VRAM or RAM) error,
+    /// based on the llama-server stderr / status text.
+    /// </summary>
+    private static bool LooksLikeLocalOomFailure(string? details, string? status)
+    {
+        var text = (details ?? string.Empty) + " " + (status ?? string.Empty);
+        return text.Contains("out of memory", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("cuda_error_out_of_memory", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("failed to allocate", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("ggml_gallocr", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Shows the OOM recovery dialog when a local launch fails on out-of-memory.
+    /// Offers one-click actions: use a smaller context, retry as-is, or pick a smaller model.
+    /// </summary>
+    private async Task HandleLocalOomRecoveryAsync(string model, string variant)
+    {
+        try
+        {
+            // Compute the largest context target that should fit, to pre-fill the
+            // "Use a smaller context" action.
+            var advice = CurrentLocalHardwareAdvice();
+            string suggestedTarget = "Auto";
+            if (advice.ModelMaxCtx > 0)
+            {
+                int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(
+                    advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
+                // Pick the largest fixed target that fits; fall back to "Auto" if none do.
+                if (ramBounded >= 1024 * 1024) suggestedTarget = "1M";
+                else if (ramBounded >= 768 * 1024) suggestedTarget = "768K";
+                else if (ramBounded >= 512 * 1024) suggestedTarget = "512K";
+                else suggestedTarget = "Auto";
+            }
+
+            var smallerContextLabel = suggestedTarget == "Auto"
+                ? "Use a smaller context"
+                : $"Use {suggestedTarget} context";
+
+            var action = Views.ThemedDialog.LaunchRecovery(
+                "Local model ran out of memory",
+                $"The local model '{model}' ({variant}) did not start because it ran out of memory (VRAM or RAM). "
+                + "You can try a smaller context window, retry as-is (in case memory was temporarily busy), or pick a smaller model.",
+                smallerContextLabel);
+
+            switch (action)
+            {
+                case Views.LocalLaunchRecoveryAction.UseSmallerContext:
+                    await ApplySmallerContextAndRelaunchAsync(model, variant, suggestedTarget);
+                    break;
+                case Views.LocalLaunchRecoveryAction.RetryAsIs:
+                    StatusMessage = "Retrying local launch...";
+                    await LaunchLocalRouteAsync("OOM retry", model, variant);
+                    break;
+                case Views.LocalLaunchRecoveryAction.PickSmallerModel:
+                    StatusMessage = "Pick a smaller local model from Model Profiles, then launch it.";
+                    break;
+                default:
+                    // Dialog could not be shown (no main window) or was dismissed.
+                    break;
+            }
+        }
+        catch
+        {
+            // Recovery is best-effort; never let it mask the original failure.
+        }
+    }
+
+    /// <summary>
+    /// Sets the variant's context to the suggested (smaller) target and re-launches.
+    /// If the variant is not editable, directs the user to make a new variant instead.
+    /// </summary>
+    private async Task ApplySmallerContextAndRelaunchAsync(string model, string variant, string suggestedTarget)
+    {
+        if (!IsLocalVariantEditable)
+        {
+            StatusMessage = "This profile variant is locked. Make a new variant, then lower its Context to "
+                + suggestedTarget + " in the local model profile editor.";
+            return;
+        }
+
+        // Enable "Extend into RAM" (YaRN) and set the target, so the context can go
+        // beyond the native window into system RAM.
+        LocalVariantExtendContextIntoRam = true;
+        LocalVariantYarnMaxContext = suggestedTarget;
+        SaveLocalVariant();
+        StatusMessage = $"Context set to {suggestedTarget}. Re-launching local model...";
+        await LaunchLocalRouteAsync("OOM smaller-context retry", model, variant);
     }
 
     private void ApplyLocalPublicEndpointSuccess(
