@@ -348,10 +348,23 @@
                                                                                              FontSize="11"
                                                                                              VerticalAlignment="Center"
                                                                                              Width="70" />
-                                                                                  <ComboBox ItemsSource="{Binding LocalYarnMaxContextWizardOptions}"
-                                                                                            SelectedItem="{Binding LocalVariantYarnMaxContext}"
-                                                                                            Width="130"
-                                                                                            ToolTip.Tip="How far to stretch the context when Extend into RAM is on. Auto picks the largest size your computer memory can hold. The other options are fixed targets that your memory can actually hold. Bigger keeps more of the chat but uses more memory and runs slower." />
+                                                                                   <ComboBox ItemsSource="{Binding LocalYarnMaxContextWizardOptions}"
+                                                                                             SelectedItem="{Binding LocalVariantYarnMaxContext}"
+                                                                                             Width="130"
+                                                                                             ToolTip.Tip="How far to stretch the context when Extend into RAM is on. Auto picks the largest size your computer memory can hold. The other options are fixed targets that your memory can actually hold. Bigger keeps more of the chat but uses more memory and runs slower.">
+                                                                                     <ComboBox.ItemTemplate>
+                                                                                         <DataTemplate>
+                                                                                             <TextBlock Text="{Binding Display}"
+                                                                                                        Foreground="{Binding RiskLevel, Converter={x:Static views:YarnContextRiskToBrushConverter.Instance}}" />
+                                                                                         </DataTemplate>
+                                                                                     </ComboBox.ItemTemplate>
+                                                                                     <ComboBox.SelectionBoxItemTemplate>
+                                                                                         <DataTemplate>
+                                                                                             <TextBlock Text="{Binding Display}"
+                                                                                                        Foreground="{Binding RiskLevel, Converter={x:Static views:YarnContextRiskToBrushConverter.Instance}}" />
+                                                                                         </DataTemplate>
+                                                                                     </ComboBox.SelectionBoxItemTemplate>
+                                                                                 </ComboBox>
                                                                               </StackPanel>
                                                                                <TextBlock FontSize="11"
                                                                                           TextWrapping="Wrap"

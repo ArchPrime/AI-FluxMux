@@ -43,6 +43,31 @@ public sealed class DiscoveredLocalServerOption
     public override string ToString() => Display;
 }
 
+/// <summary>
+/// Represents a YaRN context option with a risk level for UI display.
+/// </summary>
+public sealed class YarnContextOption
+{
+    public string Display { get; init; } = string.Empty;
+    public int ContextTokens { get; init; }
+    public YarnContextRiskLevel RiskLevel { get; init; }
+
+    public override string ToString() => Display;
+}
+
+/// <summary>
+/// Risk level for a YaRN context option.
+/// </summary>
+public enum YarnContextRiskLevel
+{
+    /// <summary>Option fits within available memory.</summary>
+    Safe,
+    /// <summary>Option exceeds available memory but is within physical hardware limits.</summary>
+    ExceedsAvailable,
+    /// <summary>Option exceeds physical hardware limits (should be excluded from dropdown).</summary>
+    ExceedsPhysical
+}
+
 public sealed class InstalledLocalServerOption
 {
     public string ExecutablePath { get; init; } = string.Empty;
@@ -4958,21 +4983,106 @@ public partial class MainViewModel : ViewModelBase
     /// installed RAM: each option is a clean target that the overflow KV can actually hold, so the
     /// user is only offered extensions their machine can run. Refreshed when the profile/hardware
     /// changes. Always includes "Auto" (let RAM decide) plus the fixed targets that fit.
+    /// Options that exceed available memory are highlighted in red; options that exceed physical
+    /// hardware limits are excluded from the dropdown.
     /// </summary>
     [ObservableProperty]
-    private ObservableCollection<string> _localYarnMaxContextWizardOptions = new(["Auto", "512K", "768K", "1M"]);
+    private ObservableCollection<YarnContextOption> _localYarnMaxContextWizardOptions = new();
 
     /// <summary>
     /// Builds the wizard's "how far to extend" options from the available RAM. Includes "Auto"
-    /// (RAM decides) and any of the fixed targets (512K/768K/1M) that the overflow KV can hold.
-    /// If none of the fixed targets fit, only "Auto" is offered.
+    /// (RAM decides) and all fixed targets (512K/768K/1M). Options that exceed available memory
+    /// are marked with RiskLevel.ExceedsAvailable (displayed in red); options that exceed physical
+    /// hardware limits are excluded from the list.
     /// </summary>
-    private ObservableCollection<string> BuildYarnMaxContextWizardOptions()
+    private ObservableCollection<YarnContextOption> BuildYarnMaxContextWizardOptions()
     {
-        // Always offer "Auto" plus all fixed targets. The RAM calculation is a heuristic,
-        // not a hard limit — the user can choose any target and see if it works.
-        var options = new List<string> { "Auto", "512K", "768K", "1M" };
-        return new ObservableCollection<string>(options);
+        var options = new List<YarnContextOption>();
+
+        // Always include "Auto" (let RAM decide)
+        options.Add(new YarnContextOption
+        {
+            Display = "Auto",
+            ContextTokens = 0,
+            RiskLevel = YarnContextRiskLevel.Safe
+        });
+
+        // Define the fixed targets
+        var fixedTargets = new (string Display, int Tokens)[]
+        {
+            ("512K", 512 * 1024),
+            ("768K", 768 * 1024),
+            ("1M", 1024 * 1024)
+        };
+
+        try
+        {
+            var advice = CurrentLocalHardwareAdvice();
+            if (advice.ModelMaxCtx > 0)
+            {
+                int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(
+                    advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
+
+                // Calculate physical hardware limit (total RAM, with a small reserve for OS)
+                double totalRamGb = advice.TotalRamGb;
+                double physicalReserveGb = Math.Min(4.0, totalRamGb * 0.10); // 10% or 4 GB, whichever is smaller
+                double physicalAvailableGb = Math.Max(0.0, totalRamGb - physicalReserveGb);
+                long kvBytesPerToken = Math.Max(1L, advice.KvBytesPerToken);
+                double physicalAvailableBytes = physicalAvailableGb * 1073741824.0;
+                int physicalAvailableTokens = (int)(physicalAvailableBytes / kvBytesPerToken);
+                int vramWindow = Math.Max(advice.ModelMaxCtx, advice.ContextPriorityFirst);
+                int physicalCeiling = vramWindow + physicalAvailableTokens;
+
+                foreach (var (display, tokens) in fixedTargets)
+                {
+                    // Exclude options that exceed physical hardware limits
+                    if (tokens > physicalCeiling)
+                    {
+                        continue;
+                    }
+
+                    // Mark options that exceed available memory (the more conservative ramBounded limit)
+                    YarnContextRiskLevel riskLevel = tokens > ramBounded
+                        ? YarnContextRiskLevel.ExceedsAvailable
+                        : YarnContextRiskLevel.Safe;
+
+                    options.Add(new YarnContextOption
+                    {
+                        Display = display,
+                        ContextTokens = tokens,
+                        RiskLevel = riskLevel
+                    });
+                }
+            }
+            else
+            {
+                // No hardware info: include all fixed targets as safe
+                foreach (var (display, tokens) in fixedTargets)
+                {
+                    options.Add(new YarnContextOption
+                    {
+                        Display = display,
+                        ContextTokens = tokens,
+                        RiskLevel = YarnContextRiskLevel.Safe
+                    });
+                }
+            }
+        }
+        catch
+        {
+            // On error, include all fixed targets as safe
+            foreach (var (display, tokens) in fixedTargets)
+            {
+                options.Add(new YarnContextOption
+                {
+                    Display = display,
+                    ContextTokens = tokens,
+                    RiskLevel = YarnContextRiskLevel.Safe
+                });
+            }
+        }
+
+        return new ObservableCollection<YarnContextOption>(options);
     }
 
     /// <summary>
@@ -4989,11 +5099,18 @@ public partial class MainViewModel : ViewModelBase
         // Defensive: ensure the list is never empty (always offer at least "Auto").
         if (options.Count == 0)
         {
-            options.Add("Auto");
+            options.Add(new YarnContextOption
+            {
+                Display = "Auto",
+                ContextTokens = 0,
+                RiskLevel = YarnContextRiskLevel.Safe
+            });
         }
         LocalYarnMaxContextWizardOptions = options;
         // If the current selection is no longer offered, fall back to Auto.
-        if (!LocalYarnMaxContextWizardOptions.Contains(LocalVariantYarnMaxContext, StringComparer.OrdinalIgnoreCase))
+        var currentSelection = LocalVariantYarnMaxContext;
+        if (!LocalYarnMaxContextWizardOptions.Any(o => 
+                string.Equals(o.Display, currentSelection, StringComparison.OrdinalIgnoreCase)))
         {
             LocalVariantYarnMaxContext = "Auto";
         }
@@ -18784,7 +18901,11 @@ public partial class MainViewModel : ViewModelBase
             LocalKvCacheWizardOptions.Add("Auto");
             foreach (var type in fitting)
             {
-                LocalKvCacheWizardOptions.Add(type);
+                // Prevent duplicates
+                if (!LocalKvCacheWizardOptions.Contains(type, StringComparer.OrdinalIgnoreCase))
+                {
+                    LocalKvCacheWizardOptions.Add(type);
+                }
             }
 
             // If the current selection is no longer in the list, fall back to Auto.
