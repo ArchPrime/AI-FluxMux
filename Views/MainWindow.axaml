@@ -2317,6 +2317,8 @@
 
                                 <!-- ============ AI-FluxMux ============ -->
                                 <TextBlock FontWeight="SemiBold" Text="AI-FluxMux" />
+                                <TextBlock TextWrapping="Wrap" Opacity="0.88"
+                                           Text="Click &quot;Check for updates&quot; to look for a newer AI-FluxMux on GitHub. Clicking &quot;Update now&quot; starts the automatic update — AI-FluxMux closes, the updater backs up and replaces the files, then prompts you to restart. Set an update source only if you have a preferred alternate source of updates." />
                                 <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
                                     <TextBlock VerticalAlignment="Center" Text="Alternative source" />
                                     <TextBox Grid.Column="1"
@@ -2330,19 +2332,21 @@
                                             Command="{Binding CheckForFluxMuxUpdatesCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks for a newer AI-FluxMux (the alternative source if set, otherwise the default GitHub releases) and reports the result. Does not install anything — use 'Update now' to install." />
+                                                       Text="Looks for a newer AI-FluxMux on GitHub (or the alternative source if set) and reports the result. Does not install anything." />
                                         </ToolTip.Tip>
                                     </Button>
                                     <Button Content="Update now"
                                             Command="{Binding UpdateFluxMuxNowCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks for a newer AI-FluxMux. If one is available, closes AI-FluxMux and runs the standalone updater to back up and replace the install, then restarts. Reports 'up to date' when nothing is newer." />
+                                                       Text="If a newer AI-FluxMux is available, closes AI-FluxMux and runs the standalone updater to back up and replace the install, then prompts you to restart." />
                                         </ToolTip.Tip>
                                     </Button>
                                 </StackPanel>
                                 <!-- ============ llama-server ============ -->
                                 <TextBlock FontWeight="SemiBold" Text="llama-server" />
+                                <TextBlock TextWrapping="Wrap" Opacity="0.88"
+                                           Text="Click &quot;Check for updates&quot; to look for a newer llama-server on the llama.cpp nightlies. Clicking &quot;Update now&quot; starts the automatic update — AI-FluxMux closes, the updater backs up and replaces the llama-server folder, then prompts you to restart. Set an update source only if you have a preferred alternate source of updates. If you have recently changed GPU hardware, you may need to manually uninstall and reinstall with the correct version optimised for your hardware — future updates should then work." />
                                 <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
                                     <TextBlock VerticalAlignment="Center" Text="Alternative source" />
                                     <TextBox Grid.Column="1"
@@ -2356,25 +2360,27 @@
                                             Command="{Binding CheckForLlamaServerUpdatesCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks for a newer llama-server zip matching this install's family (the alternative source if set, otherwise the default llama.cpp nightlies) and reports the result. Does not install anything — use 'Update now' to install." />
+                                                       Text="Looks for a newer llama-server zip matching this install's family (or the alternative source if set) and reports the result. Does not install anything." />
                                         </ToolTip.Tip>
                                     </Button>
                                     <Button Content="Update now"
                                             Command="{Binding UpdateLlamaServerNowViaUpdaterCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks for a newer llama-server. If one is available, closes AI-FluxMux and runs the standalone updater to back up and replace your llama-server folder, then restarts. Reports 'up to date' when nothing is newer." />
+                                                       Text="If a newer llama-server is available, closes AI-FluxMux and runs the standalone updater to back up and replace your llama-server folder, then prompts you to restart." />
                                         </ToolTip.Tip>
                                     </Button>
                                 </StackPanel>
                                 <!-- ============ DeepSeek Harness ============ -->
                                 <TextBlock FontWeight="SemiBold" Text="DeepSeek Harness" />
+                                <TextBlock TextWrapping="Wrap" Opacity="0.88"
+                                           Text="Click &quot;Check for updates&quot; to look for a newer DeepSeek Harness on npm. Clicking &quot;Update now&quot; starts the automatic update — AI-FluxMux closes, the updater backs up your config and updates dsh via npm, then prompts you to restart. Set an update source only if you have a preferred alternate source of updates." />
                                 <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
                                     <TextBlock VerticalAlignment="Center" Text="Alternative source" />
                                     <TextBox Grid.Column="1"
                                              Text="{Binding HarnessUpdateSource}"
                                              PlaceholderText="https://… (optional custom release source)"
-                                             ToolTip.Tip="Optional. A custom source for DeepSeek Harness updates. Leave blank to use the default GitHub releases." />
+                                             ToolTip.Tip="Optional. A custom source for DeepSeek Harness updates. Leave blank to use the default npm registry." />
                                 </Grid>
                                 <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding HarnessUpdateStatusText}" />
                                 <StackPanel Orientation="Horizontal" Spacing="8">
@@ -2382,14 +2388,14 @@
                                             Command="{Binding CheckForHarnessUpdatesCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks for a newer DeepSeek Harness (the alternative source if set, otherwise the default npm registry) and reports the result. Does not install anything — use 'Update now' to install." />
+                                                       Text="Looks for a newer DeepSeek Harness on npm (or the alternative source if set) and reports the result. Does not install anything." />
                                         </ToolTip.Tip>
                                     </Button>
                                     <Button Content="Update now"
                                             Command="{Binding UpdateHarnessNowCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks for a newer DeepSeek Harness. If one is available and Node.js is present, closes AI-FluxMux and runs the standalone updater to back up your config and update dsh via npm, then restarts. Reports 'up to date' when nothing is newer." />
+                                                       Text="If a newer DeepSeek Harness is available and Node.js is present, closes AI-FluxMux and runs the standalone updater to back up your config and update dsh via npm, then prompts you to restart." />
                                         </ToolTip.Tip>
                                     </Button>
                                 </StackPanel>
