@@ -18860,7 +18860,6 @@ public partial class MainViewModel : ViewModelBase
         double reserve = Math.Max(16.0, totalRam * 0.25);
         double availableRam = Math.Max(0.0, totalRam - reserve);
         double availableGpu = Math.Max(0.0, gpuGb - modelGb - 2.0); // 2 GB for CUDA overhead
-        double totalAvailable = availableGpu + availableRam;
 
         // Build the options list: only include types that physically fit AND are usable speed-wise.
         // A KV cache that's mostly in system RAM gives minutes-per-token, which is not a setting
@@ -18870,18 +18869,23 @@ public partial class MainViewModel : ViewModelBase
         foreach (var type in allTypes)
         {
             double typeGb = LocalPrioritySettingsCalculator.EstimateKvCacheGb(effectiveContext, type);
-            if (typeGb > totalAvailable)
-            {
-                continue; // won't fit at all
-            }
 
-            // Speed check: if more than 50% of the KV cache lives in system RAM,
+            // Speed check first: if more than 50% of the KV cache lives in system RAM,
             // token generation will be dominated by PCIe transfers. Exclude it.
             double gpuPortion = Math.Min(typeGb, availableGpu);
             double ramPortion = typeGb - gpuPortion;
             if (typeGb > 0 && ramPortion / typeGb > 0.5)
             {
                 continue; // mostly in RAM — unusably slow
+            }
+
+            // Fit check: the VRAM-resident portion lives in VRAM (already accounted for in
+            // availableGpu, which subtracts the model). Only the overflow (ramPortion) needs to
+            // fit in system RAM. Comparing the whole KV cache to the combined VRAM+RAM pool
+            // double-counts the VRAM portion and wrongly excludes types that would run fine.
+            if (ramPortion > availableRam)
+            {
+                continue; // overflow won't fit in system RAM
             }
 
             fitting.Add(type);
@@ -18930,7 +18934,12 @@ public partial class MainViewModel : ViewModelBase
         double gpuFits = Math.Max(0.0, availableGpu);
         double ramSpill = Math.Max(0.0, contextGb - gpuFits);
         bool fitsOnGpu = contextGb <= gpuFits;
-        bool fitsInSystem = contextGb <= totalAvailable;
+        // The VRAM-resident portion of the KV cache lives in VRAM (already accounted for in
+        // availableGpu, which subtracts the model). Only the overflow (ramSpill) needs to fit in
+        // system RAM. So "will it run" is decided by whether the overflow fits in available RAM —
+        // NOT whether the whole KV cache fits in the combined VRAM+RAM pool (that double-counts
+        // the VRAM portion and wrongly reports large-but-fine setups as "will not run").
+        bool fitsInSystem = ramSpill <= availableRam;
 
         string fitLine;
         string perfLine;
@@ -18967,7 +18976,7 @@ public partial class MainViewModel : ViewModelBase
         }
         else
         {
-            fitLine = $"Needs ~{contextGb:F0} GB total, but your system has ~{totalAvailable:F0} GB available.";
+            fitLine = $"The overflow needs ~{ramSpill:F0} GB of system RAM, but only ~{availableRam:F0} GB is available.";
             perfLine = "Will not run. Pick a lower context target or a smaller model.";
             fidelityLine = string.Empty;
         }
