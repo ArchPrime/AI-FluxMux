@@ -453,6 +453,12 @@
                                                                                Foreground="#C2410C"
                                                                                IsVisible="{Binding ShowLocalVariantVramWarning}"
                                                                                Text="{Binding LocalVariantVramWarningText}" />
+                                                                    <TextBlock Margin="0,6,0,0"
+                                                                               FontSize="11"
+                                                                               TextWrapping="Wrap"
+                                                                               Foreground="#B91C1C"
+                                                                               IsVisible="{Binding ShowLocalVariantRamOverflowWarning}"
+                                                                               Text="{Binding LocalVariantRamOverflowWarningText}" />
                                                                 </StackPanel>
                                                                 <StackPanel Grid.Column="1" Spacing="8" IsEnabled="{Binding IsLocalVariantEditable}">
                                                                     <TextBlock FontSize="14" FontWeight="SemiBold" Text="Detailed settings" />

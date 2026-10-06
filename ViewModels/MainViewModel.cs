@@ -1981,6 +1981,12 @@ public partial class MainViewModel : ViewModelBase
     public bool ShowLocalVariantVramWarning => !string.IsNullOrWhiteSpace(LocalVariantVramWarningText);
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowLocalVariantRamOverflowWarning))]
+    public partial string LocalVariantRamOverflowWarningText { get; set; } = string.Empty;
+
+    public bool ShowLocalVariantRamOverflowWarning => !string.IsNullOrWhiteSpace(LocalVariantRamOverflowWarningText);
+
+    [ObservableProperty]
     public partial string LocalVariantSelectorPrefix { get; set; } = "Local model";
 
     [ObservableProperty]
@@ -16030,6 +16036,17 @@ public partial class MainViewModel : ViewModelBase
         }
 
         LocalVariantVramWarningText = vramPressure.ShowWarning ? vramPressure.Message : string.Empty;
+
+        // RAM overflow risk: warn if the model + KV cache footprint is likely to overflow into
+        // system RAM and trigger Windows paging (which can cause "device failure" messages,
+        // massive slowdowns, and reboots). This works regardless of whether YaRN is on or off.
+        var ramOverflow = LocalRamOverflowAdvisor.Assess(
+            estimatedGiB,
+            advice.TotalRamGb,
+            LocalVariantGpuOffloadMode,
+            (int)configuredContextTokens);
+        LocalVariantRamOverflowWarningText = ramOverflow.ShowWarning ? ramOverflow.Message : string.Empty;
+
         RefreshImagesHeadroomNote();
         LocalVariantPerformanceEstimateText = $"Relative throughput  {throughputIndex * 100:F0}%  |  startup pressure {startupPressure}  |  flash attention {LocalVariantFlashAttention}{liveVramSuffix}{FormatValidateSpeedSuffix()}";
     }

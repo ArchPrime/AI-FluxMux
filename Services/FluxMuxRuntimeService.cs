@@ -3005,6 +3005,40 @@ public sealed class FluxMuxRuntimeService
 				settings["LastVramWarningUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
 			});
 		}
+
+		// RAM overflow risk: warn if the model + KV cache footprint is likely to overflow into
+		// system RAM and trigger Windows paging (which can cause "device failure" messages,
+		// massive slowdowns, and reboots). This works regardless of whether YaRN is on or off.
+		try
+		{
+			var ramAdvice = GetLocalHardwareLaunchAdvice(
+				selectedLocalModel,
+				modelDirectory,
+				vision.Enabled,
+				vision.ProjectorPath,
+				vision.MaxImageEdge);
+			double totalRamGiB = ramAdvice.TotalRamGb;
+			string effectiveOffloadForRam = effectiveOffload.Equals("Auto", StringComparison.OrdinalIgnoreCase)
+				? configuredOffload
+				: effectiveOffload;
+			var ramOverflowWarning = LocalRamOverflowAdvisor.Assess(
+				launchVramEstimateGiB,
+				totalRamGiB,
+				effectiveOffloadForRam,
+				_managedLocalContext);
+			if (ramOverflowWarning.ShowWarning)
+			{
+				TryUpdateLocalProfileSettings(selectedLocalModel, selectedVariant, settings =>
+				{
+					settings["LastRamOverflowWarning"] = ramOverflowWarning.Message;
+					settings["LastRamOverflowWarningUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+				});
+			}
+		}
+		catch
+		{
+			// RAM overflow warning is best-effort; never block the launch on it.
+		}
 		bool vramBusyBeforeStart = LocalGpuVramSample.TryRead(out double busyUsedGiB, out double busyTotalGiB, out _)
 			&& LocalLaunchStartupRetry.VramLooksBusy(busyUsedGiB, busyTotalGiB);
 		if (stoppedPrevious || vramBusyBeforeStart)
