@@ -371,12 +371,6 @@
                                                                                             Width="130"
                                                                                             ToolTip.Tip="How far to stretch the context when Extend into RAM is on. Auto picks the largest size your computer memory can hold. The other options are fixed targets that your memory can actually hold. Bigger keeps more of the chat but uses more memory and runs slower." />
                                                                               </StackPanel>
-                                                                              <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding LocalVariantExtendContextIntoRam}">
-                                                                                  <CheckBox IsChecked="{Binding LocalVariantUseYarn}"
-                                                                                            VerticalAlignment="Center"
-                                                                                            Content="Use YaRN"
-                                                                                            ToolTip.Tip="YaRN is the rope-scaling technique that lets the model reach further back than it was trained for. On: long contexts work well. Off: the overflow still spills to RAM but relies on the model's native positional encoding, so understanding on very long chats can drop. Leave on unless you are tuning on purpose." />
-                                                                              </StackPanel>
                                                                               <StackPanel Spacing="4" IsVisible="{Binding ShowLocalKvCacheWizardChoice}">
                                                                                   <TextBlock FontSize="11" FontWeight="SemiBold" Text="KV cache for the extended context" />
                                                                                   <ComboBox ItemsSource="{Binding LocalKvCacheWizardOptions}" SelectedItem="{Binding LocalKvCacheWizardChoice}" ToolTip.Tip="Precision for the extra context that spills into ordinary memory. Auto picks the best type your hardware can keep fast. Lower precision (q4/q5) fits more context but the model may lose track of details in very long chats." />
