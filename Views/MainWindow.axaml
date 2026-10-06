@@ -2382,7 +2382,7 @@
                                             Command="{Binding CheckForHarnessUpdatesCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks for a newer DeepSeek Harness (the alternative source if set, otherwise the default GitHub releases) and reports the result. Does not install anything — use 'Update now' to install." />
+                                                       Text="Checks for a newer DeepSeek Harness (the alternative source if set, otherwise the default npm registry) and reports the result. Does not install anything — use 'Update now' to install." />
                                         </ToolTip.Tip>
                                     </Button>
                                     <Button Content="Update now"
