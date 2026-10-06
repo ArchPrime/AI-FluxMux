@@ -1326,7 +1326,7 @@
                                                             ToolTip.Tip="Official DeepSeek Harness documentation." />
                                                     <Button Content="Open Harness releases"
                                                             Command="{Binding OpenHarnessReleasesCommand}"
-                                                            ToolTip.Tip="GitHub releases for DeepSeek Harness. AI-FluxMux does not install or upgrade dsh." />
+                                                            ToolTip.Tip="GitHub releases for DeepSeek Harness. To install or update dsh, use 'Update now' in the AI-FluxMux updates panel — it backs up your config and updates dsh via npm." />
                                                 </StackPanel>
                                                 <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="8">
                                                     <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Harness web UI port" />
@@ -2380,7 +2380,7 @@
                                             Command="{Binding CheckForHarnessUpdatesCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Checks this PC's DeepSeek Harness version against the latest (the alternative source if set, otherwise the default GitHub releases) and reports the result. Does not install anything — use 'Update now' to install." />
+                                                       Text="Checks for a newer DeepSeek Harness (the alternative source if set, otherwise the default GitHub releases) and reports the result. Does not install anything — use 'Update now' to install." />
                                         </ToolTip.Tip>
                                     </Button>
                                     <Button Content="Update now"
