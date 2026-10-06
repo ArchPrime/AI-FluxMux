@@ -337,6 +337,12 @@
                                                                     </Grid>
                                                                     <StackPanel Spacing="4">
                                                                         <StackPanel Orientation="Horizontal" Spacing="8">
+                                                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                <CheckBox IsChecked="{Binding LocalVariantExtendContextIntoRam}"
+                                                                                          VerticalAlignment="Center"
+                                                                                          Content="Extend context into RAM (YaRN)"
+                                                                                          ToolTip.Tip="Let the model keep more chat in mind than the graphics card can hold, by borrowing ordinary computer memory. The part that fits in graphics memory stays fast; the overflow is slower. AutoTune sizes the overflow from your free memory. Leave off for the fastest, shortest-context setup." />
+                                                                            </StackPanel>
                                                                             <Button VerticalAlignment="Center"
                                                                                     Content="AutoTune"
                                                                                     views:MarkedText.Tip="Fills leftover graphics-card and context room from your priority list. Leaves Images, max tokens, temperature, reasoning, and chat format you already set. Images on reserves graphics memory from Max image edge, so Context advice is smaller. **Save profile** to keep the launch settings, or **Revert changes** to discard. Tick the experimental box to also time a tiny test reply; that path stores settings so the model can reload."
@@ -355,15 +361,6 @@
                                                                          </StackPanel>
                                                                          <TextBlock FontSize="11" TextWrapping="Wrap" views:MarkedText.Source="{Binding LocalQuickAutoTuneInfoText}" />
                                                                           <StackPanel Spacing="4" Margin="0,4,0,0">
-                                                                              <TextBlock Text="Extend context (YaRN):"
-                                                                                         FontSize="11"
-                                                                                         FontWeight="SemiBold" />
-                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
-                                                                                  <CheckBox IsChecked="{Binding LocalVariantExtendContextIntoRam}"
-                                                                                            VerticalAlignment="Center"
-                                                                                            Content="Extend into RAM"
-                                                                                            ToolTip.Tip="Let the model keep more chat in mind than the graphics card can hold, by borrowing ordinary computer memory. The part that fits in graphics memory stays fast; the overflow is slower. AutoTune sizes the overflow from your free memory. Leave off for the fastest, shortest-context setup." />
-                                                                              </StackPanel>
                                                                               <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding LocalVariantExtendContextIntoRam}">
                                                                                   <TextBlock Text="How far:"
                                                                                              FontSize="11"
