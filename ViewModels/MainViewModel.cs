@@ -4963,34 +4963,9 @@ public partial class MainViewModel : ViewModelBase
     /// </summary>
     private ObservableCollection<string> BuildYarnMaxContextWizardOptions()
     {
-        var options = new List<string> { "Auto" };
-        try
-        {
-            var advice = CurrentLocalHardwareAdvice();
-            if (advice.ModelMaxCtx > 0)
-            {
-                int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
-                foreach (var (label, tokens) in new[] { ("512K", 512 * 1024), ("768K", 768 * 1024), ("1M", 1024 * 1024) })
-                {
-                    if (tokens <= ramBounded)
-                    {
-                        options.Add(label);
-                    }
-                }
-            }
-        }
-        catch
-        {
-            // No hardware advice yet (e.g. no profile selected): fall back to the full fixed list.
-            options.Clear();
-            options.AddRange(LocalYarnMaxContextOptions);
-        }
-
-        // Defensive: never return an empty list (always offer at least "Auto").
-        if (options.Count == 0)
-        {
-            options.Add("Auto");
-        }
+        // Always offer "Auto" plus all fixed targets. The RAM calculation is a heuristic,
+        // not a hard limit — the user can choose any target and see if it works.
+        var options = new List<string> { "Auto", "512K", "768K", "1M" };
         return new ObservableCollection<string>(options);
     }
 

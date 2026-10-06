@@ -298,8 +298,9 @@ public static class LocalPrioritySettingsCalculator
             return nativeCeiling * 2;
         }
 
-        // Conservative reserve: 16 GB for the OS + other processes (or 25% of total, whichever is larger).
-        double reserveGb = Math.Max(16.0, totalRamGb * 0.25);
+        // Conservative reserve: 8 GB for the OS + other processes (or 25% of total, whichever is smaller).
+        // This leaves more room for the KV cache overflow when extending context into RAM.
+        double reserveGb = Math.Min(8.0, totalRamGb * 0.25);
         double availableGb = Math.Max(0.0, totalRamGb - reserveGb);
 
         // Use the effective KV bytes per token if provided (from the profile's actual KV type,
