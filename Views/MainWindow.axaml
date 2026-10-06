@@ -2328,13 +2328,13 @@
                                             Command="{Binding CheckForUpdatesCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Reads the feed URL if one is set (Help.html and the AI-FluxMux download link). Also checks llama.cpp nightlies for a newer zip of the same Windows CUDA / Vulkan / CPU family as the llama-server folder already in use, and reads this PC's DeepSeek Harness version against npm latest / next. Confirm the llama-server folder is still the correct install to update — hardware may have changed. AI-FluxMux never extracts over the current folder and does not install or upgrade DeepSeek Harness." />
+                                                       Text="Checks all three for something newer without changing anything: AI-FluxMux (GitHub releases, or the feed URL if one is set — also refreshes Help.html), llama.cpp nightlies for a newer zip of the same Windows CUDA / Vulkan / CPU family as the llama-server folder in use, and this PC's DeepSeek Harness version against the latest. Use the 'Update … now' buttons to actually install a newer version. Confirm the llama-server folder still matches this GPU before updating — hardware may have changed." />
                                         </ToolTip.Tip>
                                     </Button>
                                     <Button Content="Open download page"
                                             Command="{Binding OpenUpdateDownloadCommand}"
                                             IsVisible="{Binding UpdateDownloadAvailable}"
-                                            ToolTip.Tip="Opens the download address from the feed. AI-FluxMux does not replace its own program file." />
+                                            ToolTip.Tip="Opens the download address found by 'Check for updates' so you can grab the installer manually. This does not install anything — use 'Update AI-FluxMux now' to let the standalone updater back up and replace the install automatically." />
                                     <Button Content="Update AI-FluxMux now"
                                             Command="{Binding UpdateFluxMuxNowCommand}"
                                             ToolTip.Tip="Checks for a newer AI-FluxMux (GitHub releases, or the feed URL if one is set). If one is available, closes AI-FluxMux and runs the standalone updater to back up and replace the install, then restarts. Reports 'up to date' when nothing is newer." />
@@ -2387,7 +2387,7 @@
                                         Command="{Binding OpenHarnessReleasesCommand}">
                                     <ToolTip.Tip>
                                         <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                   Text="Opens GitHub releases for DeepSeek Harness. AI-FluxMux does not install or upgrade dsh. Back up %USERPROFILE%\.dsh first if you update; preview builds can change on-disk settings." />
+                                                   Text="Opens GitHub releases for DeepSeek Harness so you can see the changelog or grab a build manually. This does not install anything — use 'Update Harness now' to let the standalone updater back up your config and update dsh via npm automatically." />
                                     </ToolTip.Tip>
                                 </Button>
                                 <Button HorizontalAlignment="Left"
