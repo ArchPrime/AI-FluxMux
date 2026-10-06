@@ -18916,9 +18916,12 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var choice = LocalKvCacheWizardChoice;
+        string autoNote = string.Empty;
         if (string.IsNullOrWhiteSpace(choice) || choice.Equals("Auto", StringComparison.OrdinalIgnoreCase))
         {
             choice = fitting.Count > 0 ? fitting[0] : "q4_1";
+            // Show which type Auto would pick
+            autoNote = $"Auto picks {choice}. ";
         }
 
         double kvGb = LocalPrioritySettingsCalculator.EstimateKvCacheGb(effectiveContext, choice);
@@ -18986,7 +18989,7 @@ public partial class MainViewModel : ViewModelBase
             }
         }
 
-        LocalKvCacheWizardInfoText = fitLine + " " + perfLine + (fidelityLine.Length > 0 ? " " + fidelityLine : "") + warning + usefulCeilingWarning;
+        LocalKvCacheWizardInfoText = autoNote + fitLine + " " + perfLine + (fidelityLine.Length > 0 ? " " + fidelityLine : "") + warning + usefulCeilingWarning;
     }
 
     private JsonObject BuildLocalVariantSettingsObject()
