@@ -300,6 +300,15 @@ public sealed class FluxMuxRuntimeService
 
 	private Process? _localServerProcess;
 
+	// RAM-overflow watchdog: monitors the llama-server process's working set and auto-kills it
+	// if it exceeds a threshold for a sustained period. This is the "belt" in the belt-and-
+	// suspenders abort strategy (the "suspenders" is the Ctrl+Shift+K hotkey).
+	private Timer? _ramWatchdogTimer;
+	private DateTime _ramWatchdogExceededUtc = DateTime.MinValue;
+	private const int RamWatchdogIntervalMs = 5000;
+	private const double RamWatchdogThresholdPercent = 0.85;
+	private const int RamWatchdogSustainSeconds = 30;
+
 	private FluxMuxGatewayHost? _gatewayHost;
 
 	private PortForwardingRules _portForwardingRules = PortForwardingRules.Defaults;
@@ -2665,6 +2674,86 @@ public sealed class FluxMuxRuntimeService
 		}
 	}
 
+	/// <summary>
+	/// Starts the RAM-overflow watchdog: a background timer that monitors the llama-server
+	/// process's working set and auto-kills it if it exceeds 85% of total RAM for 30 seconds.
+	/// This is the "belt" in the belt-and-suspenders abort strategy.
+	/// </summary>
+	private void StartRamWatchdog()
+	{
+		StopRamWatchdog();
+		_ramWatchdogExceededUtc = DateTime.MinValue;
+		_ramWatchdogTimer = new Timer(OnRamWatchdogTick, null, RamWatchdogIntervalMs, RamWatchdogIntervalMs);
+	}
+
+	/// <summary>Stops the RAM-overflow watchdog.</summary>
+	private void StopRamWatchdog()
+	{
+		_ramWatchdogTimer?.Dispose();
+		_ramWatchdogTimer = null;
+		_ramWatchdogExceededUtc = DateTime.MinValue;
+	}
+
+	/// <summary>
+	/// Watchdog tick: checks the llama-server process's working set. If it exceeds 85% of total
+	/// RAM for 30 seconds, kills the process tree to prevent a system-wide RAM/SSD thrash.
+	/// </summary>
+	private void OnRamWatchdogTick(object? state)
+	{
+		try
+		{
+			var process = _localServerProcess;
+			if (process is null || process.HasExited)
+			{
+				return;
+			}
+
+			double totalRamBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+			if (totalRamBytes <= 0)
+			{
+				return;
+			}
+
+			double processRamBytes = process.WorkingSet64;
+			double thresholdBytes = totalRamBytes * RamWatchdogThresholdPercent;
+
+			if (processRamBytes > thresholdBytes)
+			{
+				var nowUtc = DateTime.UtcNow;
+				if (_ramWatchdogExceededUtc == DateTime.MinValue)
+				{
+					_ramWatchdogExceededUtc = nowUtc;
+				}
+				else if ((nowUtc - _ramWatchdogExceededUtc).TotalSeconds >= RamWatchdogSustainSeconds)
+				{
+					// Sustained RAM overflow: kill the process tree to prevent a system-wide thrash.
+					_ramWatchdogExceededUtc = DateTime.MinValue;
+					StopRamWatchdog();
+					try
+					{
+						process.Kill(entireProcessTree: true);
+						_localServerProcess = null;
+					}
+					catch
+					{
+						// Best-effort; the hotkey is the fallback.
+					}
+					IdleTimeoutNotice?.Invoke(
+						"RAM overflow watchdog: the local model was using more than 85% of system RAM for 30 seconds. "
+						+ "It was killed automatically to prevent a system-wide freeze. The next local chat will reload it.");
+				}
+			}
+			else
+			{
+				_ramWatchdogExceededUtc = DateTime.MinValue;
+			}
+		}
+		catch
+		{
+			// Watchdog is best-effort; never let it crash the app.
+		}
+	}
+
 	private async Task<RuntimeActionResult> StopLocalCoreAsync(bool preserveParkedForIdleWake = false)
 	{
 		if (!preserveParkedForIdleWake)
@@ -2752,6 +2841,7 @@ public sealed class FluxMuxRuntimeService
 			await WaitForProcessExitOrKillAsync(processToStop, TimeSpan.FromSeconds(4L));
 			int stoppedPort = ((_managedLocalPort > 0) ? _managedLocalPort : 0);
 			_localServerProcess = null;
+			StopRamWatchdog();
 			_managedLocalPort = -1;
 			_managedLocalModel = string.Empty;
 			_managedLocalVariant = string.Empty;
@@ -4403,6 +4493,7 @@ public sealed class FluxMuxRuntimeService
 			_managedLocalLaunchFingerprint = LocalLaunchFingerprint.From(profile);
 			_hasUnmanagedLocalEndpoint = false;
 			_unmanagedLocalEndpointPort = -1;
+			StartRamWatchdog();
 			WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "launching", "Managed llama-server process started on the daemon port.");
 			progressReporter?.Invoke("Loading model");
 			return null;

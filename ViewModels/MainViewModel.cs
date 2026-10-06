@@ -6991,6 +6991,33 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand]
     private async Task StopSelection2LocalAsync() => await StopLocalRouteAsync("Selection 2");
 
+    /// <summary>
+    /// Fast, no-confirmation kill of the local model process tree. Intended for the global
+    /// "abort" hotkey (Ctrl+Shift+K) and the RAM-overflow watchdog — it stops the llama-server
+    /// immediately so the user can recover from a RAM/SSD thrash without waiting for the UI.
+    /// </summary>
+    [RelayCommand]
+    private async Task KillLocalModelNowAsync()
+    {
+        if (!_runtimeService.IsManagedLocalAlive())
+        {
+            StatusMessage = "No local model is running.";
+            return;
+        }
+
+        StatusMessage = "Killing local model now (abort)...";
+        try
+        {
+            await _runtimeService.StopLocalAsync(preserveParkedForIdleWake: false);
+            LocalRouteIndicatorState = RouteIndicatorState.Off;
+            StatusMessage = "Local model killed (abort). The next local chat will reload it.";
+        }
+        catch
+        {
+            StatusMessage = "Failed to kill the local model. Try again, or use Task Manager to end the llama-server process.";
+        }
+    }
+
     private async Task StopLocalRouteAsync(string slotLabel)
     {
         CancelLocalRuntimeMonitors();

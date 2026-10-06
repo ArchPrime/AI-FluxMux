@@ -62,6 +62,7 @@ public partial class MainWindow : Window
         Closing += OnWindowClosing;
         AddHandler(PointerPressedEvent, OnUserInterfaceActivity, RoutingStrategies.Tunnel, handledEventsToo: true);
         AddHandler(KeyDownEvent, OnUserInterfaceActivity, RoutingStrategies.Tunnel, handledEventsToo: true);
+        AddHandler(KeyDownEvent, OnAbortHotkey, RoutingStrategies.Tunnel, handledEventsToo: true);
         var profileScroll = this.FindControl<ScrollViewer>("ModelProfilesScroll");
         profileScroll?.AddHandler(
             Control.RequestBringIntoViewEvent,
@@ -93,6 +94,33 @@ public partial class MainWindow : Window
         if (DataContext is MainViewModel vm)
         {
             vm.NoteUserInterfaceActivity();
+        }
+    }
+
+    /// <summary>
+    /// Global "abort" hotkey: Ctrl+Shift+K kills the local model process tree immediately.
+    /// This is the fast-escape for a RAM/SSD thrash — it works as long as the AI-FluxMux
+    /// window is focused and the process is alive, even if the UI is sluggish.
+    /// </summary>
+    private void OnAbortHotkey(object? sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.K)
+        {
+            return;
+        }
+
+        var modifiers = e.KeyModifiers;
+        if ((modifiers & KeyModifiers.Control) == 0
+            || (modifiers & KeyModifiers.Shift) == 0
+            || (modifiers & KeyModifiers.Alt) != 0)
+        {
+            return;
+        }
+
+        if (DataContext is MainViewModel vm)
+        {
+            e.Handled = true;
+            _ = vm.KillLocalModelNowCommand.ExecuteAsync(null);
         }
     }
 
