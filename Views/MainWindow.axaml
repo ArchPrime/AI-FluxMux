@@ -2372,11 +2372,10 @@
                                         </Button>
                                     <Button Content="Update llama-server now"
                                             Margin="0,0,8,6"
-                                            Command="{Binding UpdateLlamaServerNowCommand}"
-                                            IsVisible="{Binding LlamaServerUpdateAvailable}">
+                                            Command="{Binding UpdateLlamaServerNowViaUpdaterCommand}">
                                         <ToolTip.Tip>
                                             <TextBlock TextWrapping="Wrap" MaxWidth="420"
-                                                       Text="Downloads the matching llama-server zip (and the matching CUDA DLLs zip) and swaps it into the current llama-server folder in place. The current folder is kept as a backup. llama-server must be stopped first. Confirm the family still matches this GPU — hardware may have changed." />
+                                                       Text="Checks llama.cpp nightlies for a newer zip matching this install's family. If one is available, closes AI-FluxMux and runs the standalone updater to back up and replace your llama-server folder, then restarts. Reports 'up to date' when nothing is newer." />
                                         </ToolTip.Tip>
                                     </Button>
                                     </WrapPanel>
