@@ -50,7 +50,7 @@ public sealed class DeepSeekHarnessVersionTests
             "npx @deepseek-ai/dsh",
             "0.1.1-rc.2",
             "0.1.1-rc.2");
-        Assert.Contains("AI-FluxMux does not install or upgrade DeepSeek Harness", text);
+        Assert.Contains("AI-FluxMux can update DeepSeek Harness", text);
         Assert.Contains(".dsh", text);
     }
 }

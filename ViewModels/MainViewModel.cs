@@ -4726,7 +4726,7 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     public partial string HarnessUpdateStatusText { get; set; } =
-        "Check for updates can also read this PC's DeepSeek Harness version (dsh --version, or npx) and compare it to npm latest / next. AI-FluxMux does not install or upgrade DeepSeek Harness.";
+        "Check for updates can also read this PC's DeepSeek Harness version (dsh --version, or npx) and compare it to npm latest / next. AI-FluxMux can update DeepSeek Harness via the 'Update now' button (which runs the standalone updater to back up your config and update dsh via npm).";
 
     [ObservableProperty]
     public partial string HarnessInstalledVersionText { get; set; } =

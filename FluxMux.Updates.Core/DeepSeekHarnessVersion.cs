@@ -71,6 +71,6 @@ public static class DeepSeekHarnessVersion
 
         return installedLine
             + tags
-            + " AI-FluxMux does not install or upgrade DeepSeek Harness. Back up %USERPROFILE%\\.dsh first if you update; preview builds can change on-disk settings. Use the install guide or Open Harness releases, then update dsh yourself.";
+            + " AI-FluxMux can update DeepSeek Harness via the 'Update now' button (which runs the standalone updater to back up your config and update dsh via npm). If you prefer to update manually, back up %USERPROFILE%\\.dsh first; preview builds can change on-disk settings.";
     }
 }
