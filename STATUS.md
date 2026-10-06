@@ -4,9 +4,10 @@ Current version: **0.2.2 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs
 
 ## Git / deploy state (updated 7/10)
 
-- **Git is now current.** Two new commits on `main` (inner repo `FluxMux.Avalonia/.git`):
+- **Git is now current.** New commits on `main` (inner repo `FluxMux.Avalonia/.git`):
   - `593216e` — Checkpoint: pre-button-restore snapshot (locks in the updater feature + compaction + port rules + config resilience that were previously uncommitted).
   - `9d2e4c3` — Restored the in-app **"Update AI-FluxMux now"** and **"Update Harness now"** buttons in `Views/MainWindow.axaml` (wired to `UpdateFluxMuxNowCommand` + `UpdateHarnessNowCommand`).
+  - `7a54d0a` — Made all three "Update … now" buttons behave **identically**: the llama-server button now uses the standalone-updater path (`UpdateLlamaServerNowViaUpdaterCommand`) instead of the old in-place swap, and is always visible (no `IsVisible` gate). All three now: check for a newer version → report "up to date" if none → otherwise close AI-FluxMux, run the standalone updater (backup + replace), and restart.
 - **Buttons: compiled + verified, NOT yet deployed.** The two buttons are in source and the separate-output build compiles clean (0 errors) with the buttons present in the embedded XAML. The *running* app still shows the old UI (its `bin\Debug\net10.0\FluxMux.Avalonia.dll` predates the XAML edit). **Deploy (user action):** close the app → `build-fluxmux.bat clean` → restart.
 - **Regression root cause (7/10):** the `UpdateFluxMuxNow`/`UpdateHarnessNow` buttons had been built into the ViewModel + `FluxMux.Updates.Core` + the WinForms updater, but the matching `MainWindow.axaml` buttons were never committed — the XAML had reverted to a pre-button version while the compiled DLL kept them, so the buttons appeared to "vanish" on the next build. Restored now.
 
