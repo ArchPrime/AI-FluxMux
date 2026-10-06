@@ -2335,6 +2335,9 @@
                                             Command="{Binding OpenUpdateDownloadCommand}"
                                             IsVisible="{Binding UpdateDownloadAvailable}"
                                             ToolTip.Tip="Opens the download address from the feed. AI-FluxMux does not replace its own program file." />
+                                    <Button Content="Update AI-FluxMux now"
+                                            Command="{Binding UpdateFluxMuxNowCommand}"
+                                            ToolTip.Tip="Checks for a newer AI-FluxMux (GitHub releases, or the feed URL if one is set). If one is available, closes AI-FluxMux and runs the standalone updater to back up and replace the install, then restarts. Reports 'up to date' when nothing is newer." />
                                 </StackPanel>
                                 <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding UpdateCheckStatusText}" />
                                 <TextBlock FontWeight="SemiBold" Text="llama-server" />
@@ -2388,6 +2391,10 @@
                                                    Text="Opens GitHub releases for DeepSeek Harness. AI-FluxMux does not install or upgrade dsh. Back up %USERPROFILE%\.dsh first if you update; preview builds can change on-disk settings." />
                                     </ToolTip.Tip>
                                 </Button>
+                                <Button HorizontalAlignment="Left"
+                                        Content="Update Harness now"
+                                        Command="{Binding UpdateHarnessNowCommand}"
+                                        ToolTip.Tip="Checks this PC's DeepSeek Harness version against the latest. If a newer one exists and Node.js is available, closes AI-FluxMux and runs the standalone updater to back up your config and update dsh via npm, then restarts. Reports 'up to date' when nothing is newer." />
                             </StackPanel>
                         </GroupBox>
 
