@@ -4715,18 +4715,18 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     public partial string UpdateCheckStatusText { get; set; } =
-        "Click \"Check for update\" to look for a newer AI-FluxMux on GitHub. Clicking \"Update now\" starts the automatic update — AI-FluxMux closes, the updater backs up and replaces the files, then prompts you to restart. Set an update source only if you host updates elsewhere.";
+        string.Empty;
 
     [ObservableProperty]
     public partial bool UpdateDownloadAvailable { get; set; }
 
     [ObservableProperty]
     public partial string LlamaServerUpdateStatusText { get; set; } =
-        "Check for updates also looks at the llama-server folder already in use, and only offers a newer zip of that same Windows CUDA / Vulkan / CPU family. Confirm that folder is still the right install for this PC before you update — hardware may have changed.";
+        string.Empty;
 
     [ObservableProperty]
     public partial string HarnessUpdateStatusText { get; set; } =
-        "Check for updates can also read this PC's DeepSeek Harness version (dsh --version, or npx) and compare it to npm latest / next. AI-FluxMux can update DeepSeek Harness via the 'Update now' button (which runs the standalone updater to back up your config and update dsh via npm).";
+        string.Empty;
 
     [ObservableProperty]
     public partial string HarnessInstalledVersionText { get; set; } =
