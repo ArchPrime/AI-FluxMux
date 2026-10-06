@@ -8,7 +8,7 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace FluxMux.Avalonia.Services;
+namespace FluxMux.Updates.Core;
 
 /// <summary>
 /// Outcome of an in-place llama-server update attempt.
@@ -92,7 +92,9 @@ public static class LlamaServerUpdateService
         string? cudartZipUrl,
         Action<string>? reportProgress = null,
         CancellationToken cancellationToken = default,
-        IReadOnlyList<int>? runningPids = null)
+        IReadOnlyList<int>? runningPids = null,
+        string? backupIntoFolder = null,
+        Action<long, long>? reportBytes = null)
     {
         void Report(string message) => reportProgress?.Invoke(message);
 
@@ -121,14 +123,36 @@ public static class LlamaServerUpdateService
         }
 
         var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-        var backup = installDir + ".bak-" + stamp;
+        string backup;
+        if (!string.IsNullOrWhiteSpace(backupIntoFolder))
+        {
+            // Dedicated backup folder: wipe whatever was there and store the current
+            // install under a timestamped subfolder, so there is always one known place
+            // to restore from.
+            backup = Path.Combine(backupIntoFolder, "llama-server-" + stamp);
+            Directory.CreateDirectory(backupIntoFolder);
+            foreach (var existing in Directory.GetDirectories(backupIntoFolder))
+            {
+                try
+                {
+                    Directory.Delete(existing, recursive: true);
+                }
+                catch
+                {
+                }
+            }
+        }
+        else
+        {
+            backup = installDir + ".bak-" + stamp;
+        }
         var work = Path.Combine(Path.GetTempPath(), "llama-update-" + stamp);
         Directory.CreateDirectory(work);
 
         try
         {
             Report("Downloading the matching llama-server zip...");
-            var serverZip = await DownloadAsync(http, serverZipUrl, Path.GetFileName(new Uri(serverZipUrl).AbsolutePath), work, cancellationToken);
+            var serverZip = await DownloadAsync(http, serverZipUrl, Path.GetFileName(new Uri(serverZipUrl).AbsolutePath), work, cancellationToken, reportBytes);
 
             Report("Extracting the new llama-server...");
             var extract = Path.Combine(work, "extract");
@@ -145,7 +169,7 @@ public static class LlamaServerUpdateService
             if (!string.IsNullOrWhiteSpace(cudartZipUrl))
             {
                 Report("Downloading the matching CUDA DLLs zip...");
-                var cudartZip = await DownloadAsync(http, cudartZipUrl, Path.GetFileName(new Uri(cudartZipUrl).AbsolutePath), work, cancellationToken);
+                var cudartZip = await DownloadAsync(http, cudartZipUrl, Path.GetFileName(new Uri(cudartZipUrl).AbsolutePath), work, cancellationToken, reportBytes);
                 Report("Extracting the CUDA DLLs...");
                 var rtExtract = Path.Combine(work, "cudart");
                 Directory.CreateDirectory(rtExtract);
@@ -219,16 +243,27 @@ public static class LlamaServerUpdateService
         string url,
         string fileName,
         string workDir,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<long, long>? reportBytes = null)
     {
         var target = Path.Combine(workDir, SanitizeFileName(fileName));
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
         using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
+        var total = response.Content.Headers.ContentLength ?? -1;
         await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
         await using var destination = File.Create(target);
-        await source.CopyToAsync(destination, cancellationToken);
+        var buffer = new byte[81920];
+        var read = 0L;
+        int n;
+        while ((n = await source.ReadAsync(buffer, cancellationToken)) > 0)
+        {
+            await destination.WriteAsync(buffer.AsMemory(0, n), cancellationToken);
+            read += n;
+            reportBytes?.Invoke(read, total);
+        }
+
         return target;
     }
 

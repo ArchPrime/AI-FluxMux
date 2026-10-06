@@ -1,10 +1,10 @@
+using FluxMux.Updates.Core;
 using System;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Threading.Tasks;
-using FluxMux.Avalonia.Services;
 using Xunit;
 
 namespace FluxMux.Avalonia.Tests;
@@ -104,6 +104,40 @@ public sealed class LlamaServerUpdateServiceTests : IDisposable
         Assert.True(File.Exists(Path.Combine(dir, "cudart64_13.dll")), "CUDA DLL should be merged in");
         Assert.True(File.Exists(Path.Combine(outcome.BackupPath!, "marker-old.txt")), "Old marker should be in the backup");
         Assert.False(File.Exists(Path.Combine(dir, "marker-old.txt")), "Old marker should not remain in the new install");
+    }
+
+    [Fact]
+    public async Task Update_backs_up_into_dedicated_folder_and_wipes_previous_backups()
+    {
+        var dir = MakeInstall("dedicated-backup");
+        File.WriteAllText(Path.Combine(dir, "marker-old.txt"), "old");
+
+        var backupRoot = Path.Combine(_root, "llama-server-backup");
+        Directory.CreateDirectory(backupRoot);
+        var staleBackup = Path.Combine(backupRoot, "llama-server-stale");
+        Directory.CreateDirectory(staleBackup);
+        File.WriteAllText(Path.Combine(staleBackup, "stale.txt"), "stale");
+
+        var serverZip = Path.Combine(_root, "server-dedicated.zip");
+        MakeLlamaZip(serverZip, nestedFolder: null, extraFile: "marker-new.txt");
+
+        using var server = new LocalHttpServer(serverZip);
+
+        var outcome = await LlamaServerUpdateService.UpdateAsync(
+            new HttpClient(),
+            dir,
+            server.Url,
+            null,
+            reportProgress: _ => { },
+            runningPids: [],
+            backupIntoFolder: backupRoot);
+
+        Assert.True(outcome.Succeeded, outcome.StatusText);
+        Assert.NotNull(outcome.BackupPath);
+        Assert.StartsWith(backupRoot, outcome.BackupPath!, StringComparison.Ordinal);
+        Assert.True(File.Exists(Path.Combine(outcome.BackupPath!, "marker-old.txt")), "Old marker should be in the dedicated backup");
+        Assert.True(File.Exists(Path.Combine(dir, "marker-new.txt")), "New marker should be installed");
+        Assert.False(Directory.Exists(staleBackup), "Previous backup contents should have been wiped");
     }
 
     [Fact]

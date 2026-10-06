@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>FluxMux.Updates.Core</RootNamespace>
+    <AssemblyName>FluxMux.Updates.Core</AssemblyName>
+    <Description>Shared, UI-free detection and update logic for AI-FluxMux, llama-server, and DeepSeek Harness. Used by both the AI-FluxMux app and the standalone FluxMux.Updates updater.</Description>
+  </PropertyGroup>
+</Project>

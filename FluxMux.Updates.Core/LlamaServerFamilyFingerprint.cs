@@ -4,7 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
 
-namespace FluxMux.Avalonia.Services;
+namespace FluxMux.Updates.Core;
 
 public sealed class LlamaServerFamily
 {

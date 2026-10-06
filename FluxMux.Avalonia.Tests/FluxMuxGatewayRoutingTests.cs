@@ -364,7 +364,11 @@ public sealed class FluxMuxGatewayRoutingTests
         {
             new JsonObject { ["max_tokens"] = 16384 }
         };
-        var filling = ChatPayloadWithToolHistory(new string('n', 270000));
+        // 500000 chars + tool history: 4-char est ~125000, +max(16384) >
+        // 131072. The standard estimate plus the reply budget genuinely
+        // overflows, so this packed tool-history turn routes to cloud and
+        // blocks local forward.
+        var filling = ChatPayloadWithToolHistory(new string('n', 500000));
         Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, filling));
         var fillingRoute = FluxMuxGatewayRouting.DecideRoute(state, filling);
         Assert.Equal(FluxMuxGatewayRouting.CloudConsent, fillingRoute.Kind);
@@ -380,13 +384,20 @@ public sealed class FluxMuxGatewayRoutingTests
     {
         var state = HarnessDualReadyState();
         state["local_context"] = 4096;
+        // 14000 chars: 2-char est = 7000 > 4096 (trips compact), 4-char est =
+        // 3500 < 4096 (fits). The 2-char estimate no longer blocks, so this
+        // half-full dense-tokenizer prompt stays local (compact will shorten
+        // history) rather than prompting for cloud.
         var payload = ChatPayload(new string('n', 14000));
 
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
         var route = FluxMuxGatewayRouting.DecideRoute(state, payload);
-        Assert.Equal(FluxMuxGatewayRouting.CloudConsent, route.Kind);
-        Assert.True(route.OfferReload);
-        Assert.Equal(FluxMuxGatewayRouting.FillingCloudConsentReason, route.ConsentReason);
-        Assert.True(FluxMuxGatewayRouting.ConsentTimesOutToError(route.ConsentReason));
+        Assert.Equal(FluxMuxGatewayRouting.Local, route.Kind);
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload));
         var filling = FluxMuxGatewayRouting.FormatFillingBlockedMessage(state, payload);
         Assert.StartsWith(FluxMuxGatewayRouting.LocalFillingBlockedMessage, filling, System.StringComparison.Ordinal);
         Assert.Contains("too large for the current local model's Context", filling, System.StringComparison.Ordinal);
@@ -591,13 +602,19 @@ public sealed class FluxMuxGatewayRoutingTests
     {
         var state = HarnessDualReadyState();
         state["local_context"] = 4096;
+        // 14000 chars: 2-char est = 7000 > 4096 (trips compact), 4-char est =
+        // 3500 < 4096 (fits). The 2-char estimate no longer blocks, so a
+        // half-full dense-tokenizer prompt is not blocked even without an
+        // explicit stay-local choice.
         var payload = ChatPayload(new string('n', 14000));
 
-        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
-        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
             FluxMuxGatewayRouting.Local,
             state,
             payload));
+        // A consent timeout always blocks, independent of prompt size.
         Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
             FluxMuxGatewayRouting.ConsentTimeout,
             state,
@@ -643,7 +660,10 @@ public sealed class FluxMuxGatewayRoutingTests
         {
             new JsonObject { ["variant"] = "vision", ["max_tokens"] = 16384 }
         };
-        var payload = ChatPayload(new string('n', 428000));
+        // 500000 chars: 4-char est = 125000, +max(16384) = 141384 > 131072.
+        // The standard estimate plus the reply budget genuinely overflows the
+        // window, so this packed turn blocks (and routes to cloud when ready).
+        var payload = ChatPayload(new string('n', 500000));
 
         Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
         Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
@@ -656,17 +676,48 @@ public sealed class FluxMuxGatewayRoutingTests
     }
 
     [Fact]
+    public void Half_full_dense_tokenizer_prompt_with_32k_budget_is_not_blocking_but_does_compact()
+    {
+        // Reproduces the Qwen "max context" case: the Client app's Context bar
+        // reads ~half the loaded window, but the 2-chars/token "filling"
+        // estimate alone would exceed n_ctx. That estimate must not block the
+        // local turn (it would 400 with routing off), yet it must still trip
+        // the compact trigger so history is shortened before forwarding.
+        var state = HarnessDualReadyState();
+        state["local_context"] = 262144;
+        state["local_overlays"] = new JsonArray
+        {
+            new JsonObject { ["variant"] = "max context", ["max_tokens"] = 32768 }
+        };
+        // ~600k raw chars: 2-chars estimate = 300k > 262144, but 4-chars
+        // estimate = 150k, and 150k + 32768 = 182768 < 262144 (fits).
+        var payload = ChatPayload(new string('n', 600000));
+        payload["max_tokens"] = 32768;
+
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload));
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
+    }
+
+    [Fact]
     public void Hold_filling_turn_stays_classified_local_but_must_not_forward()
     {
         var state = HarnessDualReadyState();
         state["cloud_routing_capacity"] = "Hold";
         state["local_context"] = 4096;
+        // 14000 chars: 2-char est = 7000 > 4096 (trips compact), 4-char est =
+        // 3500 < 4096 (fits). The 2-char estimate no longer blocks, so this
+        // half-full dense-tokenizer prompt is not blocked.
         var payload = ChatPayload(new string('n', 14000));
 
         var route = FluxMuxGatewayRouting.DecideRoute(state, payload);
         Assert.Equal(FluxMuxGatewayRouting.Local, route.Kind);
         Assert.True(route.OfferReload);
-        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(route.Kind, state, payload));
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(route.Kind, state, payload));
     }
 
     [Fact]
@@ -813,11 +864,16 @@ public sealed class FluxMuxGatewayRoutingTests
         var state = DualReadyState(cloudReady: true, capacity: "Normal");
         state["mode"] = "route";
         state["local_context"] = 4096;
+        // 14000 chars: 2-char est = 7000 > 4096 (trips compact), 4-char est =
+        // 3500 < 4096 (fits). The 2-char estimate is a compact trigger, not a
+        // blocking condition, so a half-full dense-tokenizer prompt must not
+        // be routed to cloud on its own.
         var payload = ChatPayload(new string('n', 14000));
 
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
         var route = FluxMuxGatewayRouting.DecideRoute(state, payload);
-        Assert.Equal(FluxMuxGatewayRouting.CloudConsent, route.Kind);
-        Assert.Equal(FluxMuxGatewayRouting.FillingCloudConsentReason, route.ConsentReason);
+        Assert.Equal(FluxMuxGatewayRouting.Local, route.Kind);
     }
 
     [Fact]

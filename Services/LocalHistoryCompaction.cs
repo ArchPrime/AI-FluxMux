@@ -266,6 +266,18 @@ public static class LocalHistoryCompaction
             }
         }
 
+        // Industry best practice: preserve conclusions and decisions, not
+        // the reasoning process. The model doesn't need to re-derive WHY it
+        // chose JWT over sessions — it needs to know THAT it chose JWT and
+        // that sessions were ruled out. The reasoning is expendable; the
+        // decision is not.
+        var decisions = CollectAssistantDecisions(messages, keepStart);
+        if (decisions.Count > 0)
+        {
+            lines.Add("Key decisions:");
+            lines.AddRange(decisions);
+        }
+
         if (lines.Count <= 1)
         {
             return null;
@@ -273,6 +285,106 @@ public static class LocalHistoryCompaction
 
         var summaryText = string.Join("\n", lines);
         return summaryText.Length > 5000 ? summaryText[..5000] : summaryText;
+    }
+
+    /// <summary>
+    /// Extracts the assistant's conclusions and decisions from dropped turns.
+    /// Industry best practice: keep conclusions, drop thinking. The model
+    /// doesn't need the 20 pages of reasoning that got it to "use JWT" —
+    /// it needs to know that JWT was chosen and why sessions were ruled out.
+    /// </summary>
+    private static List<string> CollectAssistantDecisions(JsonArray messages, int keepStart)
+    {
+        var decisions = new List<string>();
+        for (var i = 0; i < keepStart && decisions.Count < 12; i++)
+        {
+            if (messages[i] is not JsonObject message)
+            {
+                continue;
+            }
+
+            if (RoleOf(message) != "assistant")
+            {
+                continue;
+            }
+
+            var raw = ExtractText(message["content"]);
+            var text = CollapseWhitespace(raw);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                continue;
+            }
+
+            // Skip tool-call-only messages (no actual text content)
+            if (text.Length < 20)
+            {
+                continue;
+            }
+
+            // Extract the first meaningful sentence or two — this is where
+            // the conclusion/decision lives. The rest is reasoning.
+            var extracted = ExtractDecision(text);
+            if (!string.IsNullOrWhiteSpace(extracted))
+            {
+                decisions.Add("- " + extracted);
+            }
+        }
+
+        return decisions;
+    }
+
+    /// <summary>
+    /// Extracts the decision/conclusion from an assistant message.
+    /// Looks for patterns like "I'll...", "I've...", "The...", "Decision:",
+    /// "Plan:", "Summary:", "In summary", "To summarize", "The key...".
+    /// Falls back to the first 200 chars if no pattern matches.
+    /// </summary>
+    private static string ExtractDecision(string text)
+    {
+        // Try to find explicit decision markers
+        var markers = new[]
+        {
+            "Decision:", "Plan:", "Summary:", "In summary", "To summarize",
+            "The key", "Key decision", "I'll", "I've", "I have",
+            "I decided", "I chose", "I went with", "I'm using",
+            "The approach", "The strategy", "The fix", "The solution",
+            "Here's what", "Here is what", "What I did", "What I changed",
+            "I updated", "I modified", "I added", "I removed", "I created",
+            "I refactored", "I implemented", "I fixed", "I resolved",
+            "The change", "The update", "The modification"
+        };
+
+        foreach (var marker in markers)
+        {
+            var idx = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (idx >= 0)
+            {
+                // Take from the marker to the next paragraph break or 250 chars
+                var start = idx;
+                var end = Math.Min(text.Length, start + 250);
+                // Try to find a natural break (period + space, or newline)
+                var periodIdx = text.IndexOf(". ", end - 50, StringComparison.Ordinal);
+                if (periodIdx > start && periodIdx < end)
+                {
+                    end = periodIdx + 1;
+                }
+                return text[start..end].Trim();
+            }
+        }
+
+        // No marker found — take the first 200 chars as a rough summary
+        if (text.Length > 200)
+        {
+            // Try to break at a sentence boundary
+            var periodIdx = text.IndexOf(". ", 100, StringComparison.Ordinal);
+            if (periodIdx > 0 && periodIdx < 250)
+            {
+                return text[..(periodIdx + 1)].Trim();
+            }
+            return text[..200].Trim() + "…";
+        }
+
+        return text.Trim();
     }
 
     private static List<string> CollectDroppedNotes(JsonArray messages, int keepStart)

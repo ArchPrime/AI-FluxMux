@@ -49,6 +49,17 @@ public sealed record PortForwardingRules
     public bool RepeatedCommandEnabled { get; init; } = true;
     public bool DiagnosticDumpEnabled { get; init; } = true;
 
+    /// <summary>Wizard-controlled auto-compaction. Independent of Port rules.</summary>
+    public bool AutoCompactEnabled { get; init; } = true;
+    /// <summary>Trigger as a fraction of the model's native context window (0.6-0.95).</summary>
+    public double AutoCompactTriggerPercent { get; init; } = 0.80;
+    /// <summary>How many recent turns to keep full. 4-12.</summary>
+    public int AutoCompactKeepTurns { get; init; } = 6;
+    /// <summary>How many recent tool results to keep. 4-16.</summary>
+    public int AutoCompactKeepToolResults { get; init; } = 8;
+    /// <summary>How many chars of an older user task to pin verbatim. 500-5000.</summary>
+    public int AutoCompactPinUserChars { get; init; } = 2000;
+
     public int CompactWatermarkPercent { get; init; } = 85;
     public int CompactKeepTurns { get; init; } = LocalHistoryCompaction.KeepTurns;
     public int CompactToolKeepTurns { get; init; } = LocalHistoryCompaction.ToolKeepTurns;
@@ -67,6 +78,7 @@ public sealed record PortForwardingRules
     public int MaxForwardedImages { get; init; } = LocalChatPayloadSignals.MaxForwardedImages;
 
     public int FirstByteSeconds { get; init; } = LocalStreamHangPolicy.FirstByteSeconds;
+    public int HangQuietSeconds { get; init; } = 15;
     public int ThinkTokensPerSecond { get; init; } = LocalStreamHangPolicy.ThinkTokensPerSecond;
     public int MaxThinkFirstByteSeconds { get; init; } = LocalStreamHangPolicy.MaxThinkFirstByteSeconds;
     public int StallSeconds { get; init; } = LocalStreamHangPolicy.StallSeconds;
@@ -140,6 +152,7 @@ public sealed record PortForwardingRules
             MinResultCharsToClear = Math.Clamp(MinResultCharsToClear, 80, 2000),
             MaxForwardedImages = Math.Clamp(MaxForwardedImages, 1, 8),
             FirstByteSeconds = Math.Clamp(FirstByteSeconds, 5, 120),
+            HangQuietSeconds = Math.Clamp(HangQuietSeconds, 5, 60),
             ThinkTokensPerSecond = Math.Clamp(ThinkTokensPerSecond, 5, 80),
             MaxThinkFirstByteSeconds = Math.Clamp(MaxThinkFirstByteSeconds, 30, 300),
             StallSeconds = Math.Clamp(StallSeconds, 10, 180),
@@ -148,7 +161,11 @@ public sealed record PortForwardingRules
             LoadingRetryCount = Math.Clamp(LoadingRetryCount, 0, 12),
             LoadingRetryDelaySeconds = Math.Clamp(LoadingRetryDelaySeconds, 1, 10),
             ClientMaxTokensMode = NormalizeClientMaxTokensMode(ClientMaxTokensMode),
-            StopHygieneMode = NormalizeStopHygieneMode(StopHygieneMode)
+            StopHygieneMode = NormalizeStopHygieneMode(StopHygieneMode),
+            AutoCompactTriggerPercent = Math.Clamp(AutoCompactTriggerPercent, 0.60, 0.95),
+            AutoCompactKeepTurns = Math.Clamp(AutoCompactKeepTurns, 4, 12),
+            AutoCompactKeepToolResults = Math.Clamp(AutoCompactKeepToolResults, 4, 16),
+            AutoCompactPinUserChars = Math.Clamp(AutoCompactPinUserChars, 500, 5000)
         };
 
     public static string NormalizeClientMaxTokensMode(string? mode)

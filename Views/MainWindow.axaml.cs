@@ -108,6 +108,11 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Final save: persist settings now so they survive even if the exit path is
+        // interrupted (crash, bluescreen). The rolling .prev backup in the config
+        // service protects against the live file being corrupted by this write.
+        vm.PersistSettingsForExit();
+
         e.Cancel = true;
         _exitCleanupStarted = true;
         CloseInterventionPopup();

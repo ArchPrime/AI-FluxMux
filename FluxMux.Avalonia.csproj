@@ -20,6 +20,12 @@
     <Compile Remove="FluxMux.Avalonia.Tests\**" />
     <None Remove="FluxMux.Avalonia.Tests\**" />
     <EmbeddedResource Remove="FluxMux.Avalonia.Tests\**" />
+    <Compile Remove="FluxMux.Updates.Core\**" />
+    <None Remove="FluxMux.Updates.Core\**" />
+    <EmbeddedResource Remove="FluxMux.Updates.Core\**" />
+    <Compile Remove="FluxMux.Updates\**" />
+    <None Remove="FluxMux.Updates\**" />
+    <EmbeddedResource Remove="FluxMux.Updates\**" />
     <Content Include="Help.html">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -37,6 +43,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="FluxMux.Updates.Core\FluxMux.Updates.Core.csproj" />
     <PackageReference Include="Avalonia" Version="12.1.1" />
     <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
@@ -50,4 +57,15 @@
     <PackageReference Include="SkiaSharp" Version="3.119.4" />
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.0" />
   </ItemGroup>
+
+  <!-- Copy the standalone updater (FluxMux.Updates.exe + deps) into the app's output so the
+       "Update now" buttons can launch it. The updater targets net10.0-windows (WinForms),
+       so its output lives in the net10.0-windows folder. Build it first:
+       dotnet build FluxMux.Updates/FluxMux.Updates.csproj. No-op if not yet built. -->
+  <Target Name="CopyStandaloneUpdater" AfterTargets="Build" Condition="Exists('$(MSBuildProjectDirectory)\FluxMux.Updates\bin\$(Configuration)\net10.0-windows\FluxMux.Updates.exe')">
+    <ItemGroup>
+      <UpdaterFiles Include="$(MSBuildProjectDirectory)\FluxMux.Updates\bin\$(Configuration)\net10.0-windows\*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(UpdaterFiles)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

@@ -22,6 +22,7 @@ using CommunityToolkit.Mvvm.Input;
 using FluxMux.Avalonia.Models;
 using FluxMux.Avalonia.Services;
 using FluxMux.Avalonia.Views;
+using FluxMux.Updates.Core;
 
 namespace FluxMux.Avalonia.ViewModels;
 
@@ -62,6 +63,9 @@ public sealed class ValidatedQuickSelectProfileOption
     public required string Variant { get; init; }
 
     public required string DisplayName { get; init; }
+
+    /// <summary>Short context summary for the slot display, e.g. "ctx 262,144 (YaRN)" or "ctx 131,072".</summary>
+    public string ContextSummary { get; init; } = string.Empty;
 
     public string? LogoAssetKey { get; init; }
 
@@ -2031,6 +2035,10 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial decimal LocalVariantContext { get; set; } = 32768;
 
+    /// <summary>Maximum context the NumericUpDown allows. Raised to ~1M when YaRN extension is enabled.</summary>
+    public int LocalVariantContextMax =>
+        LocalVariantExtendContextIntoRam ? 1048576 : 262144;
+
     [ObservableProperty]
     public partial string LocalVariantOverrideThreads { get; set; } = DefaultLocalThreadCount();
 
@@ -2100,6 +2108,21 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     public partial string LocalVariantCacheRam { get; set; } = "8192";
+
+    [ObservableProperty]
+    public partial string LocalVariantRopeScaling { get; set; } = "Auto";
+
+    [ObservableProperty]
+    public partial string LocalVariantRopeScale { get; set; } = "Auto";
+
+    [ObservableProperty]
+    public partial bool LocalVariantExtendContextIntoRam { get; set; }
+
+    [ObservableProperty]
+    public partial bool LocalVariantUseYarn { get; set; } = true;
+
+    [ObservableProperty]
+    public partial string LocalVariantYarnMaxContext { get; set; } = "Auto";
 
     [ObservableProperty]
     public partial string LocalVariantFit { get; set; } = "Enabled";
@@ -3533,6 +3556,8 @@ public partial class MainViewModel : ViewModelBase
             : nextLoad
             ? "The blue note compares the model profile that is running now with a suggested model profile (validated, even if it is not in Quick Select). **Load suggested model profile** unloads the current local model and starts the suggested one."
                 + (RecoveryNeedsHarnessRelaunch() ? " " + RouteRecoveryPolicy.HarnessRelaunchFromNewSlotAdvice : string.Empty)
+            : snapshot.SpillCompact
+            ? "This conversation is longer than the graphics-card context, so the overflow is running in ordinary memory (slower than the card). **Compact** shortens older turns AI-FluxMux forwards so the working set returns onto the graphics card. The Client app still has the full chat."
             : "This chat is filling the loaded Context. **Compact** shortens older turns AI-FluxMux forwards when the window is actually tight. The Client app still has the full chat.";
         if (LocalReloadRecommendVisible
             && LocalReloadLoadVisible == nextLoad
@@ -4655,14 +4680,36 @@ public partial class MainViewModel : ViewModelBase
     public partial string DependencyPinPolicyText { get; set; } = "After you update llama-server or the GPU driver, launch a known profile to confirm it still works.";
 
     [ObservableProperty]
+    public partial string UpdateInstructionsText { get; set; } =
+        "How to update: " +
+        "1. Click \"Check for update\" in the section you want to update. " +
+        "2. If a newer version is found, click \"Update now\". " +
+        "3. Confirm the dialog. AI-FluxMux closes, and the standalone updater (FluxMux.Updates.exe) automatically backs up and replaces the files. " +
+        "4. When the updater finishes, it prompts you to restart AI-FluxMux. " +
+        "If you are already up to date, the button just says so and does nothing. " +
+        "All three components check their upstream GitHub repos by default; the optional \"Update source\" fields let you nominate a different repo if updates migrate.";
+
+    [ObservableProperty]
     public partial string DependencyDriftSummaryText { get; set; } = "No known-good snapshot captured. Capture one after a working launch if you want later path or llama-server changes highlighted here.";
 
     [ObservableProperty]
     public partial string UpdateFeedUrl { get; set; } = string.Empty;
 
+    // Optional "update source" overrides. All three components default to their
+    // upstream GitHub repos; a user can nominate an alternate owner/repo to migrate
+    // the source later. Blank = use the GitHub default.
+    [ObservableProperty]
+    public partial string FluxMuxUpdateSource { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string LlamaUpdateSource { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string HarnessUpdateSource { get; set; } = string.Empty;
+
     [ObservableProperty]
     public partial string UpdateCheckStatusText { get; set; } =
-        "No feed URL yet. Paste one when you have a public host. Until then, you can still replace Help.html next to AI-FluxMux.exe by hand.";
+        "Click \"Check for update\" to look for a newer AI-FluxMux on GitHub. Clicking \"Update now\" starts the automatic update — AI-FluxMux closes, the updater backs up and replaces the files, then prompts you to restart. Set an update source only if you host updates elsewhere.";
 
     [ObservableProperty]
     public partial bool UpdateDownloadAvailable { get; set; }
@@ -4678,6 +4725,13 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial string HarnessInstalledVersionText { get; set; } =
         "DeepSeek Harness version has not been read yet. Use Check for updates on Environment, or Start Harness web after dsh is installed.";
+
+    [ObservableProperty]
+    public partial string FluxMuxVersionText { get; set; } = FluxMuxAppInfo.Version;
+
+    [ObservableProperty]
+    public partial string LlamaServerVersionText { get; set; } =
+        "llama-server version has not been read yet. Use Check for updates on Environment, or launch a profile after llama-server is installed.";
 
     [ObservableProperty]
     public partial string ClineSettingsStatusText { get; set; } =
@@ -4883,6 +4937,96 @@ public partial class MainViewModel : ViewModelBase
     public ObservableCollection<string> LocalCacheRamOptions { get; } =
     ["Disabled", "4096", "8192", "16384", "Unlimited"];
 
+    public ObservableCollection<string> LocalRopeScalingOptions { get; } =
+    ["Auto", "none", "linear", "yarn"];
+
+    public ObservableCollection<string> LocalRopeScaleOptions { get; } =
+    ["Auto", "1", "1.5", "2", "2.5", "3", "4", "8"];
+
+    /// <summary>Options for the "Max YaRN context" setting. Auto assesses installed RAM; the rest are fixed targets.</summary>
+    public ObservableCollection<string> LocalYarnMaxContextOptions { get; } =
+    ["Auto", "512K", "768K", "1M"];
+
+    /// <summary>
+    /// Hardware-bounded "how far to extend" options for the priorities wizard. Computed from the
+    /// installed RAM: each option is a clean target that the overflow KV can actually hold, so the
+    /// user is only offered extensions their machine can run. Refreshed when the profile/hardware
+    /// changes. Always includes "Auto" (let RAM decide) plus the fixed targets that fit.
+    /// </summary>
+    [ObservableProperty]
+    private ObservableCollection<string> _localYarnMaxContextWizardOptions = new(["Auto", "512K", "768K", "1M"]);
+
+    /// <summary>
+    /// Builds the wizard's "how far to extend" options from the available RAM. Includes "Auto"
+    /// (RAM decides) and any of the fixed targets (512K/768K/1M) that the overflow KV can hold.
+    /// If none of the fixed targets fit, only "Auto" is offered.
+    /// </summary>
+    private ObservableCollection<string> BuildYarnMaxContextWizardOptions()
+    {
+        var options = new List<string> { "Auto" };
+        try
+        {
+            var advice = CurrentLocalHardwareAdvice();
+            if (advice.ModelMaxCtx > 0)
+            {
+                int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
+                foreach (var (label, tokens) in new[] { ("512K", 512 * 1024), ("768K", 768 * 1024), ("1M", 1024 * 1024) })
+                {
+                    if (tokens <= ramBounded)
+                    {
+                        options.Add(label);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // No hardware advice yet (e.g. no profile selected): fall back to the full fixed list.
+            options.Clear();
+            options.AddRange(LocalYarnMaxContextOptions);
+        }
+
+        return new ObservableCollection<string>(options);
+    }
+
+    /// <summary>Recomputes the wizard's hardware-bounded "how far to extend" options.</summary>
+    private void RefreshYarnMaxContextWizardOptions()
+    {
+        LocalYarnMaxContextWizardOptions = BuildYarnMaxContextWizardOptions();
+        // If the current selection is no longer offered, fall back to Auto.
+        if (!LocalYarnMaxContextWizardOptions.Contains(LocalVariantYarnMaxContext, StringComparer.OrdinalIgnoreCase))
+        {
+            LocalVariantYarnMaxContext = "Auto";
+        }
+    }
+
+    /// <summary>Wizard KV cache choices, filtered to what the hardware can actually handle.</summary>
+    public ObservableCollection<string> LocalKvCacheWizardOptions { get; } = [];
+
+    [ObservableProperty]
+    private string _localKvCacheWizardChoice = "Auto";
+
+    [ObservableProperty]
+    private string _localKvCacheWizardInfoText = string.Empty;
+
+    [ObservableProperty]
+    private bool _showLocalKvCacheWizardChoice;
+
+    [ObservableProperty]
+    private bool _localAutoCompactEnabled = true;
+
+    [ObservableProperty]
+    private decimal _localAutoCompactTriggerPercent = 80;
+
+    [ObservableProperty]
+    private decimal _localAutoCompactKeepTurns = 6;
+
+    [ObservableProperty]
+    private decimal _localAutoCompactKeepToolResults = 8;
+
+    [ObservableProperty]
+    private decimal _localAutoCompactPinUserChars = 2000;
+
     public ObservableCollection<string> LocalReasoningOptions { get; } =
     ["Off", "On"];
 
@@ -5028,10 +5172,57 @@ public partial class MainViewModel : ViewModelBase
     }
 
     [RelayCommand]
-    private async Task CheckForUpdatesAsync()
+    private async Task CheckForFluxMuxUpdatesAsync()
     {
         SaveCurrentSelections();
         UpdateDownloadAvailable = false;
+        UpdateCheckStatusText = "Checking for updates...";
+        StatusMessage = "Checking for AI-FluxMux updates...";
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
+
+        // Default: check the AI-FluxMux GitHub releases (no setup needed).
+        // If a custom feed URL is set, it takes precedence (also updates Help.html).
+        var useFeed = !string.IsNullOrWhiteSpace(UpdateFeedUrl?.Trim());
+        try
+        {
+            if (useFeed)
+            {
+                var helpPath = HelpHtmlFile.FindNewest()
+                    ?? Path.Combine(AppContext.BaseDirectory, HelpHtmlFile.FileNames[0]);
+                var appResult = await UpdateCheck.RunAsync(
+                    http,
+                    UpdateFeedUrl,
+                    FluxMuxAppInfo.Version,
+                    helpPath,
+                    Path.Combine(HelpHtmlFile.UserDirectory, HelpHtmlFile.FileNames[0]));
+                UpdateCheckStatusText = appResult.StatusText;
+                UpdateDownloadAvailable = appResult.AppUpdateAvailable && !string.IsNullOrWhiteSpace(appResult.DownloadUrl);
+                _updateDownloadUrl = appResult.DownloadUrl;
+                StatusMessage = appResult.HelpReplaced
+                    ? "Help.html was updated from the feed."
+                    : appResult.StatusText;
+            }
+            else
+            {
+                var releaseResult = await AiFluxMuxReleaseCheck.CheckAsync(http, FluxMuxAppInfo.Version, FluxMuxUpdateSource);
+                UpdateCheckStatusText = releaseResult.StatusText;
+                UpdateDownloadAvailable = releaseResult.NewerAvailable
+                    && !string.IsNullOrWhiteSpace(releaseResult.DownloadUrl ?? releaseResult.ReleaseUrl);
+                _updateDownloadUrl = releaseResult.DownloadUrl ?? releaseResult.ReleaseUrl;
+                StatusMessage = releaseResult.StatusText;
+            }
+        }
+        catch (Exception ex)
+        {
+            UpdateCheckStatusText = "Could not check for AI-FluxMux updates: " + ex.Message;
+            StatusMessage = UpdateCheckStatusText;
+        }
+    }
+
+    [RelayCommand]
+    private async Task CheckForLlamaServerUpdatesAsync()
+    {
         LlamaServerZipAvailable = false;
         LlamaCudartZipAvailable = false;
         LlamaReleasePageAvailable = false;
@@ -5040,39 +5231,18 @@ public partial class MainViewModel : ViewModelBase
         _llamaServerZipUrl = string.Empty;
         _llamaCudartZipUrl = string.Empty;
         _llamaReleaseUrl = string.Empty;
-        UpdateCheckStatusText = "Checking for updates...";
         LlamaServerUpdateStatusText = "Checking llama-server nightlies for this install's hardware family...";
-        HarnessUpdateStatusText = "Checking this PC's DeepSeek Harness version...";
-        StatusMessage = "Checking for updates...";
+        StatusMessage = "Checking llama-server updates...";
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
         http.DefaultRequestHeaders.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
         try
         {
-            var helpPath = HelpHtmlFile.FindNewest()
-                ?? Path.Combine(AppContext.BaseDirectory, HelpHtmlFile.FileNames[0]);
-            var appResult = await UpdateCheck.RunAsync(
-                http,
-                UpdateFeedUrl,
-                FluxMuxAppInfo.Version,
-                helpPath,
-                Path.Combine(HelpHtmlFile.UserDirectory, HelpHtmlFile.FileNames[0]));
-            UpdateCheckStatusText = appResult.StatusText;
-            UpdateDownloadAvailable = appResult.AppUpdateAvailable && !string.IsNullOrWhiteSpace(appResult.DownloadUrl);
-            _updateDownloadUrl = appResult.DownloadUrl;
-            StatusMessage = appResult.HelpReplaced
-                ? "Help.html was updated from the feed."
-                : appResult.StatusText;
-        }
-        catch (Exception ex)
-        {
-            UpdateCheckStatusText = "Could not check for AI-FluxMux updates: " + ex.Message;
-            StatusMessage = UpdateCheckStatusText;
-        }
-
-        try
-        {
-            var llamaResult = await LlamaServerUpdateCheck.CheckAsync(http, LocalServerExecutablePath);
+            var llamaResult = await LlamaServerUpdateCheck.CheckAsync(http, LocalServerExecutablePath, LlamaUpdateSource);
             LlamaServerUpdateStatusText = llamaResult.StatusText;
+            if (!string.IsNullOrWhiteSpace(llamaResult.InstalledBuildLabel))
+            {
+                LlamaServerVersionText = llamaResult.InstalledBuildLabel;
+            }
             _llamaServerZipUrl = llamaResult.ServerZipUrl ?? string.Empty;
             _llamaCudartZipUrl = llamaResult.CudartZipUrl ?? string.Empty;
             _llamaReleaseUrl = llamaResult.ReleaseUrl ?? string.Empty;
@@ -5090,17 +5260,34 @@ public partial class MainViewModel : ViewModelBase
         {
             LlamaServerUpdateStatusText = "Could not check llama-server updates: " + ex.Message;
         }
+    }
 
+    [RelayCommand]
+    private async Task CheckForHarnessUpdatesAsync()
+    {
+        HarnessUpdateStatusText = "Checking this PC's DeepSeek Harness version...";
+        StatusMessage = "Checking DeepSeek Harness updates...";
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
         try
         {
-            HarnessUpdateStatusText = "Checking this PC's DeepSeek Harness version...";
-            var harnessResult = await DeepSeekHarnessUpdateCheck.CheckAsync(http);
+            // Default: compare the installed dsh version to the latest GitHub release tag
+            // (consistent with AI-FluxMux and llama-server). The update itself still uses npm.
+            var harnessResult = await DeepSeekHarnessUpdateCheck.CheckGithubAsync(http, HarnessUpdateSource);
             ApplyHarnessVersionResult(harnessResult);
         }
         catch (Exception ex)
         {
             HarnessUpdateStatusText = "Could not check DeepSeek Harness updates: " + ex.Message;
         }
+    }
+
+    [RelayCommand]
+    private async Task CheckForUpdatesAsync()
+    {
+        await CheckForFluxMuxUpdatesAsync();
+        await CheckForLlamaServerUpdatesAsync();
+        await CheckForHarnessUpdatesAsync();
     }
 
     private void ApplyHarnessVersionResult(DeepSeekHarnessUpdateResult result)
@@ -5203,6 +5390,368 @@ public partial class MainViewModel : ViewModelBase
         => !LlamaServerUpdating
             && !string.IsNullOrWhiteSpace(_llamaServerZipUrl)
             && !string.IsNullOrWhiteSpace(LocalServerExecutablePath);
+
+    // ------------------------------------------------------------------
+    // "Update now" buttons: check for a newer version first, report when
+    // already up to date, and only launch the standalone updater when an
+    // update actually exists.
+    // ------------------------------------------------------------------
+
+    [RelayCommand]
+    private async Task UpdateFluxMuxNowAsync()
+    {
+        UpdateCheckStatusText = "Checking for a newer AI-FluxMux...";
+        StatusMessage = "Checking for a newer AI-FluxMux...";
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
+
+        // Default: check the AI-FluxMux GitHub releases (no setup needed).
+        // If a custom feed URL is set, it takes precedence (also updates Help.html).
+        AiFluxMuxReleaseResult? releaseResult = null;
+        UpdateCheckResult? feedResult = null;
+        var useFeed = !string.IsNullOrWhiteSpace(UpdateFeedUrl?.Trim());
+
+        try
+        {
+            if (useFeed)
+            {
+                var helpPath = HelpHtmlFile.FindNewest()
+                    ?? Path.Combine(AppContext.BaseDirectory, HelpHtmlFile.FileNames[0]);
+                feedResult = await UpdateCheck.RunAsync(
+                    http,
+                    UpdateFeedUrl,
+                    FluxMuxAppInfo.Version,
+                    helpPath,
+                    Path.Combine(HelpHtmlFile.UserDirectory, HelpHtmlFile.FileNames[0]));
+            }
+            else
+            {
+                releaseResult = await AiFluxMuxReleaseCheck.CheckAsync(http, FluxMuxAppInfo.Version, FluxMuxUpdateSource);
+            }
+        }
+        catch (Exception ex)
+        {
+            UpdateCheckStatusText = "Could not check for AI-FluxMux updates: " + ex.Message;
+            StatusMessage = UpdateCheckStatusText;
+            return;
+        }
+
+        string statusText;
+        bool newerAvailable;
+        string? downloadUrl;
+        string? releaseUrl;
+
+        if (useFeed && feedResult is not null)
+        {
+            statusText = feedResult.StatusText;
+            newerAvailable = feedResult.AppUpdateAvailable;
+            downloadUrl = feedResult.DownloadUrl;
+            releaseUrl = null;
+            UpdateDownloadAvailable = newerAvailable && !string.IsNullOrWhiteSpace(downloadUrl);
+            _updateDownloadUrl = downloadUrl;
+        }
+        else
+        {
+            statusText = releaseResult!.StatusText;
+            newerAvailable = releaseResult.NewerAvailable;
+            downloadUrl = releaseResult.DownloadUrl;
+            releaseUrl = releaseResult.ReleaseUrl;
+            UpdateDownloadAvailable = newerAvailable && !string.IsNullOrWhiteSpace(downloadUrl ?? releaseUrl);
+            _updateDownloadUrl = downloadUrl ?? releaseUrl;
+        }
+
+        UpdateCheckStatusText = statusText;
+
+        if (!newerAvailable)
+        {
+            StatusMessage = "AI-FluxMux is up to date. Nothing to update.";
+            return;
+        }
+
+        // The standalone updater needs a feed URL for the fluxmux subcommand. When we
+        // found the update via GitHub releases, point it at the release page so the
+        // user can grab the installer; the app itself reports the direct download.
+        var feedForUpdater = useFeed
+            ? UpdateFeedUrl!.Trim()
+            : releaseUrl ?? UpdateFeedUrl?.Trim() ?? string.Empty;
+
+        LaunchStandaloneUpdater(
+            "Update AI-FluxMux",
+            "A newer AI-FluxMux is available. This closes AI-FluxMux, then runs the standalone updater to back up and replace the AI-FluxMux install. "
+                + "When it finishes, AI-FluxMux will restart.",
+            UpdatePlan.FluxMuxArgs(AppContext.BaseDirectory, feedForUpdater));
+    }
+
+    [RelayCommand]
+    private async Task UpdateLlamaServerNowViaUpdaterAsync()
+    {
+        if (string.IsNullOrWhiteSpace(LocalServerExecutablePath))
+        {
+            LlamaServerUpdateProgressText = "Choose llama-server.exe on the Servers tab first, then run the updater.";
+            StatusMessage = LlamaServerUpdateProgressText;
+            return;
+        }
+
+        var serverDir = Path.GetDirectoryName(LocalServerExecutablePath);
+        if (string.IsNullOrWhiteSpace(serverDir) || !Directory.Exists(serverDir))
+        {
+            LlamaServerUpdateProgressText = "The llama-server folder is not set or does not exist.";
+            StatusMessage = LlamaServerUpdateProgressText;
+            return;
+        }
+
+        LlamaServerUpdateStatusText = "Checking llama-server nightlies for this install's hardware family...";
+        StatusMessage = "Checking for a newer llama-server...";
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
+        LlamaServerUpdateResult? llamaResult;
+        try
+        {
+            llamaResult = await LlamaServerUpdateCheck.CheckAsync(http, LocalServerExecutablePath, LlamaUpdateSource);
+        }
+        catch (Exception ex)
+        {
+            LlamaServerUpdateStatusText = "Could not check llama-server updates: " + ex.Message;
+            StatusMessage = LlamaServerUpdateStatusText;
+            return;
+        }
+
+        LlamaServerUpdateStatusText = llamaResult.StatusText;
+        _llamaServerZipUrl = llamaResult.ServerZipUrl ?? string.Empty;
+        _llamaCudartZipUrl = llamaResult.CudartZipUrl ?? string.Empty;
+        _llamaReleaseUrl = llamaResult.ReleaseUrl ?? string.Empty;
+        LlamaServerZipAvailable = !string.IsNullOrWhiteSpace(_llamaServerZipUrl);
+        LlamaCudartZipAvailable = !string.IsNullOrWhiteSpace(_llamaCudartZipUrl);
+        LlamaReleasePageAvailable = !string.IsNullOrWhiteSpace(_llamaReleaseUrl);
+        LlamaServerUpdateAvailable = llamaResult.NewerAvailable
+            && !string.IsNullOrWhiteSpace(_llamaServerZipUrl);
+
+        if (!llamaResult.NewerAvailable || string.IsNullOrWhiteSpace(_llamaServerZipUrl))
+        {
+            LlamaServerUpdateProgressText = "llama-server is up to date. Nothing to update.";
+            StatusMessage = LlamaServerUpdateProgressText;
+            return;
+        }
+
+        LaunchStandaloneUpdater(
+            "Update llama-server",
+            "A newer llama-server is available. This closes AI-FluxMux, then runs the standalone updater to back up and replace your llama-server folder. "
+                + "When it finishes, AI-FluxMux will restart.",
+            UpdatePlan.LlamaArgs(serverDir));
+    }
+
+    // ------------------------------------------------------------------
+    // Standalone updater launch (close AI-FluxMux, run FluxMux.Updates, restart)
+    // ------------------------------------------------------------------
+
+    [RelayCommand]
+    private void RunLlamaUpdater()
+    {
+        if (string.IsNullOrWhiteSpace(LocalServerExecutablePath))
+        {
+            LlamaServerUpdateProgressText = "Choose llama-server.exe on the Servers tab first, then run the updater.";
+            StatusMessage = LlamaServerUpdateProgressText;
+            return;
+        }
+
+        var serverDir = Path.GetDirectoryName(LocalServerExecutablePath);
+        if (string.IsNullOrWhiteSpace(serverDir) || !Directory.Exists(serverDir))
+        {
+            LlamaServerUpdateProgressText = "The llama-server folder is not set or does not exist.";
+            StatusMessage = LlamaServerUpdateProgressText;
+            return;
+        }
+
+        LaunchStandaloneUpdater(
+            "Update llama-server",
+            "This closes AI-FluxMux, then runs the standalone updater to back up and replace your llama-server folder. "
+                + "When it finishes, AI-FluxMux will restart.",
+            UpdatePlan.LlamaArgs(serverDir));
+    }
+
+    [RelayCommand]
+    private void RunFluxMuxUpdater()
+    {
+        if (string.IsNullOrWhiteSpace(UpdateFeedUrl?.Trim()))
+        {
+            UpdateCheckStatusText = "Set an update feed URL first, then run the updater.";
+            StatusMessage = UpdateCheckStatusText;
+            return;
+        }
+
+        var installDir = AppContext.BaseDirectory;
+        LaunchStandaloneUpdater(
+            "Update AI-FluxMux",
+            "This closes AI-FluxMux, then runs the standalone updater to back up and replace the AI-FluxMux install. "
+                + "When it finishes, AI-FluxMux will restart.",
+            UpdatePlan.FluxMuxArgs(installDir, UpdateFeedUrl.Trim()));
+    }
+
+    [RelayCommand]
+    private void RunHarnessUpdater()
+    {
+        LaunchStandaloneUpdater(
+            "Update DeepSeek Harness",
+            "This closes AI-FluxMux, then runs the standalone updater to back up your DeepSeek Harness config and update it via npm. "
+                + "When it finishes, AI-FluxMux will restart.",
+            UpdatePlan.HarnessArgs());
+    }
+
+    [RelayCommand]
+    private async Task UpdateHarnessNowAsync()
+    {
+        HarnessUpdateStatusText = "Checking this PC's DeepSeek Harness version...";
+        StatusMessage = "Checking for a newer DeepSeek Harness...";
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(25) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
+        DeepSeekHarnessUpdateResult? harnessResult;
+        try
+        {
+            harnessResult = await DeepSeekHarnessUpdateCheck.CheckGithubAsync(http, HarnessUpdateSource);
+        }
+        catch (Exception ex)
+        {
+            HarnessUpdateStatusText = "Could not check DeepSeek Harness updates: " + ex.Message;
+            StatusMessage = HarnessUpdateStatusText;
+            return;
+        }
+
+        ApplyHarnessVersionResult(harnessResult);
+
+        if (!harnessResult.NewerAvailable)
+        {
+            HarnessUpdateStatusText = "DeepSeek Harness is up to date. Nothing to update.";
+            StatusMessage = HarnessUpdateStatusText;
+            return;
+        }
+
+        // Prerequisite check: the Harness update runs "npm install -g @deepseek-ai/dsh",
+        // so Node.js (npm/npx) must be present. Check *before* closing the app so the
+        // user isn't left with a failed update and a closed app. If missing, offer to
+        // open the Node.js download page.
+        if (!DeepSeekHarnessUpdateCheck.IsNodeAvailable())
+        {
+            var installUrl = "https://nodejs.org/";
+            var wantsInstall = ThemedDialog.Confirm(
+                "Node.js is required",
+                "The DeepSeek Harness update uses npm (part of Node.js), which was not found on this PC.\n\n"
+                + "Install Node.js, then run the update again.\n\n"
+                + "Click \"Open Node.js\" to go to the download page (" + installUrl + ").",
+                confirmLabel: "Open Node.js",
+                cancelLabel: "Cancel");
+            if (wantsInstall)
+            {
+                TryOpenUrl(installUrl);
+            }
+            HarnessUpdateStatusText = "Update not started: Node.js (npm) is required for the DeepSeek Harness update.";
+            StatusMessage = HarnessUpdateStatusText;
+            return;
+        }
+
+        LaunchStandaloneUpdater(
+            "Update DeepSeek Harness",
+            "A newer DeepSeek Harness is available. This closes AI-FluxMux, then runs the standalone updater to back up your DeepSeek Harness config and update dsh via npm. "
+                + "When it finishes, AI-FluxMux will restart.",
+            UpdatePlan.HarnessArgs());
+    }
+
+    private static void TryOpenUrl(string url)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+            // No browser available; the URL is also shown in the dialog message.
+        }
+    }
+
+    private void LaunchStandaloneUpdater(string title, string confirmMessage, IReadOnlyList<string> args)
+    {
+        var updaterExe = UpdatePlan.ResolveUpdaterExe(AppContext.BaseDirectory);
+        if (updaterExe is null)
+        {
+            StatusMessage = "The standalone updater (FluxMux.Updates.exe) was not found next to AI-FluxMux. "
+                + "Build the FluxMux.Updates project or use a published install.";
+            return;
+        }
+
+        var confirmed = ThemedDialog.Confirm(
+            title,
+            confirmMessage + " Continue?",
+            "Close and update",
+            "Cancel");
+        if (!confirmed)
+        {
+            return;
+        }
+
+        // Persist current state so the updater and the restarted app see it.
+        // SaveCurrentSelections already writes LocalServerExecutablePath and
+        // UpdateFeedUrl and saves the config.
+        try
+        {
+            SaveCurrentSelections();
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            var argumentString = string.Join(" ", args.Select(SanitizeArgument));
+            // The updater is a WinForms GUI app. Launch it directly; UseShellExecute=true
+            // starts it as a normal detached process whose window survives our exit.
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = updaterExe,
+                Arguments = argumentString,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "Could not start the standalone updater: " + ex.Message;
+            return;
+        }
+
+        // Give the updater a moment to show its progress window before we shut down,
+        // so it isn't killed mid-startup.
+        System.Threading.Thread.Sleep(1500);
+
+        // Close AI-FluxMux so the updater can take over. The window-close path already
+        // runs the managed-runtime shutdown; we mirror it here and exit.
+        try
+        {
+            ShutdownManagedRuntimesForExit();
+        }
+        catch
+        {
+        }
+
+        if (Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            desktop.Shutdown();
+        }
+
+        Environment.Exit(0);
+    }
+
+    private static string SanitizeArgument(string value)
+    {
+        if (value.Length > 0 && !value.Contains(' ') && !value.Contains('"'))
+        {
+            return value;
+        }
+
+        return "\"" + value.Replace("\"", "\\\"") + "\"";
+    }
+
 
     [RelayCommand]
     private void OpenUpdateDownload()
@@ -8084,13 +8633,17 @@ public partial class MainViewModel : ViewModelBase
         var contextTokens = (int)LocalVariantContext;
         var advice = CurrentLocalHardwareAdvice();
         var gpuGb = advice.GpuTotalGb;
+        var nativeCtx = advice.ModelMaxCtx;
+        var yarnNote = LocalVariantExtendContextIntoRam && nativeCtx > 0 && contextTokens > nativeCtx
+            ? $" YaRN extends the native {nativeCtx:N0} window to {contextTokens:N0}."
+            : string.Empty;
         var copyHint =
             " Change at least one setting, then Save profile — AI-FluxMux will not keep two variants with the same settings package.";
         StatusMessage = contextTokens >= advice.ContextPriorityFirst && gpuGb > 0
-            ? $"Local model profile variant created from this profile's settings. Context is first, so the window is {contextTokens} for this GPU ({gpuGb:0.#} GB).{copyHint}"
+            ? $"Local model profile variant created from this profile's settings. Context is first, so the window is {contextTokens:N0} for this GPU ({gpuGb:0.#} GB).{yarnNote}{copyHint}"
             : gpuGb > 0
-                ? $"Local model profile variant created from this profile's settings. This GPU ({gpuGb:0.#} GB) keeps the context window at {contextTokens}.{copyHint}"
-                : "Local model profile variant created from this profile's settings." + copyHint;
+                ? $"Local model profile variant created from this profile's settings. This GPU ({gpuGb:0.#} GB) keeps the context window at {contextTokens:N0}.{yarnNote}{copyHint}"
+                : "Local model profile variant created from this profile's settings." + yarnNote + copyHint;
     }
 
     [RelayCommand]
@@ -9111,6 +9664,7 @@ public partial class MainViewModel : ViewModelBase
             ["hardwareSummary"] = DependencySummary,
             ["dependencyScope"] = DependencyScopeHelpText,
             ["pinPolicy"] = DependencyPinPolicyText,
+            ["updateInstructions"] = UpdateInstructionsText,
             ["entries"] = new JsonArray(snapshot.ToArray())
         };
 
@@ -9165,6 +9719,9 @@ public partial class MainViewModel : ViewModelBase
         RefreshCustomCompatEndpointFromStore();
         LocalServerExecutablePath = _config.GetString("LocalServerExecutablePath", LocalServerExecutablePath);
         UpdateFeedUrl = FirstNonEmpty(_config.GetString("UpdateFeedUrl", UpdateFeedUrl), UpdateFeedUrl);
+        FluxMuxUpdateSource = FirstNonEmpty(_config.GetString("FluxMuxUpdateSource", FluxMuxUpdateSource), FluxMuxUpdateSource);
+        LlamaUpdateSource = FirstNonEmpty(_config.GetString("LlamaUpdateSource", LlamaUpdateSource), LlamaUpdateSource);
+        HarnessUpdateSource = FirstNonEmpty(_config.GetString("HarnessUpdateSource", HarnessUpdateSource), HarnessUpdateSource);
 
         var port = _config.GetInt("OrchestratorPort", (int)OrchestratorPort);
         if (port < 1 || port > 65535)
@@ -9569,6 +10126,27 @@ public partial class MainViewModel : ViewModelBase
         => AcceptLocalComboChange("LocalCacheReuse", value, restored => LocalVariantCacheReuse = restored);
     partial void OnLocalVariantCacheRamChanged(string value)
         => AcceptLocalComboChange("LocalCacheRam", value, restored => LocalVariantCacheRam = restored);
+    partial void OnLocalVariantRopeScalingChanged(string value)
+        => AcceptLocalComboChange("LocalRopeScaling", value, restored => LocalVariantRopeScaling = restored);
+    partial void OnLocalVariantRopeScaleChanged(string value)
+        => AcceptLocalComboChange("LocalRopeScale", value, restored => LocalVariantRopeScale = restored);
+    partial void OnLocalVariantExtendContextIntoRamChanged(bool value)
+    {
+        OnPropertyChanged(nameof(LocalVariantContextMax));
+        HandleLocalDetailedSettingsChanged();
+        UpdateLocalKvCacheWizardInfo();
+    }
+    partial void OnLocalVariantUseYarnChanged(bool value)
+    {
+        HandleLocalDetailedSettingsChanged();
+        UpdateLocalKvCacheWizardInfo();
+    }
+    partial void OnLocalVariantYarnMaxContextChanged(string value)
+        => AcceptLocalComboChange("LocalYarnMaxContext", value, restored => LocalVariantYarnMaxContext = restored);
+    partial void OnLocalKvCacheWizardChoiceChanged(string value)
+    {
+        UpdateLocalKvCacheWizardInfo();
+    }
     partial void OnLocalVariantFitChanged(string value)
     {
         AcceptLocalComboChange("LocalFit", value, restored => LocalVariantFit = restored);
@@ -9729,6 +10307,8 @@ public partial class MainViewModel : ViewModelBase
         Restore("LocalSpecType", LocalVariantSpecType, value => LocalVariantSpecType = value);
         Restore("LocalCacheReuse", LocalVariantCacheReuse, value => LocalVariantCacheReuse = value);
         Restore("LocalCacheRam", LocalVariantCacheRam, value => LocalVariantCacheRam = value);
+        Restore("LocalRopeScaling", LocalVariantRopeScaling, value => LocalVariantRopeScaling = value);
+        Restore("LocalRopeScale", LocalVariantRopeScale, value => LocalVariantRopeScale = value);
         Restore("LocalFit", LocalVariantFit, value => LocalVariantFit = value);
         Restore("LocalSwaFull", LocalVariantSwaFull, value => LocalVariantSwaFull = value);
         Restore("LocalReasoning", LocalVariantReasoning, value => LocalVariantReasoning = value);
@@ -10191,6 +10771,25 @@ public partial class MainViewModel : ViewModelBase
         return (false, string.Empty);
     }
 
+    /// <summary>Builds a short context summary for the Quick Select slot display, e.g. "ctx 262,144 (YaRN)" or "ctx 131,072".</summary>
+    private string BuildLocalContextSummary(JsonObject? settings)
+    {
+        if (settings is null)
+        {
+            return string.Empty;
+        }
+
+        var context = settings["OverrideContext"]?.ToString();
+        if (string.IsNullOrWhiteSpace(context) || !int.TryParse(context, out var ctx) || ctx <= 0)
+        {
+            return string.Empty;
+        }
+
+        var extendIntoRam = ParseBool(settings["LocalExtendContextIntoRam"]?.ToString(), false);
+        var yarnTag = extendIntoRam ? " (YaRN)" : string.Empty;
+        return $"ctx {ctx:N0}{yarnTag}";
+    }
+
     private (bool Show, string Tooltip) ResolveProfileWarningForOption(
         bool isLocal,
         string? provider,
@@ -10471,6 +11070,7 @@ public partial class MainViewModel : ViewModelBase
                 .Equals("Enabled", StringComparison.OrdinalIgnoreCase)
                 ? " \u00b7 images"
                 : string.Empty;
+            var contextSummary = BuildLocalContextSummary(settings);
             return new ValidatedQuickSelectProfileOption
             {
                 RouteType = "Local",
@@ -10482,7 +11082,8 @@ public partial class MainViewModel : ViewModelBase
                 LogoCompanyName = logo?.CompanyName ?? string.Empty,
                 DisplayName = isDefault
                     ? $"Local | (default) \u00b7 {model}{images}"
-                    : $"Local | {variant} \u00b7 {model}{images}"
+                    : $"Local | {variant} \u00b7 {model}{images}",
+                ContextSummary = contextSummary
             };
         }
 
@@ -10583,6 +11184,23 @@ public partial class MainViewModel : ViewModelBase
         options.TryAdd(option.Key, option);
     }
 
+    /// <summary>
+    /// Persists the current selections to the config file. Called on window close as a
+    /// final save so settings survive even if the normal exit path is interrupted
+    /// (e.g. a crash or bluescreen). Safe to call multiple times.
+    /// </summary>
+    public void PersistSettingsForExit()
+    {
+        try
+        {
+            SaveCurrentSelections();
+        }
+        catch
+        {
+            // A failed final save must not block the window from closing.
+        }
+    }
+
     private void SaveCurrentSelections()
     {
         SyncPrimaryRouteSlotsFromCurrentSelections();
@@ -10604,6 +11222,9 @@ public partial class MainViewModel : ViewModelBase
         _config.SetString("ModelDirectory", LocalModelDirectory);
         _config.SetString("LocalServerExecutablePath", LocalServerExecutablePath);
         _config.SetString("UpdateFeedUrl", UpdateFeedUrl?.Trim() ?? string.Empty);
+        _config.SetString("FluxMuxUpdateSource", FluxMuxUpdateSource?.Trim() ?? string.Empty);
+        _config.SetString("LlamaUpdateSource", LlamaUpdateSource?.Trim() ?? string.Empty);
+        _config.SetString("HarnessUpdateSource", HarnessUpdateSource?.Trim() ?? string.Empty);
         _config.SetInt("OrchestratorPort", (int)OrchestratorPort);
         _config.SetString("EndpointApp", SelectedEndpointApp?.Trim() ?? string.Empty);
         _config.SetInt("HarnessWebPort", (int)HarnessWebPort);
@@ -15191,13 +15812,27 @@ public partial class MainViewModel : ViewModelBase
         var configuredContextTokens = Math.Max(1024d, (double)LocalVariantContext);
         var kvBytesPerToken = ResolveKvBytesPerToken(LocalVariantKvCacheTypeK, LocalVariantKvCacheTypeV);
         var weightsGiB = fileGiB * offloadFraction;
-        var kvGiB = configuredContextTokens * kvBytesPerToken / 1024d / 1024d / 1024d;
+        var advice = CurrentLocalHardwareAdvice();
+        // When YaRN extends the context past the native window, the KV overflow is meant
+        // to live in system RAM, not VRAM. Only the KV that fits in the VRAM-resident
+        // window (the native context) counts toward the VRAM footprint.
+        var nativeCtxForKv = LocalVariantExtendContextIntoRam ? advice.ModelMaxCtx : 0;
+        var vramKvTokens = nativeCtxForKv > 0
+            ? Math.Min(configuredContextTokens, nativeCtxForKv)
+            : configuredContextTokens;
+        var kvGiB = vramKvTokens * kvBytesPerToken / 1024d / 1024d / 1024d;
         var runtimeGiB = offloadFraction > 0 ? LocalVramFootprintEstimate.RuntimeOverheadGiB : 0d;
         var imagesOn = LocalVariantVisionEnabled.Equals("Enabled", StringComparison.OrdinalIgnoreCase);
         var projectorGiB = imagesOn ? LocalVramFootprintEstimate.ProjectorGiB : 0d;
         var settings = BuildLocalVariantSettingsObject();
         var estimatedGiB = LocalVramFootprintEstimate.EstimateGiB(settings, fileGiB, imagesOn);
-        var advice = CurrentLocalHardwareAdvice();
+        // Re-estimate with the VRAM-capped KV when YaRN extends the context.
+        if (LocalVariantExtendContextIntoRam && nativeCtxForKv > 0 && configuredContextTokens > nativeCtxForKv)
+        {
+            var fullKvGiB = configuredContextTokens * kvBytesPerToken / 1024d / 1024d / 1024d;
+            var overflowGiB = fullKvGiB - kvGiB;
+            estimatedGiB = Math.Max(0.2d, estimatedGiB - overflowGiB);
+        }
         var contextDenom = Math.Max(4096d, advice.ContextSafeDefault);
         var contextPressure = Math.Clamp(configuredContextTokens / contextDenom, 0.125d, 4d);
         var flashFactor = LocalVariantFlashAttention == "Enabled" ? 1.12d : LocalVariantFlashAttention == "Disabled" ? 0.88d : 1d;
@@ -15238,7 +15873,24 @@ public partial class MainViewModel : ViewModelBase
                 reclaimableGiB: currentlyLoaded ? 0 : EstimateReclaimableManagedLocalVramGiB());
         }
 
-        LocalVariantFootprintText = $"Estimated VRAM  {estimatedGiB:F1} GiB  |  weights {weightsGiB:F1} GiB  +  KV {kvGiB:F1} GiB  +  runtime {runtimeGiB:F1} GiB{(projectorGiB > 0 ? $"  +  mmproj {projectorGiB:F1} GiB" : string.Empty)}  |  {configuredContextTokens:N0} configured tokens{measuredSuffix}";
+        var nativeCtx = advice.ModelMaxCtx;
+        var yarnSuffix = string.Empty;
+        if (LocalVariantExtendContextIntoRam && nativeCtx > 0 && configuredContextTokens > nativeCtx)
+        {
+            // Estimate the RAM overflow: the portion of the context above the VRAM-resident
+            // window (the native-quality first-priority window) is what spills to ordinary
+            // memory. Use the effective KV bytes per token (adjusted for hybrid-KV and Flash Attention).
+            var effectiveKvBytes = ComputeEffectiveKvBytesPerToken();
+            var vramWindow = Math.Min(advice.ContextPriorityFirst > 0 ? advice.ContextPriorityFirst : nativeCtx, (int)configuredContextTokens);
+            var overflowTokens = Math.Max(0, (int)configuredContextTokens - vramWindow);
+            var overflowGiB = overflowTokens * effectiveKvBytes / 1024d / 1024d / 1024d;
+            yarnSuffix = $"  |  native window {nativeCtx:N0} (YaRN extends to {configuredContextTokens:N0}, ≈{overflowGiB:0.#} GiB overflow in RAM)";
+        }
+        else if (nativeCtx > 0)
+        {
+            yarnSuffix = $"  |  native window {nativeCtx:N0}";
+        }
+        LocalVariantFootprintText = $"Estimated VRAM  {estimatedGiB:F1} GiB  |  weights {weightsGiB:F1} GiB  +  KV {kvGiB:F1} GiB  +  runtime {runtimeGiB:F1} GiB{(projectorGiB > 0 ? $"  +  mmproj {projectorGiB:F1} GiB" : string.Empty)}  |  {configuredContextTokens:N0} configured tokens{yarnSuffix}{measuredSuffix}";
         var liveVramSuffix = string.Empty;
         if (LocalGpuVramSample.TryRead(out _, out sampledTotalGiB, out sampledFreeGiB))
         {
@@ -15926,6 +16578,11 @@ public partial class MainViewModel : ViewModelBase
         settings["LocalSpecType"] = FluxMuxRuntimeService.NormalizeLlamaSpecType(LocalVariantSpecType);
         settings["LocalCacheReuse"] = LocalVariantCacheReuse;
         settings["LocalCacheRam"] = LocalVariantCacheRam;
+        settings["LocalRopeScaling"] = LocalVariantRopeScaling;
+        settings["LocalRopeScale"] = LocalVariantRopeScale;
+        settings["LocalExtendContextIntoRam"] = LocalVariantExtendContextIntoRam;
+        settings["LocalUseYarn"] = LocalVariantUseYarn;
+        settings["LocalYarnMaxContext"] = LocalVariantYarnMaxContext;
         settings["LocalFit"] = LocalVariantFit;
         settings["LocalSwaFull"] = LocalVariantSwaFull;
         settings["LocalReasoning"] = LocalVariantReasoning;
@@ -16498,6 +17155,11 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantMultiUserMode = CoerceOnOff(settings["LocalMultiUserMode"]?.ToString(), "Disabled");
         LocalVariantUnbanTokensMode = CoerceOnOff(settings["LocalUnbanTokensMode"]?.ToString(), LocalVariantChatTemplate.Equals("qwen", StringComparison.OrdinalIgnoreCase) ? "Enabled" : "Disabled");
         LocalVariantAutoCompressEnabled = ParseBool(settings["AutoCompressEnabled"]?.ToString() ?? string.Empty, true);
+        LocalAutoCompactEnabled = ParseBool(settings["LocalAutoCompactEnabled"]?.ToString() ?? string.Empty, true);
+        LocalAutoCompactTriggerPercent = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactTriggerPercent"]?.ToString() ?? string.Empty, 80d), 60m, 95m);
+        LocalAutoCompactKeepTurns = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactKeepTurns"]?.ToString() ?? string.Empty, 6d), 4m, 12m);
+        LocalAutoCompactKeepToolResults = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactKeepToolResults"]?.ToString() ?? string.Empty, 8d), 4m, 16m);
+        LocalAutoCompactPinUserChars = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactPinUserChars"]?.ToString() ?? string.Empty, 2000d), 500m, 5000m);
         LocalVariantFit = CoerceOnOff(settings["LocalFit"]?.ToString(), advice.PreferFitEnabled ? "Enabled" : "Disabled");
         LocalVariantFit = LocalOnOffOptions.FirstOrDefault(option =>
             option.Equals(LocalVariantFit, StringComparison.OrdinalIgnoreCase)) ?? LocalVariantFit;
@@ -16519,6 +17181,11 @@ public partial class MainViewModel : ViewModelBase
             specFallback);
         LocalVariantCacheReuse = CoerceLocalOption(settings["LocalCacheReuse"]?.ToString(), LocalCacheReuseOptions, "256");
         LocalVariantCacheRam = CoerceLocalOption(NormalizeCacheRamOption(settings["LocalCacheRam"]?.ToString() ?? string.Empty), LocalCacheRamOptions, advice.CacheRam);
+        LocalVariantRopeScaling = CoerceLocalOption(settings["LocalRopeScaling"]?.ToString(), LocalRopeScalingOptions, "Auto");
+        LocalVariantRopeScale = CoerceLocalOption(settings["LocalRopeScale"]?.ToString(), LocalRopeScaleOptions, "Auto");
+        LocalVariantExtendContextIntoRam = ParseBool(settings["LocalExtendContextIntoRam"]?.ToString() ?? string.Empty, false);
+        LocalVariantUseYarn = ParseBool(settings["LocalUseYarn"]?.ToString() ?? string.Empty, true);
+        LocalVariantYarnMaxContext = CoerceLocalOption(settings["LocalYarnMaxContext"]?.ToString(), LocalYarnMaxContextOptions, "Auto");
         LocalVariantSwaFull = CoerceOnOff(settings["LocalSwaFull"]?.ToString(), advice.EnableSwaFull ? "Enabled" : "Disabled");
         LocalVariantReasoning = CoerceLocalOption(settings["LocalReasoning"]?.ToString(), LocalReasoningOptions, "Off");
         LocalVariantChatParser = CoerceLocalOption(settings["LocalChatParser"]?.ToString(), LocalChatParserOptions, "Jinja");
@@ -16597,9 +17264,10 @@ public partial class MainViewModel : ViewModelBase
 
             if (!LocalExperimentalHardwareTuneEnabled)
             {
+                var yarnNote = BuildLocalAutoTuneYarnNote();
                 LocalQuickAutoTuneInfoText =
-                    "AutoTune filled leftover GPU and context room from your priority list. Images, max tokens, Context, temperature, reasoning, and chat format you already set were left alone. **Save profile** to keep the new launch settings, or **Revert changes** to discard.";
-                ReportTuneProgress("AutoTune finished the settings pass. **Save profile** to keep the launch settings, or **Revert changes** to discard. No speed test ran because the experimental box is unticked.");
+                    "AutoTune filled leftover GPU and context room from your priority list. Images, max tokens, Context, temperature, reasoning, and chat format you already set were left alone." + yarnNote + " **Save profile** to keep the new launch settings, or **Revert changes** to discard.";
+                ReportTuneProgress("AutoTune finished the settings pass." + yarnNote + " **Save profile** to keep the launch settings, or **Revert changes** to discard. No speed test ran because the experimental box is unticked.");
                 return;
             }
 
@@ -16882,6 +17550,11 @@ public partial class MainViewModel : ViewModelBase
             ["LocalSpecType"] = LocalVariantSpecType,
             ["LocalCacheReuse"] = LocalVariantCacheReuse,
             ["LocalCacheRam"] = LocalVariantCacheRam,
+            ["LocalRopeScaling"] = LocalVariantRopeScaling,
+            ["LocalRopeScale"] = LocalVariantRopeScale,
+            ["LocalExtendContextIntoRam"] = LocalVariantExtendContextIntoRam.ToString(),
+            ["LocalUseYarn"] = LocalVariantUseYarn.ToString(),
+            ["LocalYarnMaxContext"] = LocalVariantYarnMaxContext,
             ["LocalFit"] = LocalVariantFit,
             ["LocalSwaFull"] = LocalVariantSwaFull,
             ["LocalReasoning"] = LocalVariantReasoning,
@@ -17456,7 +18129,38 @@ public partial class MainViewModel : ViewModelBase
             DefaultLocalThreadCount(),
             DefaultLocalBatchThreadCount(),
             LocalVariantMaxTokens,
-            ((int)LocalVariantContext).ToString(CultureInfo.InvariantCulture));
+            ((int)LocalVariantContext).ToString(CultureInfo.InvariantCulture),
+            LocalVariantExtendContextIntoRam,
+            LocalVariantYarnMaxContext,
+            ComputeEffectiveKvBytesPerToken(),
+            LocalKvCacheWizardChoice.Equals("Auto", StringComparison.OrdinalIgnoreCase) ? null : LocalKvCacheWizardChoice,
+            LocalVariantUseYarn);
+    }
+
+    /// <summary>
+    /// Computes the effective KV cache bytes per token for the current profile, adjusted for
+    /// hybrid-KV (sliding-window + full attention) and Flash Attention. Used to estimate how
+    /// many tokens of KV fit in a given amount of RAM for YaRN extension.
+    /// </summary>
+    private long ComputeEffectiveKvBytesPerToken()
+    {
+        var baseBytes = ResolveKvBytesPerToken(LocalVariantKvCacheTypeK, LocalVariantKvCacheTypeV);
+        var advice = CurrentLocalHardwareAdvice();
+
+        // Hybrid-KV models (e.g. Qwen3.8) use ~38% of the full-attention KV per token.
+        if (advice.HybridKv)
+        {
+            baseBytes *= 0.38;
+        }
+
+        // Flash Attention reduces resident KV pressure (pages are evicted/recomputed).
+        // A conservative 0.75 factor reflects the typical reduction in resident KV.
+        if (LocalVariantFlashAttention.Equals("Enabled", StringComparison.OrdinalIgnoreCase))
+        {
+            baseBytes *= 0.75;
+        }
+
+        return Math.Max(1L, (long)baseBytes);
     }
 
     private Dictionary<string, string> ReconcileLocalSettingsWithPriorityOrder(
@@ -17670,6 +18374,11 @@ public partial class MainViewModel : ViewModelBase
             ["LocalSpecType"] = LocalVariantSpecType,
             ["LocalCacheReuse"] = LocalVariantCacheReuse,
             ["LocalCacheRam"] = LocalVariantCacheRam,
+            ["LocalRopeScaling"] = LocalVariantRopeScaling,
+            ["LocalRopeScale"] = LocalVariantRopeScale,
+            ["LocalExtendContextIntoRam"] = LocalVariantExtendContextIntoRam.ToString(),
+            ["LocalUseYarn"] = LocalVariantUseYarn.ToString(),
+            ["LocalYarnMaxContext"] = LocalVariantYarnMaxContext,
             ["LocalFit"] = LocalVariantFit,
             ["LocalSwaFull"] = LocalVariantSwaFull,
             ["LocalReasoning"] = LocalVariantReasoning,
@@ -17778,6 +18487,11 @@ public partial class MainViewModel : ViewModelBase
             InferSpecTypeFromProfile());
         LocalVariantCacheReuse = settings.GetValueOrDefault("LocalCacheReuse", LocalVariantCacheReuse);
         LocalVariantCacheRam = settings.GetValueOrDefault("LocalCacheRam", LocalVariantCacheRam);
+        LocalVariantRopeScaling = settings.GetValueOrDefault("LocalRopeScaling", LocalVariantRopeScaling);
+        LocalVariantRopeScale = settings.GetValueOrDefault("LocalRopeScale", LocalVariantRopeScale);
+        LocalVariantExtendContextIntoRam = ParseBool(settings.GetValueOrDefault("LocalExtendContextIntoRam", LocalVariantExtendContextIntoRam.ToString()), LocalVariantExtendContextIntoRam);
+        LocalVariantUseYarn = ParseBool(settings.GetValueOrDefault("LocalUseYarn", LocalVariantUseYarn.ToString()), LocalVariantUseYarn);
+        LocalVariantYarnMaxContext = settings.GetValueOrDefault("LocalYarnMaxContext", LocalVariantYarnMaxContext);
         LocalVariantFit = settings.GetValueOrDefault("LocalFit", LocalVariantFit);
         LocalVariantSwaFull = settings.GetValueOrDefault("LocalSwaFull", LocalVariantSwaFull);
         LocalVariantReasoning = settings.GetValueOrDefault("LocalReasoning", LocalVariantReasoning);
@@ -17789,6 +18503,191 @@ public partial class MainViewModel : ViewModelBase
     private void UpdateLocalPrioritySummaryTexts()
     {
         LocalVariantSettingsJson = SerializeJsonObject(BuildLocalVariantSettingsObject());
+        UpdateLocalKvCacheWizardInfo();
+    }
+
+    /// <summary>
+    /// Builds a short note for the AutoTune result text describing the YaRN extension state, so the
+    /// wizard's effect on context is visible. Empty when the extension is off or not active.
+    /// </summary>
+    private string BuildLocalAutoTuneYarnNote()
+    {
+        var advice = CurrentLocalHardwareAdvice();
+        if (!LocalVariantExtendContextIntoRam || advice.ModelMaxCtx <= 0)
+        {
+            return string.Empty;
+        }
+
+        int userTarget = LocalPrioritySettingsCalculator.YarnTargetFromOption(LocalVariantYarnMaxContext, advice.ModelMaxCtx);
+        int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
+        int effectiveContext = Math.Max(advice.ModelMaxCtx, Math.Min(userTarget, Math.Min(ramBounded, 1048576)));
+        if (effectiveContext <= advice.ModelMaxCtx)
+        {
+            return string.Empty;
+        }
+
+        var yarnState = LocalVariantUseYarn ? "with YaRN rope scaling" : "without YaRN (native rope only)";
+        return $" Context was extended from the native {advice.ModelMaxCtx:N0} to {effectiveContext:N0} tokens {yarnState}.";
+    }
+
+    private void UpdateLocalKvCacheWizardInfo()
+    {
+        var advice = CurrentLocalHardwareAdvice();
+        var extendIntoRam = LocalVariantExtendContextIntoRam;
+        var context = (int)LocalVariantContext;
+
+        // Keep the wizard's hardware-bounded "how far to extend" options in sync with the
+        // current profile/hardware (RAM, model native window, KV type).
+        RefreshYarnMaxContextWizardOptions();
+
+        // Only show the KV cache choice when extending context into RAM and the target is high.
+        int effectiveContext = context;
+        if (extendIntoRam && advice.ModelMaxCtx > 0)
+        {
+            int userTarget = LocalPrioritySettingsCalculator.YarnTargetFromOption(LocalVariantYarnMaxContext, advice.ModelMaxCtx);
+            int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
+            int yarnCeiling = 1048576;
+            effectiveContext = Math.Max(context, Math.Min(userTarget, Math.Min(ramBounded, yarnCeiling)));
+        }
+
+        // Show the choice when the effective context exceeds 256K (where KV size starts to matter).
+        ShowLocalKvCacheWizardChoice = extendIntoRam && effectiveContext > 256 * 1024;
+        if (!ShowLocalKvCacheWizardChoice)
+        {
+            LocalKvCacheWizardInfoText = string.Empty;
+            LocalKvCacheWizardOptions.Clear();
+            return;
+        }
+
+        double totalRam = advice.TotalRamGb;
+        double gpuGb = advice.GpuTotalGb;
+        double modelGb = advice.ModelFileGb;
+        double reserve = Math.Max(16.0, totalRam * 0.25);
+        double availableRam = Math.Max(0.0, totalRam - reserve);
+        double availableGpu = Math.Max(0.0, gpuGb - modelGb - 2.0); // 2 GB for CUDA overhead
+        double totalAvailable = availableGpu + availableRam;
+
+        // Build the options list: only include types that physically fit AND are usable speed-wise.
+        // A KV cache that's mostly in system RAM gives minutes-per-token, which is not a setting
+        // a user should have to consciously choose. Exclude those options entirely.
+        string[] allTypes = ["q8_0", "q6_k", "q5_1", "q4_1"];
+        var fitting = new List<string>();
+        foreach (var type in allTypes)
+        {
+            double typeGb = LocalPrioritySettingsCalculator.EstimateKvCacheGb(effectiveContext, type);
+            if (typeGb > totalAvailable)
+            {
+                continue; // won't fit at all
+            }
+
+            // Speed check: if more than 50% of the KV cache lives in system RAM,
+            // token generation will be dominated by PCIe transfers. Exclude it.
+            double gpuPortion = Math.Min(typeGb, availableGpu);
+            double ramPortion = typeGb - gpuPortion;
+            if (typeGb > 0 && ramPortion / typeGb > 0.5)
+            {
+                continue; // mostly in RAM — unusably slow
+            }
+
+            fitting.Add(type);
+        }
+
+        // Rebuild the options list.
+        LocalKvCacheWizardOptions.Clear();
+        if (fitting.Count == 0)
+        {
+            // Nothing is both fast enough and fits. Show the coarsest option so the user
+            // can see why (won't run, or too slow) and adjust the context target.
+            LocalKvCacheWizardOptions.Add("q4_1");
+            LocalKvCacheWizardChoice = "q4_1";
+        }
+        else
+        {
+            LocalKvCacheWizardOptions.Add("Auto");
+            foreach (var type in fitting)
+            {
+                LocalKvCacheWizardOptions.Add(type);
+            }
+
+            // If the current selection is no longer in the list, fall back to Auto.
+            if (!LocalKvCacheWizardOptions.Contains(LocalKvCacheWizardChoice, StringComparer.OrdinalIgnoreCase))
+            {
+                LocalKvCacheWizardChoice = "Auto";
+            }
+        }
+
+        var choice = LocalKvCacheWizardChoice;
+        if (string.IsNullOrWhiteSpace(choice) || choice.Equals("Auto", StringComparison.OrdinalIgnoreCase))
+        {
+            choice = fitting.Count > 0 ? fitting[0] : "q4_1";
+        }
+
+        double kvGb = LocalPrioritySettingsCalculator.EstimateKvCacheGb(effectiveContext, choice);
+        double contextGb = kvGb;
+
+        double gpuFits = Math.Max(0.0, availableGpu);
+        double ramSpill = Math.Max(0.0, contextGb - gpuFits);
+        bool fitsOnGpu = contextGb <= gpuFits;
+        bool fitsInSystem = contextGb <= totalAvailable;
+
+        string fitLine;
+        string perfLine;
+        string fidelityLine = choice.ToLowerInvariant() switch
+        {
+            "q8_0" => "Best answer quality.",
+            "q6_k" => "Slight quality loss vs best.",
+            "q5_1" => "Moderate quality loss vs best.",
+            "q4_1" => "Noticeable quality loss — the model may lose track of details in very long chats.",
+            _ => string.Empty
+        };
+
+        if (fitsOnGpu)
+        {
+            fitLine = $"Fits on your {gpuGb:F0} GB GPU with room to spare.";
+            perfLine = "Fast: the whole context lives on the GPU.";
+        }
+        else if (fitsInSystem)
+        {
+            double ramFraction = contextGb > 0 ? ramSpill / contextGb : 0;
+            if (ramFraction > 0.5)
+            {
+                // This option was excluded from the list, but the user somehow selected it
+                // (e.g. it was selected before they changed the context target).
+                fitLine = $"~{gpuFits:F0} GB stays on the GPU, ~{ramSpill:F0} GB spills to system RAM.";
+                perfLine = "Too slow: most of the context lives in system RAM. Lower the context target or use a smaller model.";
+                fidelityLine = string.Empty;
+            }
+            else
+            {
+                fitLine = $"~{gpuFits:F0} GB stays on the GPU, ~{ramSpill:F0} GB spills to system RAM.";
+                perfLine = "Moderate speed: most of the context is on the GPU, some in RAM.";
+            }
+        }
+        else
+        {
+            fitLine = $"Needs ~{contextGb:F0} GB total, but your system has ~{totalAvailable:F0} GB available.";
+            perfLine = "Will not run. Pick a lower context target or a smaller model.";
+            fidelityLine = string.Empty;
+        }
+
+        string warning = fitsInSystem && ramSpill > availableRam * 0.8
+            ? " Close other apps to free up RAM."
+            : string.Empty;
+
+        // "Effective useful ceiling": warn when the target is past the point where the extension
+        // stops paying for itself (RoPE extrapolation past ~4x native, or the best fitting KV type
+        // is coarser than q8_0). This is advisory — the RAM/1M ceilings still allow going further.
+        string usefulCeilingWarning = string.Empty;
+        if (advice.ModelMaxCtx > 0 && effectiveContext > advice.ModelMaxCtx)
+        {
+            int usefulCeiling = LocalPrioritySettingsCalculator.EffectiveUsefulCeiling(advice.ModelMaxCtx, choice);
+            if (usefulCeiling > 0 && effectiveContext > usefulCeiling)
+            {
+                usefulCeilingWarning = $" Note: past ~{usefulCeiling:N0} tokens the extension is increasingly 'remembers the topic, loses the details' — RoPE is extrapolated and/or KV is quantised below q8_0.";
+            }
+        }
+
+        LocalKvCacheWizardInfoText = fitLine + " " + perfLine + (fidelityLine.Length > 0 ? " " + fidelityLine : "") + warning + usefulCeilingWarning;
     }
 
     private JsonObject BuildLocalVariantSettingsObject()
@@ -17812,12 +18711,21 @@ public partial class MainViewModel : ViewModelBase
             ["LocalMultiUserMode"] = LocalVariantMultiUserMode,
             ["LocalUnbanTokensMode"] = LocalVariantUnbanTokensMode,
             ["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled,
+            ["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled,
+            ["LocalAutoCompactTriggerPercent"] = ((int)LocalAutoCompactTriggerPercent).ToString(),
+            ["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString(),
+            ["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString(),
+            ["LocalAutoCompactPinUserChars"] = ((int)LocalAutoCompactPinUserChars).ToString(),
             ["OverrideMaxTokens"] = LocalVariantMaxTokens,
             ["LocalBatchSize"] = LocalVariantBatchSize,
             ["LocalUbatchSize"] = LocalVariantUbatchSize,
             ["LocalSpecType"] = LocalVariantSpecType,
             ["LocalCacheReuse"] = LocalVariantCacheReuse,
             ["LocalCacheRam"] = LocalVariantCacheRam,
+            ["LocalRopeScaling"] = LocalVariantRopeScaling,
+            ["LocalRopeScale"] = LocalVariantRopeScale,
+            ["LocalExtendContextIntoRam"] = LocalVariantExtendContextIntoRam,
+            ["LocalYarnMaxContext"] = LocalVariantYarnMaxContext,
             ["LocalFit"] = LocalVariantFit,
             ["LocalSwaFull"] = LocalVariantSwaFull,
             ["LocalReasoning"] = LocalVariantReasoning,

@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace FluxMux.Avalonia.Services;
+namespace FluxMux.Updates.Core;
 
 public sealed class UpdateCheckResult
 {

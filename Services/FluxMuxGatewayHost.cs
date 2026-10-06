@@ -493,6 +493,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         });
         var compactOn = ParseBool(Str(LoadLocalReload(), "forward_compact"));
         var compactApplied = TryApplyForwardCompact(payload, state, compactOn);
+        OfferSpillCompactIfNeeded(state, payload, compactApplied);
         var reloadOffered = false;
         var decision = FluxMuxGatewayRouting.DecideRoute(state, payload, forceRoute);
         var promptChars = 0;
@@ -1848,6 +1849,45 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn)
     {
         var rules = CurrentRules();
+
+        // Wizard-controlled auto-compaction: independent of Port rules.
+        // Fires when the prompt exceeds the trigger threshold (default 80% of native context).
+        if (rules.AutoCompactEnabled)
+        {
+            var autoContext = ParseInt(Str(state, "local_context"), 0);
+            if (autoContext > 0)
+            {
+                var autoPromptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+                var triggerThreshold = (int)(autoContext * rules.AutoCompactTriggerPercent);
+                if (autoPromptTokens >= triggerThreshold)
+                {
+                    var autoRules = rules with
+                    {
+                        CompactKeepTurns = rules.AutoCompactKeepTurns,
+                        CompactToolKeepTurns = rules.AutoCompactKeepToolResults,
+                        CompactPreservedUserChars = rules.AutoCompactPinUserChars
+                    };
+                    if (LocalHistoryCompaction.TryCompactPayload(payload, autoRules, force: true))
+                    {
+                        Log("auto-compact: prompt " + autoPromptTokens.ToString(CultureInfo.InvariantCulture)
+                            + " tokens exceeded trigger " + triggerThreshold.ToString(CultureInfo.InvariantCulture)
+                            + " — shortened older turns before routing");
+                        var autoInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
+                        if (autoInserted > 0)
+                        {
+                            Log("local chat: inserted a user turn so the Qwen template has a query");
+                        }
+                        return true;
+                    }
+
+                    Log("auto-compact: prompt " + autoPromptTokens.ToString(CultureInfo.InvariantCulture)
+                        + " tokens exceeded trigger " + triggerThreshold.ToString(CultureInfo.InvariantCulture)
+                        + " but older turns could not be shortened (too few turns, or one over-full turn)");
+                }
+            }
+        }
+
+        // Port-rules compaction: the original path, gated by CompactEnabled.
         if (!rules.CompactEnabled)
         {
             return false;
@@ -1856,7 +1896,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         var hotContext = ParseInt(Str(state, "local_context"), 0);
         var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
         var promptExceeds = LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, rules.CompactHeadroom);
-        var filling = FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload);
+        var filling = FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload);
         if (!LocalHistoryCompaction.ShouldForwardCompact(
                 compactOn,
                 promptTokens,
@@ -1882,6 +1922,90 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// When a YaRN-extended local session's live prompt exceeds the VRAM-resident context
+    /// (i.e. it is spilling into ordinary memory), surface the existing reload banner in
+    /// "compact in place" mode so the user can pull the working set back onto the graphics
+    /// card. Manual only: it never auto-compacts; it just offers.
+    /// </summary>
+    private void OfferSpillCompactIfNeeded(JsonObject state, JsonObject payload, bool compactAlreadyApplied)
+    {
+        if (compactAlreadyApplied)
+        {
+            return; // already compacted this turn
+        }
+
+        if (!LocalTargetReady(state))
+        {
+            return;
+        }
+
+        // Only relevant for profiles that opted into YaRN context extension (stamped at launch).
+        if (!ParseBool(Str(state, "local_extend_context_into_ram")))
+        {
+            return;
+        }
+
+        var hotContext = ParseInt(Str(state, "local_context"), 0);
+        if (hotContext <= 0)
+        {
+            return;
+        }
+
+        // The VRAM-resident context is stamped at launch. When the live prompt exceeds it,
+        // the YaRN overflow is running in ordinary memory.
+        var vramContext = ParseInt(Str(state, "local_vram_context"), 0);
+        if (vramContext <= 0 || vramContext >= hotContext)
+        {
+            return; // not actually extended, or no VRAM boundary to talk about
+        }
+
+        var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        if (promptTokens <= vramContext)
+        {
+            return; // still fits on the graphics card
+        }
+
+        var existing = LoadLocalReload();
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (ParseLong(Str(existing, "suppress_until"), 0) > now)
+        {
+            return;
+        }
+
+        var compactAlreadyOn = ParseBool(Str(existing, "forward_compact"));
+        if (Str(existing, "status").Equals("pending", StringComparison.OrdinalIgnoreCase) && compactAlreadyOn)
+        {
+            return; // already asking
+        }
+
+        var reason = "This conversation is longer than the graphics-card context, so the overflow is running in ordinary memory (slower than the card)."
+            + " Compact older turns now to pull the working set back onto the graphics card? This shortens older messages; the full chat is kept in this Client app.";
+
+        SaveLocalReload(new JsonObject
+        {
+            ["status"] = "pending",
+            ["reason"] = reason,
+            ["model"] = string.Empty,
+            ["variant"] = string.Empty,
+            ["displayName"] = string.Empty,
+            ["hotModel"] = Str(state, "local_preferred_model"),
+            ["hotVariant"] = Str(state, "local_variant"),
+            ["hotContext"] = hotContext,
+            ["neededContext"] = promptTokens,
+            ["nearLimit"] = true,
+            ["destinationTight"] = false,
+            ["compactRecommended"] = true,
+            ["betterChance"] = false,
+            ["forward_compact"] = compactAlreadyOn,
+            ["spillCompact"] = true,
+            ["allow_until"] = 0,
+            ["suppress_until"] = 0,
+            ["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
+        });
+        Log("local spill compact recommend pending: prompt=" + promptTokens + " vram=" + vramContext + " window=" + hotContext);
     }
 
     private static int EstimateNeededContext(JsonObject payload)
@@ -2898,7 +3022,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     PatchPortRulesTelemetry(prev => prev with
                     {
                         HasLocalTurn = true,
-                        QuietSeconds = Math.Max(0, quiet)
+                        QuietSeconds = Math.Max(0, quiet),
+                        HangQuietSeconds = clock.FirstByteDeadlineSeconds
                     });
                 }
 

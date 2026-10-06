@@ -469,6 +469,94 @@ public sealed class DeepSeekHarnessSetupTests
     }
 
     [Fact]
+    public void MergeIntoSettingsFile_writes_atomically_and_keeps_a_prev_backup_on_update()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fluxmux-dsh-setup-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "settings.yaml");
+        try
+        {
+            // First merge creates the file (no previous to back up yet).
+            var created = DeepSeekHarnessSetup.MergeIntoSettingsFile(
+                DeepSeekHarnessSetupOptions.Create(5001, 65536, 8192, imagesOn: false), path);
+            Assert.True(created.Success);
+            Assert.True(created.CreatedNewFile);
+            Assert.False(File.Exists(path + ".prev"));
+            Assert.False(File.Exists(path + ".bak"));
+
+            // Second merge updates the file and must keep a last-known-good .prev copy
+            // of the previous good content, plus the .bak used in the user-facing message.
+            var updated = DeepSeekHarnessSetup.MergeIntoSettingsFile(
+                DeepSeekHarnessSetupOptions.Create(5002, 131072, 4096, imagesOn: true), path);
+            Assert.True(updated.Success);
+            Assert.False(updated.CreatedNewFile);
+            Assert.True(updated.BackedUpExistingFile);
+
+            Assert.True(File.Exists(path + ".prev"));
+            Assert.True(File.Exists(path + ".bak"));
+
+            // The .prev holds the previous (port 5001) content; the live file holds the new one.
+            var prevText = File.ReadAllText(path + ".prev");
+            var liveText = File.ReadAllText(path);
+            Assert.Contains("http://127.0.0.1:5001/v1", prevText, StringComparison.Ordinal);
+            Assert.Contains("http://127.0.0.1:5002/v1", liveText, StringComparison.Ordinal);
+            Assert.DoesNotContain("http://127.0.0.1:5001/v1", liveText, StringComparison.Ordinal);
+
+            // Atomic write must not leave stray temp files behind.
+            var strays = Directory.GetFiles(dir, "settings.yaml.tmp-*");
+            Assert.Empty(strays);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Fact]
+    public void MergeIntoSettingsFile_does_not_throw_when_settings_file_is_locked()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fluxmux-dsh-setup-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "settings.yaml");
+        File.WriteAllText(path, "existing: true\n");
+        var backup = File.ReadAllText(path);
+        try
+        {
+            // Hold the file open with a write lock, like the running harness / an editor would.
+            using (var locker = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                // The merge must survive a locked target: the atomic write retries, gives up
+                // quietly, and never throws.
+                var ex = Record.Exception(() => DeepSeekHarnessSetup.MergeIntoSettingsFile(
+                    DeepSeekHarnessSetupOptions.Create(5001, 65536, 8192, imagesOn: false), path));
+                Assert.Null(ex);
+            }
+
+            // After the lock is released: no stray temp files, and the file is still the
+            // original (the locked write was abandoned, not half-applied).
+            var strays = Directory.GetFiles(dir, "settings.yaml.tmp-*");
+            Assert.Empty(strays);
+            Assert.Equal(backup, File.ReadAllText(path));
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    [Fact]
     public void BuildModelBaseUrl_formats_openai_path()
     {
         Assert.Equal("http://127.0.0.1:5001/v1", DeepSeekHarnessSetup.BuildModelBaseUrl(5001));

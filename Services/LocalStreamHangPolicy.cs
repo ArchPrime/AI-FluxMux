@@ -183,6 +183,8 @@ public sealed class LocalStreamHangClock
 
     public TimeSpan FirstByteDeadline { get; set; }
 
+    public int FirstByteDeadlineSeconds => (int)FirstByteDeadline.TotalSeconds;
+
     public TimeSpan StallDeadline { get; set; }
 
     public string LastAbortReason { get; set; } = string.Empty;

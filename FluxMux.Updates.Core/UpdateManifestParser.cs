@@ -1,7 +1,7 @@
 using System;
 using System.Text.Json.Nodes;
 
-namespace FluxMux.Avalonia.Services;
+namespace FluxMux.Updates.Core;
 
 public sealed class UpdateManifest
 {

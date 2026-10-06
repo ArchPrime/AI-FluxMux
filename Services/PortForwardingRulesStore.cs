@@ -92,6 +92,7 @@ public sealed class PortForwardingRulesStore
             MinResultCharsToClear = ReadInt(root, "minResultCharsToClear", defaults.MinResultCharsToClear),
             MaxForwardedImages = ReadInt(root, "maxForwardedImages", defaults.MaxForwardedImages),
             FirstByteSeconds = ReadInt(root, "firstByteSeconds", defaults.FirstByteSeconds),
+            HangQuietSeconds = ReadInt(root, "hangQuietSeconds", defaults.HangQuietSeconds),
             ThinkTokensPerSecond = ReadInt(root, "thinkTokensPerSecond", defaults.ThinkTokensPerSecond),
             MaxThinkFirstByteSeconds = ReadInt(root, "maxThinkFirstByteSeconds", defaults.MaxThinkFirstByteSeconds),
             StallSeconds = ReadInt(root, "stallSeconds", defaults.StallSeconds),
@@ -101,7 +102,12 @@ public sealed class PortForwardingRulesStore
             LoadingRetryDelaySeconds = ReadInt(root, "loadingRetryDelaySeconds", defaults.LoadingRetryDelaySeconds),
             SkipPrefixCacheAfterCompact = ReadBool(root, "skipPrefixCacheAfterCompact", defaults.SkipPrefixCacheAfterCompact),
             ClientMaxTokensMode = ReadString(root, "clientMaxTokensMode", defaults.ClientMaxTokensMode),
-            StopHygieneMode = ReadString(root, "stopHygieneMode", defaults.StopHygieneMode)
+            StopHygieneMode = ReadString(root, "stopHygieneMode", defaults.StopHygieneMode),
+            AutoCompactEnabled = ReadBool(root, "autoCompactEnabled", defaults.AutoCompactEnabled),
+            AutoCompactTriggerPercent = ReadDouble(root, "autoCompactTriggerPercent", defaults.AutoCompactTriggerPercent),
+            AutoCompactKeepTurns = ReadInt(root, "autoCompactKeepTurns", defaults.AutoCompactKeepTurns),
+            AutoCompactKeepToolResults = ReadInt(root, "autoCompactKeepToolResults", defaults.AutoCompactKeepToolResults),
+            AutoCompactPinUserChars = ReadInt(root, "autoCompactPinUserChars", defaults.AutoCompactPinUserChars)
         };
         return ApplyLegacyEnforceStops(root, rules);
     }
@@ -174,6 +180,7 @@ public sealed class PortForwardingRulesStore
             ["minResultCharsToClear"] = clamped.MinResultCharsToClear,
             ["maxForwardedImages"] = clamped.MaxForwardedImages,
             ["firstByteSeconds"] = clamped.FirstByteSeconds,
+            ["hangQuietSeconds"] = clamped.HangQuietSeconds,
             ["thinkTokensPerSecond"] = clamped.ThinkTokensPerSecond,
             ["maxThinkFirstByteSeconds"] = clamped.MaxThinkFirstByteSeconds,
             ["stallSeconds"] = clamped.StallSeconds,
@@ -183,7 +190,12 @@ public sealed class PortForwardingRulesStore
             ["loadingRetryDelaySeconds"] = clamped.LoadingRetryDelaySeconds,
             ["skipPrefixCacheAfterCompact"] = clamped.SkipPrefixCacheAfterCompact,
             ["clientMaxTokensMode"] = clamped.ClientMaxTokensMode,
-            ["stopHygieneMode"] = clamped.StopHygieneMode
+            ["stopHygieneMode"] = clamped.StopHygieneMode,
+            ["autoCompactEnabled"] = clamped.AutoCompactEnabled,
+            ["autoCompactTriggerPercent"] = clamped.AutoCompactTriggerPercent,
+            ["autoCompactKeepTurns"] = clamped.AutoCompactKeepTurns,
+            ["autoCompactKeepToolResults"] = clamped.AutoCompactKeepToolResults,
+            ["autoCompactPinUserChars"] = clamped.AutoCompactPinUserChars
         };
     }
 

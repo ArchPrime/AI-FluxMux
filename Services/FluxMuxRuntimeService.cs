@@ -49,7 +49,8 @@ public sealed record LocalReloadRecommendSnapshot(
     bool CompactRecommended = false,
     bool DestinationTight = false,
     bool ForwardCompactActive = false,
-    bool CloudFailover = false);
+    bool CloudFailover = false,
+    bool SpillCompact = false);
 
 public sealed class FluxMuxRuntimeService
 {
@@ -122,6 +123,18 @@ public sealed class FluxMuxRuntimeService
 		public int ContextSafeDefault { get; init; }
 
 		public int ContextPriorityLower { get; init; }
+
+		/// <summary>The model's native trained context window. YaRN extension may exceed this; native-quality paths never do.</summary>
+		public int ModelMaxCtx { get; init; }
+
+		/// <summary>Total system RAM in GiB. Used to bound YaRN context extension into RAM.</summary>
+		public double TotalRamGb { get; init; }
+
+		/// <summary>KV cache bytes per token (K+V). Used to estimate how many tokens fit in a given amount of RAM.</summary>
+		public long KvBytesPerToken { get; init; }
+
+		/// <summary>True when the model uses hybrid (sliding-window + full) attention, which reduces effective KV per token.</summary>
+		public bool HybridKv { get; init; }
 
 		public string OffloadMode { get; init; } = "CPU only";
 
@@ -345,6 +358,8 @@ public sealed class FluxMuxRuntimeService
 	private string _managedLocalReasoning = "Off";
 	private bool _managedLocalVisionEnabled;
 	private int _managedLocalContext;
+	private int _managedLocalVramContext;
+	private bool _managedLocalExtendContextIntoRam;
 	private int _managedLocalMaxTokens;
 	private string _managedLocalLaunchFingerprint = string.Empty;
 
@@ -1135,7 +1150,8 @@ public sealed class FluxMuxRuntimeService
 				ParseBool(GetString(root, "compactRecommended"), false),
 				ParseBool(GetString(root, "destinationTight"), false),
 				ParseBool(GetString(root, "forward_compact"), false),
-				ParseBool(GetString(root, "cloud_failover"), false));
+				ParseBool(GetString(root, "cloud_failover"), false),
+				ParseBool(GetString(root, "spillCompact"), false));
 		}
 		catch
 		{
@@ -2924,6 +2940,30 @@ public sealed class FluxMuxRuntimeService
 		(bool Enabled, string ProjectorPath, int MaxImageEdge) vision = ResolveProfileVision(profile, modelPath);
 		_managedLocalVisionEnabled = vision.Enabled;
 		_managedLocalContext = GetProfileInt(profile, "OverrideContext", 0);
+		_managedLocalExtendContextIntoRam = ParseBool(GetString(profile, "LocalExtendContextIntoRam"), fallback: false);
+		_managedLocalVramContext = 0;
+		if (_managedLocalExtendContextIntoRam && _managedLocalContext > 0)
+		{
+			// The VRAM-resident context is the native-quality first-priority window (or the
+			// native model window). When the live prompt exceeds this, the YaRN overflow is
+			// running in ordinary memory and the user may want to compact back onto the card.
+			try
+			{
+				var launchAdvice = GetLocalHardwareLaunchAdvice(
+					selectedLocalModel,
+					modelDirectory,
+					_managedLocalVisionEnabled,
+					vision.ProjectorPath,
+					vision.MaxImageEdge);
+				_managedLocalVramContext = launchAdvice.ContextPriorityFirst > 0
+					? Math.Min(launchAdvice.ContextPriorityFirst, _managedLocalContext)
+					: (launchAdvice.ModelMaxCtx > 0 ? Math.Min(launchAdvice.ModelMaxCtx, _managedLocalContext) : 0);
+			}
+			catch
+			{
+				_managedLocalVramContext = 0;
+			}
+		}
 		List<string> args = BuildLocalServerArgs(modelPath, localBackendPort, profile, helpText, effectiveOffload, vision.Enabled, vision.ProjectorPath, vision.MaxImageEdge);
 		_managedLocalMaxTokens = ReadIntArg(args, "-n");
 		List<string> multiGpuArgs = BuildMultiGpuArgs(helpText, effectiveOffload, gpuGuardrail.UseConservativeLocalLaunch, profile);
@@ -5857,6 +5897,12 @@ public sealed class FluxMuxRuntimeService
 		bool hybridKv = isQwen38 || IsHybridLinearAttentionArchitecture(ggufModelShape);
 		int reportedCtx = ((ggufModelShape != null && ggufModelShape.ContextLength > 0) ? ggufModelShape.ContextLength : 0);
 		int modelMaxCtx = LocalVramFootprintEstimate.AdviseModelMaxContext(reportedCtx);
+		// The model's TRUE native trained window (from the GGUF), used for YaRN extension
+		// comparisons. AdviseModelMaxContext caps at the editor max, which would make
+		// "extension" impossible when the native window already equals the editor max.
+		int nativeTrainedCtx = reportedCtx > 0
+			? Math.Min(reportedCtx, DeepSeekHarnessSetup.MaxLocalContextWindow)
+			: modelMaxCtx;
 		double gbPer8k = EstimateKvGigabytesPer8k(ggufModelShape, fileGb, hybridKv);
 		double overheadBaseGb = (nvidia ? Math.Max(0.7, 0.45 + gpuGb * 0.035 + Math.Max(0.0, fileGb) * 0.02) : 0.6);
 		double projectorGb = (visionEnabled ? ResolveVisionProjectorGigabytes(visionProjectorPath, modelPath) : 0.0);
@@ -5918,6 +5964,10 @@ public sealed class FluxMuxRuntimeService
 			ContextPrioritySecond = contextPrioritySecond,
 			ContextSafeDefault = contextSafeDefault,
 			ContextPriorityLower = contextPriorityLower,
+			ModelMaxCtx = nativeTrainedCtx,
+			TotalRamGb = systemRamGb,
+			KvBytesPerToken = 262144, // q8_0 default (256 KB/token); the ViewModel can refine this per profile
+			HybridKv = hybridKv,
 			OffloadMode = offloadMode,
 			OffloadModeAtMaxContext = offloadModeAtMaxContext,
 			GpuLayers = LayersFor(offloadMode),
@@ -6844,6 +6894,11 @@ public sealed class FluxMuxRuntimeService
 				jsonObject["local_vision"] = _managedLocalVisionEnabled ? "Enabled" : "Disabled";
 				jsonObject["local_context"] = _managedLocalContext;
 				jsonObject["local_max_tokens"] = _managedLocalMaxTokens;
+				// YaRN spill-compact support: stamp whether this profile opted into context
+				// extension and the VRAM-resident context, so the gateway host can offer a
+				// manual "compact back onto the graphics card" when the live prompt spills.
+				jsonObject["local_extend_context_into_ram"] = _managedLocalExtendContextIntoRam ? "true" : "false";
+				jsonObject["local_vram_context"] = _managedLocalVramContext;
 				jsonObject["bridge_pid"] = bridgePid;
 				jsonObject["proxy_port"] = proxyPort;
 				jsonObject["details"] = details;

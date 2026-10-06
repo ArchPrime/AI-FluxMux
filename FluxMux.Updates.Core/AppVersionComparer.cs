@@ -2,7 +2,7 @@ using System;
 using System.Globalization;
 using System.Linq;
 
-namespace FluxMux.Avalonia.Services;
+namespace FluxMux.Updates.Core;
 
 public static class FluxMuxAppInfo
 {

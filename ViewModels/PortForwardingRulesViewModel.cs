@@ -125,6 +125,9 @@ public partial class PortForwardingRulesViewModel : ObservableObject
     public partial decimal FirstByteSeconds { get; set; } = LocalStreamHangPolicy.FirstByteSeconds;
 
     [ObservableProperty]
+    public partial decimal HangQuietSeconds { get; set; } = 15;
+
+    [ObservableProperty]
     public partial decimal ThinkTokensPerSecond { get; set; } = LocalStreamHangPolicy.ThinkTokensPerSecond;
 
     [ObservableProperty]
@@ -243,6 +246,7 @@ public partial class PortForwardingRulesViewModel : ObservableObject
             MinResultCharsToClear = (int)MinResultCharsToClear,
             MaxForwardedImages = (int)MaxForwardedImages,
             FirstByteSeconds = (int)FirstByteSeconds,
+            HangQuietSeconds = (int)HangQuietSeconds,
             ThinkTokensPerSecond = (int)ThinkTokensPerSecond,
             MaxThinkFirstByteSeconds = (int)MaxThinkFirstByteSeconds,
             StallSeconds = (int)StallSeconds,
@@ -349,6 +353,7 @@ public partial class PortForwardingRulesViewModel : ObservableObject
         MinResultCharsToClear = live.MinResultCharsToClear;
         MaxForwardedImages = live.MaxForwardedImages;
         FirstByteSeconds = live.FirstByteSeconds;
+        HangQuietSeconds = live.HangQuietSeconds;
         ThinkTokensPerSecond = live.ThinkTokensPerSecond;
         MaxThinkFirstByteSeconds = live.MaxThinkFirstByteSeconds;
         StallSeconds = live.StallSeconds;

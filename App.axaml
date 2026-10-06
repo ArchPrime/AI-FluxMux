@@ -165,5 +165,19 @@
             <Setter Property="MinHeight" Value="32" />
             <Setter Property="Padding" Value="8,0,0,0" />
         </Style>
+        <!-- Tooltips: trigger on the full control bounds (not just the rendered content).
+             Without this, a tooltip only shows when the mouse is over the exact rendered
+             pixels (e.g. the number in a NumericUpDown, not the spinner buttons or padding),
+             which feels unreliable. Avalonia tooltips stay open while hovered (no auto-close
+             timer), so "stay long enough to read" is the default behaviour. -->
+        <Style Selector="ToolTip">
+            <Setter Property="IsHitTestVisible" Value="False" />
+            <Setter Property="Placement" Value="Bottom" />
+            <Setter Property="HorizontalOffset" Value="0" />
+            <Setter Property="VerticalOffset" Value="4" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="CornerRadius" Value="4" />
+            <Setter Property="FontSize" Value="11" />
+        </Style>
     </Application.Styles>
 </Application>

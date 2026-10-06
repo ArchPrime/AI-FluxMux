@@ -351,9 +351,95 @@
                                                                                                MaxWidth="180"
                                                                                                FontSize="11" />
                                                                                 </CheckBox.Content>
-                                                                            </CheckBox>
-                                                                        </StackPanel>
-                                                                        <TextBlock FontSize="11" TextWrapping="Wrap" views:MarkedText.Source="{Binding LocalQuickAutoTuneInfoText}" />
+                                                                             </CheckBox>
+                                                                         </StackPanel>
+                                                                         <TextBlock FontSize="11" TextWrapping="Wrap" views:MarkedText.Source="{Binding LocalQuickAutoTuneInfoText}" />
+                                                                          <StackPanel Spacing="4" Margin="0,4,0,0">
+                                                                              <TextBlock Text="Extend context (YaRN):"
+                                                                                         FontSize="11"
+                                                                                         FontWeight="SemiBold" />
+                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                  <CheckBox IsChecked="{Binding LocalVariantExtendContextIntoRam}"
+                                                                                            VerticalAlignment="Center"
+                                                                                            Content="Extend into RAM"
+                                                                                            ToolTip.Tip="Let the model keep more chat in mind than the graphics card can hold, by borrowing ordinary computer memory. The part that fits in graphics memory stays fast; the overflow is slower. AutoTune sizes the overflow from your free memory. Leave off for the fastest, shortest-context setup." />
+                                                                              </StackPanel>
+                                                                              <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding LocalVariantExtendContextIntoRam}">
+                                                                                  <TextBlock Text="How far:"
+                                                                                             FontSize="11"
+                                                                                             VerticalAlignment="Center"
+                                                                                             Width="70" />
+                                                                                  <ComboBox ItemsSource="{Binding LocalYarnMaxContextWizardOptions}"
+                                                                                            SelectedItem="{Binding LocalVariantYarnMaxContext}"
+                                                                                            Width="130"
+                                                                                            ToolTip.Tip="How far to stretch the context when Extend into RAM is on. Auto picks the largest size your computer memory can hold. The other options are fixed targets that your memory can actually hold. Bigger keeps more of the chat but uses more memory and runs slower." />
+                                                                              </StackPanel>
+                                                                              <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding LocalVariantExtendContextIntoRam}">
+                                                                                  <CheckBox IsChecked="{Binding LocalVariantUseYarn}"
+                                                                                            VerticalAlignment="Center"
+                                                                                            Content="Use YaRN"
+                                                                                            ToolTip.Tip="YaRN is the rope-scaling technique that lets the model reach further back than it was trained for. On: long contexts work well. Off: the overflow still spills to RAM but relies on the model's native positional encoding, so understanding on very long chats can drop. Leave on unless you are tuning on purpose." />
+                                                                              </StackPanel>
+                                                                              <StackPanel Spacing="4" IsVisible="{Binding ShowLocalKvCacheWizardChoice}">
+                                                                                  <TextBlock FontSize="11" FontWeight="SemiBold" Text="KV cache for the extended context" />
+                                                                                  <ComboBox ItemsSource="{Binding LocalKvCacheWizardOptions}" SelectedItem="{Binding LocalKvCacheWizardChoice}" ToolTip.Tip="Precision for the extra context that spills into ordinary memory. Auto picks the best type your hardware can keep fast. Lower precision (q4/q5) fits more context but the model may lose track of details in very long chats." />
+                                                                                  <TextBlock FontSize="11" TextWrapping="Wrap" Text="{Binding LocalKvCacheWizardInfoText}" />
+                                                                              </StackPanel>
+                                                                          </StackPanel>
+                                                                         <StackPanel Spacing="4" Margin="0,4,0,0">
+                                                                             <TextBlock Text="Context management:"
+                                                                                        FontSize="11"
+                                                                                        FontWeight="SemiBold" />
+                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                 <CheckBox IsChecked="{Binding LocalAutoCompactEnabled}"
+                                                                                           VerticalAlignment="Center"
+                                                                                           Content="Auto-compact"
+                                                                                           ToolTip.Tip="Silently summarize older turns when the prompt gets long. No pause, no dialog. The model continues with a compressed memory of early work." />
+                                                                             </StackPanel>
+                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                 <TextBlock Text="Trigger:"
+                                                                                            FontSize="11"
+                                                                                            VerticalAlignment="Center"
+                                                                                            Width="70" />
+                                                                                 <NumericUpDown Minimum="60" Maximum="95" Increment="5"
+                                                                                               Value="{Binding LocalAutoCompactTriggerPercent}"
+                                                                                               Width="130"
+                                                                                               ToolTip.Tip="Compact when the prompt reaches this percent of the model's context window. Lower = more frequent compaction, less risk of hitting the wall." />
+                                                                                 <TextBlock Text="%"
+                                                                                            FontSize="11"
+                                                                                            VerticalAlignment="Center" />
+                                                                             </StackPanel>
+                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                 <TextBlock Text="Keep turns:"
+                                                                                            FontSize="11"
+                                                                                            VerticalAlignment="Center"
+                                                                                            Width="70" />
+                                                                                 <NumericUpDown Minimum="4" Maximum="12"
+                                                                                               Value="{Binding LocalAutoCompactKeepTurns}"
+                                                                                               Width="130"
+                                                                                               ToolTip.Tip="Recent turns kept full. Older turns get summarized." />
+                                                                             </StackPanel>
+                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                 <TextBlock Text="Tool results:"
+                                                                                            FontSize="11"
+                                                                                            VerticalAlignment="Center"
+                                                                                            Width="70" />
+                                                                                 <NumericUpDown Minimum="4" Maximum="16"
+                                                                                               Value="{Binding LocalAutoCompactKeepToolResults}"
+                                                                                               Width="130"
+                                                                                               ToolTip.Tip="Recent tool results kept. Older results get cleared." />
+                                                                             </StackPanel>
+                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                 <TextBlock Text="Pin user:"
+                                                                                            FontSize="11"
+                                                                                            VerticalAlignment="Center"
+                                                                                            Width="70" />
+                                                                                 <NumericUpDown Minimum="500" Maximum="5000" Increment="500"
+                                                                                               Value="{Binding LocalAutoCompactPinUserChars}"
+                                                                                               Width="130"
+                                                                                               ToolTip.Tip="How much of an older user task to preserve verbatim. The model never loses sight of what it was asked to do." />
+                                                                             </StackPanel>
+                                                                             </StackPanel>
                                                                     </StackPanel>
                                                                     <StackPanel Spacing="2" Margin="0,6,0,0">
                                                                         <TextBlock FontSize="11" TextWrapping="Wrap" Text="{Binding LocalVariantFootprintText}" />
@@ -1361,23 +1447,28 @@
                                                             <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Watermark %"
                                                                        ToolTip.Tip="Compact when the forwarded prompt reaches this percent of Context, or when Context is already filling." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="50" Maximum="95"
-                                                                           Value="{Binding PortRules.CompactWatermarkPercent}" />
+                                                                           Value="{Binding PortRules.CompactWatermarkPercent}" 
+                                                                                    ToolTip.Tip="Compact when the forwarded prompt reaches this percent of Context, or when Context is already filling." />
                                                             <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" Text="Keep turns"
                                                                        ToolTip.Tip="Recent conversational turns left intact when Compact shortens older history." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="3" Minimum="4" Maximum="24"
-                                                                           Value="{Binding PortRules.CompactKeepTurns}" />
+                                                                           Value="{Binding PortRules.CompactKeepTurns}" 
+                                                                             ToolTip.Tip="Recent conversational turns left intact when Compact shortens older history." />
                                                             <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" Text="Tool keep turns"
                                                                        ToolTip.Tip="When the chat has tools, Compact keeps at least this many recent turns." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="5" Minimum="6" Maximum="32"
-                                                                           Value="{Binding PortRules.CompactToolKeepTurns}" />
+                                                                           Value="{Binding PortRules.CompactToolKeepTurns}" 
+                                                                                 ToolTip.Tip="When the chat has tools, Compact keeps at least this many recent turns." />
                                                             <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Headroom"
                                                                        ToolTip.Tip="Tokens reserved so prompt plus reply still fit Context after Compact or a max-tokens clamp." />
                                                             <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="64" Maximum="4096"
-                                                                           Value="{Binding PortRules.CompactHeadroom}" />
+                                                                           Value="{Binding PortRules.CompactHeadroom}" 
+                                                                            ToolTip.Tip="Tokens reserved so prompt plus reply still fit Context after Compact or a max-tokens clamp." />
                                                             <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" Text="Preserved user chars"
                                                                        ToolTip.Tip="How much of an older user task Compact may pin when that turn would otherwise drop." />
                                                             <NumericUpDown Grid.Row="1" Grid.Column="3" Minimum="500" Maximum="20000"
-                                                                           Value="{Binding PortRules.CompactPreservedUserChars}" />
+                                                                           Value="{Binding PortRules.CompactPreservedUserChars}" 
+                                                                                      ToolTip.Tip="How much of an older user task Compact may pin when that turn would otherwise drop." />
                                                             <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="6"
                                                                       VerticalAlignment="Center"
                                                                       Content="After Compact, skip prefix cache this turn"
@@ -1411,15 +1502,18 @@
                                                             <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Keep recent results"
                                                                        ToolTip.Tip="Full tool bodies kept. Older ones are stubbed so llama-server still sees that the call ran." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="4" Maximum="64"
-                                                                           Value="{Binding PortRules.KeepRecentResults}" />
+                                                                           Value="{Binding PortRules.KeepRecentResults}" 
+                                                                              ToolTip.Tip="Full tool bodies kept. Older ones are stubbed so llama-server still sees that the call ran." />
                                                             <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" Text="Pin latest shell"
                                                                        ToolTip.Tip="Recent shell results pinned even when omit is dropping other bodies." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="3" Minimum="1" Maximum="16"
-                                                                           Value="{Binding PortRules.PinLatestShellResults}" />
+                                                                           Value="{Binding PortRules.PinLatestShellResults}" 
+                                                                                  ToolTip.Tip="Recent shell results pinned even when omit is dropping other bodies." />
                                                             <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" Text="Min chars to omit"
                                                                        ToolTip.Tip="Tool bodies shorter than this stay forwarded." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="5" Minimum="80" Maximum="2000"
-                                                                           Value="{Binding PortRules.MinResultCharsToClear}" />
+                                                                           Value="{Binding PortRules.MinResultCharsToClear}" 
+                                                                                  ToolTip.Tip="Tool bodies shorter than this stay forwarded." />
                                                         </Grid>
                                                     </StackPanel>
                                                 </Border>
@@ -1438,7 +1532,8 @@
                                                                           ToolTip.Tip="End this Client-app turn when this many older tool results were omitted and the last tools are not a closed loop." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="8" Maximum="128"
                                                                                IsEnabled="{Binding PortRules.MillAtOmittedEnabled}"
-                                                                               Value="{Binding PortRules.RunawayOmittedResults}" />
+                                                                               Value="{Binding PortRules.RunawayOmittedResults}" 
+                                                                                  ToolTip.Tip="End this Client-app turn when this many older tool results were omitted and the last tools are not a closed loop." />
                                                                 <views:HelpTopicLink Grid.Column="2"
                                                                                      TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />
@@ -1455,7 +1550,8 @@
                                                                       ToolTip.Tip="How many recent tools FluxMux inspects. When off, Mill at omitted ends the turn at its count without that check." />
                                                             <NumericUpDown Grid.Column="1" Minimum="2" Maximum="16"
                                                                            IsEnabled="{Binding PortRules.ClosedLoopLookbackEnabled}"
-                                                                           Value="{Binding PortRules.ClosedLoopMillLookback}" />
+                                                                           Value="{Binding PortRules.ClosedLoopMillLookback}" 
+                                                                                   ToolTip.Tip="How many recent tools FluxMux inspects. When off, Mill at omitted ends the turn at its count without that check." />
                                                             <views:HelpTopicLink Grid.Column="2"
                                                                                  TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                  ToolTip.Tip="Open the Port rules Help topic." />
@@ -1469,7 +1565,8 @@
                                                                           ToolTip.Tip="Last-resort pause when this many older tool results were omitted, even if the last tools still look useful. A valid closed loop may pass Mill at omitted (32) and keep going until this ceiling." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="32" Maximum="512"
                                                                                IsEnabled="{Binding PortRules.ClosedLoopCeilingEnabled}"
-                                                                               Value="{Binding PortRules.ClosedLoopRunawayOmittedResults}" />
+                                                                               Value="{Binding PortRules.ClosedLoopRunawayOmittedResults}" 
+                                                                                            ToolTip.Tip="Last-resort pause when this many older tool results were omitted, even if the last tools still look useful." />
                                                                 <views:HelpTopicLink Grid.Column="2"
                                                                                      TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />
@@ -1498,11 +1595,13 @@
                                                                 <TextBlock VerticalAlignment="Center" Text="Seconds"
                                                                            ToolTip.Tip="Turns closer together than this, with omitted past the mill count, count as rapid churn." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="1" Maximum="15"
-                                                                               Value="{Binding PortRules.RapidChurnSeconds}" />
+                                                                               Value="{Binding PortRules.RapidChurnSeconds}" 
+                                                                              ToolTip.Tip="Turns closer together than this, with omitted past the mill count, count as rapid churn." />
                                                                 <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Consecutive"
                                                                            ToolTip.Tip="How many rapid turns in a row end this Client-app turn even when the lookback looks like a closed loop." />
                                                                 <NumericUpDown Grid.Column="3" Minimum="2" Maximum="12"
-                                                                               Value="{Binding PortRules.RapidChurnConsecutive}" />
+                                                                               Value="{Binding PortRules.RapidChurnConsecutive}" 
+                                                                                  ToolTip.Tip="How many rapid turns in a row end this Client-app turn even when the lookback looks like a closed loop." />
                                                             </Grid>
                                                         </StackPanel>
                                                     </Border>
@@ -1514,7 +1613,8 @@
                                                                           ToolTip.Tip="End this Client-app turn when this many recent tools are screenshot/python/run with no file edit, even before Mill at omitted." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="4" Maximum="24"
                                                                                IsEnabled="{Binding PortRules.ObserveOnlyMillEnabled}"
-                                                                               Value="{Binding PortRules.ObserveOnlyMillCount}" />
+                                                                               Value="{Binding PortRules.ObserveOnlyMillCount}" 
+                                                                                 ToolTip.Tip="End this Client-app turn when this many recent tools are screenshot/python/run with no file edit, even before Mill at omitted." />
                                                                 <views:HelpTopicLink Grid.Column="2"
                                                                                      TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />
@@ -1532,7 +1632,8 @@
                                                                           ToolTip.Tip="Oldest pictures are dropped from the pack forwarded to llama-server. The Client app still has the album." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="1" Maximum="8"
                                                                                IsEnabled="{Binding PortRules.MaxPicturesEnabled}"
-                                                                               Value="{Binding PortRules.MaxForwardedImages}" />
+                                                                               Value="{Binding PortRules.MaxForwardedImages}" 
+                                                                               ToolTip.Tip="Oldest pictures are dropped from the pack forwarded to llama-server. The Client app still has the album." />
                                                                 <views:HelpTopicLink Grid.Column="2"
                                                                                      TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />
@@ -1601,27 +1702,33 @@
                                                             <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="First-byte seconds"
                                                                        ToolTip.Tip="Open the hang prompt if llama-server sends nothing for this long (non-thinking turns)." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="5" Maximum="120"
-                                                                           Value="{Binding PortRules.FirstByteSeconds}" />
+                                                                           Value="{Binding PortRules.FirstByteSeconds}" 
+                                                                             ToolTip.Tip="Open the hang prompt if llama-server sends nothing for this long (non-thinking turns)." />
                                                             <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" Text="Think tokens / sec"
                                                                        ToolTip.Tip="Used to wait out a thinking budget before the hang prompt." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="3" Minimum="5" Maximum="80"
-                                                                           Value="{Binding PortRules.ThinkTokensPerSecond}" />
+                                                                           Value="{Binding PortRules.ThinkTokensPerSecond}" 
+                                                                                 ToolTip.Tip="Used to wait out a thinking budget before the hang prompt." />
                                                             <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" Text="Max think first-byte"
                                                                        ToolTip.Tip="Cap on how long a thinking model may sit before the hang prompt." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="5" Minimum="30" Maximum="300"
-                                                                           Value="{Binding PortRules.MaxThinkFirstByteSeconds}" />
+                                                                           Value="{Binding PortRules.MaxThinkFirstByteSeconds}" 
+                                                                                     ToolTip.Tip="Cap on how long a thinking model may sit before the hang prompt." />
                                                             <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Stall seconds"
                                                                        ToolTip.Tip="Open the hang prompt if llama-server goes silent mid-stream for this long." />
                                                             <NumericUpDown Grid.Row="1" Grid.Column="1" Minimum="10" Maximum="180"
-                                                                           Value="{Binding PortRules.StallSeconds}" />
+                                                                           Value="{Binding PortRules.StallSeconds}" 
+                                                                         ToolTip.Tip="Open the hang prompt if llama-server goes silent mid-stream for this long." />
                                                             <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" Text="Wait-longer seconds"
                                                                        ToolTip.Tip="Extra quiet time if you choose to keep this turn open." />
                                                             <NumericUpDown Grid.Row="1" Grid.Column="3" Minimum="15" Maximum="180"
-                                                                           Value="{Binding PortRules.WaitLongerSeconds}" />
+                                                                           Value="{Binding PortRules.WaitLongerSeconds}" 
+                                                                              ToolTip.Tip="Extra quiet time if you choose to keep this turn open." />
                                                             <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" Text="Decision seconds"
                                                                        ToolTip.Tip="How long the hang prompt waits for a choice before ending the turn." />
                                                             <NumericUpDown Grid.Row="1" Grid.Column="5" Minimum="10" Maximum="120"
-                                                                           Value="{Binding PortRules.DecisionSeconds}" />
+                                                                           Value="{Binding PortRules.DecisionSeconds}" 
+                                                                            ToolTip.Tip="How long the hang prompt waits for a choice before ending the turn." />
                                                         </Grid>
                                                     </StackPanel>
                                                 </Border>
@@ -1645,11 +1752,13 @@
                                                             <TextBlock VerticalAlignment="Center" Text="Retries"
                                                                        ToolTip.Tip="Retry llama-server Loading model / 503 this many times. FluxMux's own unused Port 503 is not retried." />
                                                             <NumericUpDown Grid.Column="1" Minimum="0" Maximum="12"
-                                                                           Value="{Binding PortRules.LoadingRetryCount}" />
+                                                                           Value="{Binding PortRules.LoadingRetryCount}" 
+                                                                              ToolTip.Tip="Retry llama-server Loading model / 503 this many times. FluxMux's own unused Port 503 is not retried." />
                                                             <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Delay seconds"
                                                                        ToolTip.Tip="Wait this long between Loading model retries. Total wait is capped." />
                                                             <NumericUpDown Grid.Column="3" Minimum="1" Maximum="10"
-                                                                           Value="{Binding PortRules.LoadingRetryDelaySeconds}" />
+                                                                           Value="{Binding PortRules.LoadingRetryDelaySeconds}" 
+                                                                                     ToolTip.Tip="Wait this long between Loading model retries. Total wait is capped." />
                                                         </Grid>
                                                     </StackPanel>
                                                 </Border>
@@ -1664,12 +1773,14 @@
                                                                    ToolTip.Tip="Whether the profile overlay, the Client app, or the smaller of the two sets max tokens. Reply is still clamped so prompt plus reply fit Context." />
                                                         <ComboBox Grid.Column="1"
                                                                   ItemsSource="{Binding PortRules.ClientMaxTokensModeOptions}"
-                                                                  SelectedItem="{Binding PortRules.SelectedClientMaxTokensMode}" />
+                                                                  SelectedItem="{Binding PortRules.SelectedClientMaxTokensMode}" 
+                                                                   ToolTip.Tip="Whether the profile overlay, the Client app, or the smaller of the two sets max tokens. Reply is still clamped so prompt plus reply fit Context." />
                                                         <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Stop strings"
                                                                    ToolTip.Tip="Pass Client-app stop through, or ignore a list that can short-loop or cut thinking." />
                                                         <ComboBox Grid.Column="3"
                                                                   ItemsSource="{Binding PortRules.StopHygieneModeOptions}"
-                                                                  SelectedItem="{Binding PortRules.SelectedStopHygieneMode}" />
+                                                                  SelectedItem="{Binding PortRules.SelectedStopHygieneMode}" 
+                                                                   ToolTip.Tip="Pass Client-app stop through, or ignore a list that can short-loop or cut thinking." />
                                                     </Grid>
                                                     </DockPanel>
                                                 </Border>

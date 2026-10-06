@@ -7,6 +7,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using FluxMux.Avalonia.Models;
+using FluxMux.Updates.Core;
 
 namespace FluxMux.Avalonia.Services;
 

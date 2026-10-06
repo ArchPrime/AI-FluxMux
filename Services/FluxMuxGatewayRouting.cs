@@ -33,9 +33,7 @@ public static class FluxMuxGatewayRouting
     public const string LocalContextOverflowMessage =
         PortRulesPostMortem.ChatTurnCannotContinue
         + "it is too large for the local model's Context. "
-        + PortRulesPostMortem.RaiseContextAdvice
-        + " "
-        + PortRulesPostMortem.SmallerNextStepAdvice;
+        + "Raise **Context** on this model profile, or start a new chat with a smaller next step.";
     public const string RepeatedToolType = "cline_repeated_command";
     public const string RepeatedToolMessage =
         PortRulesPostMortem.ChatTurnCannotContinue
@@ -205,17 +203,50 @@ public static class FluxMuxGatewayRouting
                 || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);
         }
 
+        // Blocking decision: the standard 4-chars/token estimate plus the reply
+        // budget, or the prompt alone already over the window.
+        //
+        // The 2-chars/token "filling" estimate is deliberately pessimistic for
+        // code-heavy Endpoint packs, but it is far too pessimistic for dense
+        // tokenizers (e.g. Qwen): at ~half the loaded Context the raw text is
+        // already enough that chars/2 exceeds n_ctx, so the Client app's Context
+        // bar reads ~50% while the gateway declares the turn "full" and, with
+        // routing off, hard-blocks it. It also cannot reliably tell a packed
+        // prompt apart from a dense-tokenizer half-full prompt, so it is NOT a
+        // blocking condition here. It is used only to trigger history
+        // compaction (where acting early is safe — it just shortens forwarded
+        // history, it never blocks) via ShouldForwardCompact's fillingEstimate.
+        return promptStd + maxTokens > hotContext
+            || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);
+    }
+
+    /// <summary>
+    /// Pessimistic 2-chars/token check used to decide when to compact history
+    /// before forwarding. Acting early is safe (it only shortens the forwarded
+    /// payload), so the tighter estimate is appropriate here even though it
+    /// would over-trip as a blocking condition for dense tokenizers.
+    /// </summary>
+    public static bool PromptFillsLocalContextForCompact(JsonObject state, JsonObject payload)
+    {
+        var hotContext = ParseInt(Str(state, "local_context"));
+        if (hotContext <= 0)
+        {
+            return false;
+        }
+
+        var promptStd = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        var maxTokens = Math.Max(MaxTokensForTurn(state, payload), 0);
+        if (LocalChatPayloadSignals.PayloadHasImage(payload)
+            && LocalChatPayloadSignals.LatestUserTurnHasImage(payload))
+        {
+            return promptStd + maxTokens > hotContext
+                || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);
+        }
+
         var promptFill = LocalRequestOverlayRouting.EstimatePromptTokens(
             payload,
             LocalRequestOverlayRouting.FillingCharsPerToken);
 
-        // Fail-early when the forwarded prompt itself is over (2 chars/token),
-        // or when a normal estimate plus the reply budget cannot fit.
-        // Do not add max tokens onto the pessimistic prompt and then apply
-        // Compact's 85% watermark — that 400s Harness while it still shows
-        // about half the loaded Context used.
-        // Picture bytes are a capability cost, not text; they use the standard
-        // estimate plus a per-picture allowance, not this 2-character path.
         return promptFill > hotContext
             || promptStd + maxTokens > hotContext
             || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);

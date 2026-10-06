@@ -21,6 +21,8 @@ public static class LocalProfileAttributeSummary
         var images = EnabledLabel(settings["LocalVisionEnabled"]?.ToString(), "Images");
         var reasoning = ReasoningLabel(settings["LocalReasoning"]?.ToString(), requestReasoning);
         var context = CompactInt(settings["OverrideContext"]?.ToString(), "ctx");
+        var extendIntoRam = ParseBool(settings["LocalExtendContextIntoRam"]?.ToString(), false);
+        var yarnTag = extendIntoRam ? " (YaRN)" : string.Empty;
         var gpu = settings["LocalGpuOffloadMode"]?.ToString();
         if (string.IsNullOrWhiteSpace(gpu))
         {
@@ -33,7 +35,7 @@ public static class LocalProfileAttributeSummary
         var maxTokens = CompactInt(
             string.IsNullOrWhiteSpace(requestMaxTokens) ? settings["OverrideMaxTokens"]?.ToString() : requestMaxTokens,
             "max");
-        return $"{images} \u00b7 {reasoning} \u00b7 {context} \u00b7 {gpu} \u00b7 temp {temperature} \u00b7 {maxTokens}";
+        return $"{images} \u00b7 {reasoning} \u00b7 {context}{yarnTag} \u00b7 {gpu} \u00b7 temp {temperature} \u00b7 {maxTokens}";
     }
 
     public static string FormatLocalSuitability(
@@ -136,5 +138,18 @@ public static class LocalProfileAttributeSummary
         }
 
         return fallback;
+    }
+
+    private static bool ParseBool(string? value, bool fallback)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return fallback;
+        }
+
+        return value.Equals("true", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("1", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("yes", StringComparison.OrdinalIgnoreCase)
+            || value.Equals("enabled", StringComparison.OrdinalIgnoreCase);
     }
 }

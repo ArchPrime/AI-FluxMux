@@ -19,6 +19,7 @@ public static class PortRulesPostMortem
     public const string RapidChurnSeconds = "Rapid-churn seconds";
     public const string RapidChurnConsecutive = "Rapid-churn consecutive";
     public const string FirstByteSeconds = "First-byte seconds";
+    public const string HangQuietSeconds = "Hang quiet seconds";
     public const string ThinkTokensPerSecond = "Think tokens / sec";
     public const string MaxThinkFirstByte = "Max think first-byte";
     public const string StallSeconds = "Stall seconds";
@@ -384,6 +385,11 @@ public static class PortRulesPostMortem
             return FirstByteSeconds;
         }
 
+        if (firstByteDeadlineSeconds > live.HangQuietSeconds)
+        {
+            return HangQuietSeconds;
+        }
+
         return ThinkTokensPerSecond;
     }
 
@@ -404,6 +410,11 @@ public static class PortRulesPostMortem
             return live.MaxThinkFirstByteSeconds;
         }
 
+        if (limitName == HangQuietSeconds)
+        {
+            return live.HangQuietSeconds;
+        }
+
         if (limitName == ThinkTokensPerSecond)
         {
             return firstByteDeadlineSeconds;
@@ -422,6 +433,11 @@ public static class PortRulesPostMortem
         if (limitName == StallSeconds)
         {
             return "llama-server went quiet in the middle of a reply.";
+        }
+
+        if (limitName == HangQuietSeconds)
+        {
+            return "llama-server did not start a reply in time.";
         }
 
         return "llama-server did not start a reply in time.";
@@ -446,6 +462,16 @@ public static class PortRulesPostMortem
                 + " in "
                 + PortRulesLocation
                 + " if this model thinks before it writes. "
+                + NextTurnAfterRaise;
+        }
+
+        if (limitName == HangQuietSeconds)
+        {
+            return "You can raise "
+                + NamePortRule(HangQuietSeconds)
+                + " in "
+                + PortRulesLocation
+                + " so a thinking model has more time before the hang check fires. "
                 + NextTurnAfterRaise;
         }
 

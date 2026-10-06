@@ -1,6 +1,6 @@
+using FluxMux.Updates.Core;
 using System;
 using System.IO;
-using FluxMux.Avalonia.Services;
 using Xunit;
 
 namespace FluxMux.Avalonia.Tests;

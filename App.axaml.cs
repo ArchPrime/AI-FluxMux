@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using FluxMux.Avalonia.Services;
 using FluxMux.Avalonia.ViewModels;
 using FluxMux.Avalonia.Views;
+using FluxMux.Updates.Core;
 
 namespace FluxMux.Avalonia;
 
@@ -31,6 +32,11 @@ public partial class App : Application
 
     public override void OnFrameworkInitializationCompleted()
     {
+        // The shared update core resolves the DeepSeek Harness launcher through a pluggable
+        // resolver. The app registers its own (which honours a configured dsh path); the
+        // standalone updater falls back to a PATH lookup when no resolver is registered.
+        DeepSeekHarnessUpdateCheck.SetLauncherResolver(path => DeepSeekHarnessWebHost.ResolveLauncher(path));
+
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             if (!TryAcquireSingleInstance())

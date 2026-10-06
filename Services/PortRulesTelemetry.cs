@@ -15,6 +15,7 @@ public sealed record PortRulesTelemetry
     public int RapidStreak { get; init; }
     public int PicturesKept { get; init; }
     public int QuietSeconds { get; init; }
+    public int HangQuietSeconds { get; init; }
     public int LoadingRetries { get; init; }
     public int DumpCount { get; init; }
     public bool RepeatedCommandThisTurn { get; init; }
@@ -93,10 +94,11 @@ public sealed record PortRulesTelemetry
             return string.Empty;
         }
 
+        var limit = HangQuietSeconds > 0 ? HangQuietSeconds : live.FirstByteSeconds;
         return "quiet "
                + QuietSeconds.ToString(CultureInfo.InvariantCulture)
                + " / "
-               + live.FirstByteSeconds.ToString(CultureInfo.InvariantCulture)
+               + limit.ToString(CultureInfo.InvariantCulture)
                + " s";
     }
 

@@ -108,7 +108,7 @@ public static class DeepSeekHarnessSetup
                 return false;
             }
 
-            File.WriteAllText(path, merged, Encoding.UTF8);
+            WriteAllTextAtomic(path, merged, Encoding.UTF8);
             return true;
         }
         catch
@@ -750,8 +750,17 @@ public static class DeepSeekHarnessSetup
     }
 
     public static DeepSeekHarnessSettingsMergeResult MergeIntoSettingsFile(DeepSeekHarnessSetupOptions options)
+        => MergeIntoSettingsFile(options, ResolveSettingsPath());
+
+    /// <summary>
+    /// Same as <see cref="MergeIntoSettingsFile(DeepSeekHarnessSetupOptions)"/> but writes to an
+    /// explicit <paramref name="settingsPath"/>. The path override exists so tests can target a
+    /// temp folder instead of the live <c>~/.dsh/settings.yaml</c>, which the running harness
+    /// holds open.
+    /// </summary>
+    public static DeepSeekHarnessSettingsMergeResult MergeIntoSettingsFile(DeepSeekHarnessSetupOptions options, string settingsPath)
     {
-        var path = ResolveSettingsPath();
+        var path = settingsPath;
         var directory = Path.GetDirectoryName(path);
         if (string.IsNullOrWhiteSpace(directory))
         {
@@ -769,7 +778,7 @@ public static class DeepSeekHarnessSetup
             var block = BuildSettingsYaml(options);
             if (!File.Exists(path))
             {
-                File.WriteAllText(path, block + Environment.NewLine, Encoding.UTF8);
+                WriteAllTextAtomic(path, block + Environment.NewLine, Encoding.UTF8);
                 EnsureFluxMuxApiKeyEnvFile();
                 return new DeepSeekHarnessSettingsMergeResult(
                     true,
@@ -783,12 +792,19 @@ public static class DeepSeekHarnessSetup
             var backedUp = false;
             if (!string.IsNullOrWhiteSpace(existing))
             {
-                File.WriteAllText(path + ".bak", existing, Encoding.UTF8);
-                backedUp = true;
+                // Rolling last-known-good backup: keep the current good file as
+                // settings.yaml.prev so a corrupt write can be recovered from,
+                // matching FluxMuxConfigService. The .bak name is kept for the
+                // user-facing "backup: settings.yaml.bak" message. Both are
+                // best-effort: if the source is locked we still proceed with the
+                // atomic write rather than failing the whole merge.
+                var prevOk = TryCopyTextFile(path, path + ".prev");
+                var bakOk = TryCopyTextFile(path, path + ".bak");
+                backedUp = prevOk || bakOk;
             }
 
             var merged = MergeProviderBlock(existing, block);
-            File.WriteAllText(path, merged.TrimEnd() + Environment.NewLine, Encoding.UTF8);
+            WriteAllTextAtomic(path, merged.TrimEnd() + Environment.NewLine, Encoding.UTF8);
             EnsureFluxMuxApiKeyEnvFile();
             return new DeepSeekHarnessSettingsMergeResult(
                 true,
@@ -807,6 +823,87 @@ public static class DeepSeekHarnessSetup
                 false,
                 path,
                 "Could not write Harness settings: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Writes <paramref name="contents"/> to <paramref name="path"/> atomically: write to a
+    /// temp file, then rename over the target. The Harness settings file can be held open by
+    /// the running harness or an editor, so a failed write must never leave a half-written
+    /// file behind. Mirrors <see cref="FluxMuxConfigService"/>: retries while the target is
+    /// locked, then atomically replaces it. On final failure the error is swallowed (the
+    /// caller already treats a missing/unchanged settings file as non-fatal) rather than
+    /// propagating it, so a locked file never takes the app down.
+    /// </summary>
+    private static void WriteAllTextAtomic(string path, string contents, Encoding encoding)
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var tempPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        for (var attempt = 0; attempt < 5; attempt++)
+        {
+            try
+            {
+                File.WriteAllText(tempPath, contents, encoding);
+                File.Move(tempPath, path, overwrite: true);
+                return;
+            }
+            catch (IOException)
+            {
+                // Target (or temp) is locked by another process; back off and retry.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Same class of failure on some setups; retry.
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(tempPath))
+                    {
+                        File.Delete(tempPath);
+                    }
+                }
+                catch
+                {
+                    // Best effort; a stray .tmp file is harmless.
+                }
+            }
+
+            Thread.Sleep(120 * (attempt + 1));
+        }
+    }
+
+    /// <summary>
+    /// Best-effort copy of <paramref name="sourcePath"/> to <paramref name="destinationPath"/>
+    /// (UTF-8). Used for the rolling <c>.prev</c>/<c>.bak</c> last-known-good backups. Returns
+    /// true when the copy succeeded; false (never throws) when the source is missing or locked,
+    /// so a backup failure never aborts the settings merge. Mirrors
+    /// <see cref="FluxMuxConfigService"/> backup semantics.
+    /// </summary>
+    private static bool TryCopyTextFile(string sourcePath, string destinationPath)
+    {
+        try
+        {
+            if (!File.Exists(sourcePath))
+            {
+                return false;
+            }
+
+            var text = File.ReadAllText(sourcePath, Encoding.UTF8);
+            File.WriteAllText(destinationPath, text, Encoding.UTF8);
+            return true;
+        }
+        catch
+        {
+            // Best effort. Losing the backup for this save is acceptable; failing the
+            // settings merge over a locked source is not.
+            return false;
         }
     }
 

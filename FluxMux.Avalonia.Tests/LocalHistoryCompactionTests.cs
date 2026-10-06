@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json.Nodes;
 using FluxMux.Avalonia.Services;
@@ -66,7 +67,11 @@ public sealed class LocalHistoryCompactionTests
         var state = new JsonObject { ["local_context"] = 32768, ["local_vision"] = "Disabled" };
         var promptStd = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
         Assert.False(LocalHistoryCompaction.IsNearLimit(promptStd, 32768));
-        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        // 70400 chars: 2-char est = 35200 > 32768 (trips compact), 4-char est
+        // = 17600 < 32768 (fits, so not a blocking condition). The compact
+        // trigger uses the pessimistic 2-char estimate.
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
         Assert.True(LocalHistoryCompaction.ShouldForwardCompact(
             compactEnabled: true,
             promptTokens: promptStd,
@@ -74,7 +79,113 @@ public sealed class LocalHistoryCompactionTests
             promptExceeds: false,
             fillingEstimate: true));
         Assert.True(LocalHistoryCompaction.TryCompactPayload(payload, force: true));
-        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
+    }
+
+    [Fact]
+    public void Demonstrate_auto_compact_as_the_context_fills_up()
+    {
+        // A 32k context window, default auto-compact settings:
+        //   trigger 80% (26624 tokens), keep 6 turns, keep 8 tool results,
+        //   pin 2000 chars of the original user task.
+        const int context = 32768;
+        var rules = PortForwardingRules.Defaults; // AutoCompactTriggerPercent=0.80, KeepTurns=6, ...
+
+        // Build a growing conversation: system + original task + N turns of
+        // user/assistant pairs (each ~500 chars of real text).
+        JsonArray BuildHistory(int turns)
+        {
+            var messages = new JsonArray
+            {
+                new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." },
+                new JsonObject { ["role"] = "user", ["content"] = "Fix the layout in MainWindow and keep the Health copy visible." }
+            };
+            for (var i = 0; i < turns; i++)
+            {
+                messages.Add(new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = "Turn " + i + ": " + new string('a', 480)
+                });
+                messages.Add(new JsonObject
+                {
+                    ["role"] = "assistant",
+                    ["content"] = "Reply " + i + ": " + new string('b', 480)
+                });
+            }
+
+            return messages;
+        }
+
+        var lines = new List<string>
+        {
+            "=== Auto-compact behaviour as the context fills up ===",
+            "Context window: " + context + " tokens",
+            "Settings: trigger=" + (rules.AutoCompactTriggerPercent * 100).ToString("0") + "%  keepTurns=" + rules.AutoCompactKeepTurns
+                + "  keepToolResults=" + rules.AutoCompactKeepToolResults + "  pinUserChars=" + rules.AutoCompactPinUserChars,
+            "Trigger token threshold: " + (int)(context * rules.AutoCompactTriggerPercent),
+            string.Empty,
+            "turns | promptTokens | %full | IsNearLimit | ShouldForwardCompact | compacted? | before->after msgs"
+        };
+
+        foreach (var turns in new[] { 0, 5, 10, 15, 20, 25, 30, 40, 50 })
+        {
+            var messages = BuildHistory(turns);
+            var payload = new JsonObject { ["messages"] = messages };
+            var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+            var pct = 100.0 * promptTokens / context;
+            var nearLimit = LocalHistoryCompaction.IsNearLimit(promptTokens, context);
+            var shouldForward = LocalHistoryCompaction.ShouldForwardCompact(
+                compactEnabled: true,
+                promptTokens: promptTokens,
+                contextTokens: context,
+                promptExceeds: promptTokens > context);
+
+            var before = messages.Count;
+            var compacted = LocalHistoryCompaction.TryCompactPayload(payload, force: shouldForward);
+            var after = (payload["messages"] as JsonArray)?.Count ?? before;
+
+            lines.Add(
+                turns.ToString().PadRight(5) + " | " + promptTokens.ToString().PadRight(12)
+                + " | " + pct.ToString("0") + "%" + new string(' ', Math.Max(1, 6 - pct.ToString("0").Length))
+                + " | " + nearLimit.ToString().PadRight(13)
+                + " | " + shouldForward.ToString().PadRight(20)
+                + " | " + (compacted ? "yes" : "no").PadRight(10)
+                + " | " + before + "->" + after);
+        }
+
+        // Show what the compacted payload actually looks like at the trigger point.
+        var triggerMessages = BuildHistory(30);
+        var triggerPayload = new JsonObject { ["messages"] = triggerMessages };
+        var triggerTokens = LocalRequestOverlayRouting.EstimatePromptTokens(triggerPayload);
+        var triggerForward = LocalHistoryCompaction.ShouldForwardCompact(
+            compactEnabled: true, promptTokens: triggerTokens, contextTokens: context, promptExceeds: triggerTokens > context);
+        var didCompact = LocalHistoryCompaction.TryCompactPayload(triggerPayload, force: triggerForward);
+
+        lines.Add(string.Empty);
+        lines.Add("=== At trigger point (30 turns, " + triggerTokens + " tokens, " + (100.0 * triggerTokens / context).ToString("0") + "% full) ===");
+        lines.Add("ShouldForwardCompact = " + triggerForward + ", compacted = " + didCompact);
+        var compactedArray = triggerPayload["messages"] as JsonArray;
+        lines.Add("Compacted message count: " + triggerMessages.Count + " -> " + (compactedArray?.Count ?? triggerMessages.Count));
+        if (compactedArray is not null)
+        {
+            foreach (var msg in compactedArray.OfType<JsonObject>())
+            {
+                var role = msg["role"]?.ToString() ?? "?";
+                var content = msg["content"]?.ToString() ?? string.Empty;
+                var preview = content.Length > 90 ? content[..90] + "…" : content;
+                lines.Add("  [" + role + "] " + preview);
+            }
+        }
+
+        var report = string.Join(Environment.NewLine, lines);
+        Console.WriteLine(report);
+
+        // Sanity assertions so this doubles as a regression test.
+        Assert.True(LocalHistoryCompaction.ShouldForwardCompact(
+            compactEnabled: true, promptTokens: 30000, contextTokens: context, promptExceeds: false));
+        Assert.False(LocalHistoryCompaction.ShouldForwardCompact(
+            compactEnabled: true, promptTokens: 10000, contextTokens: context, promptExceeds: false));
     }
 
     [Fact]
@@ -271,5 +382,134 @@ public sealed class LocalHistoryCompactionTests
         Assert.Contains(LocalToolResultClearing.AlreadyRanHeader, json);
         Assert.Contains("read_file: MainWindow.axaml", json);
         Assert.DoesNotContain(marker, json);
+    }
+
+    // ── Demonstration: walk the context window from empty to full ──────────────
+
+    [Fact]
+    public void Auto_compact_decision_walks_the_context_window_from_empty_to_full()
+    {
+        // Simulate a 32k-token model with default auto-compact settings.
+        const int contextTokens = 32768;
+        var rules = PortForwardingRules.Defaults; // trigger 0.80, keepTurns 6, keepToolResults 8, pinUserChars 2000
+
+        // Walk the window: at each step, add one more turn and check the decision.
+        var lines = new List<string>
+        {
+            $"Context window: {contextTokens} tokens",
+            $"Auto-compact trigger: {rules.AutoCompactTriggerPercent:P0} of context = " +
+                $"{(int)(rules.AutoCompactTriggerPercent * contextTokens)} tokens",
+            $"Keep turns: {rules.AutoCompactKeepTurns}, Keep tool results: {rules.AutoCompactKeepToolResults}, " +
+                $"Pin user chars: {rules.AutoCompactPinUserChars}",
+            new string('=', 72)
+        };
+
+        var totalTurns = 20;
+        for (var turnCount = 0; turnCount <= totalTurns; turnCount++)
+        {
+            // Build a fresh payload with just the first `turnCount` turns.
+            var slice = new JsonArray
+            {
+                new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." }
+            };
+            for (var i = 0; i < turnCount; i++)
+            {
+                slice.Add(new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = $"Turn {i}: please examine the file and report back. " + new string('u', 1200)
+                });
+                slice.Add(new JsonObject
+                {
+                    ["role"] = "assistant",
+                    ["tool_calls"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["id"] = "call_" + i,
+                            ["type"] = "function",
+                            ["function"] = new JsonObject
+                            {
+                                ["name"] = "read_file",
+                                ["arguments"] = $"{{\"path\":\"file{i}.cs\"}}"
+                            }
+                        }
+                    }
+                });
+                slice.Add(new JsonObject
+                {
+                    ["role"] = "tool",
+                    ["tool_call_id"] = "call_" + i,
+                    ["content"] = new string('t', 2500)
+                });
+                slice.Add(new JsonObject
+                {
+                    ["role"] = "assistant",
+                    ["content"] = $"Turn {i} reply: the file looks fine. " + new string('a', 1200)
+                });
+            }
+
+            var payload = new JsonObject { ["messages"] = slice };
+            var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+            var triggerTokens = (int)(rules.AutoCompactTriggerPercent * contextTokens);
+            var shouldCompact = promptTokens >= triggerTokens;
+            var isNearLimit = LocalHistoryCompaction.IsNearLimit(promptTokens, contextTokens);
+
+            var decision = shouldCompact ? "COMPACT" : "       ";
+            var nearLimit = isNearLimit ? "near-limit" : "         ";
+            lines.Add(
+                $"Turns: {turnCount,2} | Prompt: {promptTokens,6} tokens " +
+                $"({promptTokens * 100.0 / contextTokens,4:0.0}%) | " +
+                $"Trigger: {triggerTokens,6} | {decision} | {nearLimit}");
+        }
+
+        lines.Add(new string('=', 72));
+        lines.Add("Note: 'near-limit' = inside the last 15% of the window (IsNearLimit).");
+        lines.Add("Note: 'COMPACT' = prompt tokens >= trigger threshold (auto-compact fires).");
+
+        // Print the walk for the user to see.
+        var output = string.Join(Environment.NewLine, lines);
+        Console.WriteLine(output);
+
+        // Also verify the key invariants:
+        // 1. At 0 turns, no compact.
+        var emptyPayload = new JsonObject { ["messages"] = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." }
+        } };
+        var emptyTokens = LocalRequestOverlayRouting.EstimatePromptTokens(emptyPayload);
+        Assert.True(emptyTokens < (int)(rules.AutoCompactTriggerPercent * contextTokens));
+
+        // 2. At full 20 turns, compact should fire.
+        var fullSlice = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." }
+        };
+        for (var i = 0; i < 20; i++)
+        {
+            fullSlice.Add(new JsonObject { ["role"] = "user", ["content"] = $"Turn {i}. " + new string('u', 300) });
+            fullSlice.Add(new JsonObject
+            {
+                ["role"] = "assistant",
+                ["tool_calls"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["id"] = "call_" + i,
+                        ["type"] = "function",
+                        ["function"] = new JsonObject { ["name"] = "read_file", ["arguments"] = "{}" }
+                    }
+                }
+            });
+            fullSlice.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = "call_" + i, ["content"] = new string('t', 800) });
+            fullSlice.Add(new JsonObject { ["role"] = "assistant", ["content"] = $"Reply {i}. " + new string('a', 300) });
+        }
+        var fullPayload = new JsonObject { ["messages"] = fullSlice };
+        var fullTokens = LocalRequestOverlayRouting.EstimatePromptTokens(fullPayload);
+        Assert.True(fullTokens >= (int)(rules.AutoCompactTriggerPercent * contextTokens));
+
+        // 3. The trigger threshold is between the two.
+        var trigger = (int)(rules.AutoCompactTriggerPercent * contextTokens);
+        Assert.InRange(trigger, emptyTokens, fullTokens);
     }
 }

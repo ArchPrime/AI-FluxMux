@@ -2,7 +2,7 @@ using System;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
-namespace FluxMux.Avalonia.Services;
+namespace FluxMux.Updates.Core;
 
 public static class DeepSeekHarnessVersion
 {

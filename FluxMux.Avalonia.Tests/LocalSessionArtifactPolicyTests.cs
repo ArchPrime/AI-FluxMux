@@ -2,11 +2,100 @@ using System;
 using System.Text.Json.Nodes;
 using FluxMux.Avalonia.Services;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace FluxMux.Avalonia.Tests;
 
 public sealed class LocalSessionArtifactPolicyTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public LocalSessionArtifactPolicyTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
+
+    [Fact]
+    public void ArtifactPolicy_Demonstration_WalksAMixedSession()
+    {
+        _output.WriteLine("=== Artifact policy demonstration ===");
+        _output.WriteLine($"Thresholds: EditLoop={LocalSessionArtifactPolicy.EditLoopThreshold}, Halt={LocalSessionArtifactPolicy.HaltThreshold}, MaxNewWrites={LocalSessionArtifactPolicy.MaxNewWritesPerReply}");
+        _output.WriteLine("");
+
+        // Build a realistic session: the model reads a source file, edits it repeatedly,
+        // and (badly) keeps creating diagnostic dumps and screenshots.
+        var messages = new JsonArray();
+
+        void AddToolCall(string tool, string path, string? content = null)
+        {
+            messages.Add(new JsonObject
+            {
+                ["role"] = "tool",
+                ["tool_call_id"] = Guid.NewGuid().ToString("N"),
+                ["name"] = tool,
+                ["content"] = new JsonArray
+                {
+                    new JsonObject { ["type"] = "text", ["text"] = content ?? $"result of {tool} on {path}" }
+                }
+            });
+        }
+
+        // 1. Read the source file we're about to edit.
+        AddToolCall("read_file", @"C:\proj\src\Panel.cs");
+        // 2. Edit it 5 times (looping).
+        for (var i = 0; i < 5; i++)
+        {
+            AddToolCall("replace_in_file", @"C:\proj\src\Panel.cs");
+        }
+        // 3. Create diagnostic dumps (these ARE artifacts).
+        AddToolCall("write_to_file", @"C:\proj\debug_dump_1.md");
+        AddToolCall("write_to_file", @"C:\proj\diagnostic_trace.txt");
+        AddToolCall("write_to_file", @"C:\proj\vanishing_axes.png");
+        // 4. A screenshot observation.
+        AddToolCall("take_screenshot", @"C:\proj\shot.png");
+        // 5. Create a legit new source file (NOT an artifact).
+        AddToolCall("write_to_file", @"C:\proj\src\NewHelper.cs");
+
+        var artifacts = LocalSessionArtifactPolicy.Inspect(messages);
+
+        _output.WriteLine($"Created files tracked: {artifacts.CreatedCount}");
+        _output.WriteLine($"Artifact count (diagnostic/dump/image): {artifacts.ArtifactCount}");
+        _output.WriteLine($"Hottest edit path: {artifacts.HottestPath} ({artifacts.HottestEditCount} edits)");
+        _output.WriteLine($"ShouldHalt (artifact count >= {LocalSessionArtifactPolicy.HaltThreshold})? {artifacts.ShouldHalt}");
+        _output.WriteLine("");
+
+        _output.WriteLine("Per-path IsArtifact decisions:");
+        string[] paths =
+        [
+            @"C:\proj\src\Panel.cs",
+            @"C:\proj\src\NewHelper.cs",
+            @"C:\proj\debug_dump_1.md",
+            @"C:\proj\diagnostic_trace.txt",
+            @"C:\proj\vanishing_axes.png",
+            @"C:\proj\shot.png"
+        ];
+        foreach (var p in paths)
+        {
+            _output.WriteLine($"  {p,-40} -> {artifacts.IsArtifact(p)}");
+        }
+
+        // Now apply the policy to the payload and see what gets omitted/forwarded.
+        var payload = new JsonObject { ["messages"] = messages };
+        var result = LocalSessionArtifactPolicy.Apply(payload);
+        _output.WriteLine("");
+        _output.WriteLine($"Apply result: Omitted={result.Omitted}, HottestEdits={result.HottestEdits}, HottestPath={result.HottestPath}, ArtifactCount={result.ArtifactCount}");
+
+        // Assertions pin the key behaviours so the demo doubles as a regression check.
+        Assert.True(artifacts.IsArtifact(@"C:\proj\debug_dump_1.md"));
+        Assert.True(artifacts.IsArtifact(@"C:\proj\diagnostic_trace.txt"));
+        Assert.True(artifacts.IsArtifact(@"C:\proj\vanishing_axes.png"));
+        Assert.False(artifacts.IsArtifact(@"C:\proj\src\Panel.cs"), "source files are never artifacts");
+        Assert.False(artifacts.IsArtifact(@"C:\proj\src\NewHelper.cs"), "new source files are never artifacts");
+        Assert.Equal(5, artifacts.HottestEditCount);
+        Assert.Equal(@"C:\proj\src\Panel.cs", artifacts.HottestPath);
+        Assert.False(artifacts.ShouldHalt, "3 artifacts < halt threshold of 6");
+    }
+
     [Theory]
     [InlineData("debug_overlay.png", true)]
     [InlineData("projection_diagnostics.md", true)]
@@ -168,6 +257,102 @@ public sealed class LocalSessionArtifactPolicyTests
     }
 
     [Fact]
+    public void AutoCompact_walks_from_empty_to_full_and_fires_at_the_threshold()
+    {
+        // A realistic local-model window. The default auto-compact threshold is 80%.
+        const int window = 100_000;
+        var service = new LocalSessionArtifactService(window);
+
+        // Start with the two system messages the gateway always prepends.
+        var messages = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "You are a coding agent." },
+            new JsonObject { ["role"] = "system", ["content"] = "Local model context-awareness rules." }
+        };
+
+        // A single "read" turn: an assistant tool-call plus a tool result.
+        // The result is ~4 KB so each turn adds ~4 KB to the prompt.
+        const int resultSize = 4_000;
+        const int turns = 25; // 25 turns * ~4 KB = ~100 KB, enough to overflow the window.
+
+        var log = new List<string>();
+        log.Add($"window={window}  autoCompactThreshold={service.AutoCompactThreshold}  " +
+                $"targetAfterCompact={service.TargetAfterCompact}");
+
+        for (var i = 0; i < turns; i++)
+        {
+            messages.Add(Call($"read_{i}", "read_files", $"file_{i}.cs"));
+            messages.Add(Text($"read_{i}", new string('a', resultSize)));
+
+            var prompt = new JsonObject { ["messages"] = messages };
+            var tokens = LocalSessionArtifactPolicy.CountPromptTokens(prompt);
+            var decision = service.Evaluate(prompt, messages);
+
+            log.Add($"turn {i + 1,2}  tokens={tokens,6}  ({100.0 * tokens / window:5.1}%)  " +
+                   $"autoCompact={decision.ShouldAutoCompact}  " +
+                   $"reason={decision.Reason ?? "-"}");
+
+            // Simulate the gateway's action: when it asks for a compact, the
+            // summary replaces every message except the two system messages.
+            if (decision.ShouldAutoCompact)
+            {
+                messages.RemoveRange(2, messages.Count - 2);
+                messages.Add(new JsonObject
+                {
+                    ["role"] = "user",
+                    ["content"] = "[Compacted] " + new string('s', 800)
+                });
+                log.Add($"         -> compacted: kept 2 system + 1 summary, dropped {turns - i - 1} pending turns");
+            }
+        }
+
+        // --- Assertions: the walk must behave as documented -----------------
+
+        // 1. Early turns are far below the threshold and must NOT compact.
+        var earlyTokens = LocalSessionArtifactPolicy.CountPromptTokens(
+            new JsonObject { ["messages"] = BuildMessages(turns: 2) });
+        Assert.False(service.Evaluate(new JsonObject { ["messages"] = BuildMessages(2) }, BuildMessages(2)).ShouldAutoCompact);
+
+        // 2. At least one turn in the walk crossed the threshold and triggered a compact.
+        Assert.Contains(log, line => line.Contains("autoCompact=True"));
+
+        // 3. After the compact, the prompt is back below the target.
+        var after = LocalSessionArtifactPolicy.CountPromptTokens(new JsonObject { ["messages"] = messages });
+        Assert.True(after < service.TargetAfterCompact,
+            $"post-compact tokens {after} should be below target {service.TargetAfterCompact}");
+        log.Add($"post-compact tokens={after}  ({100.0 * after / window:5.1}%)  target={service.TargetAfterCompact}");
+
+        // 4. The two system messages survived the compact.
+        Assert.Equal("system", messages[0]?["role"]?.ToString());
+        Assert.Equal("system", messages[1]?["role"]?.ToString());
+
+        // --- Print the full walk so the behaviour is visible in test output -
+        Console.WriteLine();
+        Console.WriteLine("=== Auto-compact walk: empty -> full ===");
+        foreach (var line in log)
+        {
+            Console.WriteLine(line);
+        }
+        Console.WriteLine("=== end of walk ===");
+        Console.WriteLine();
+
+        JsonArray BuildMessages(int turns)
+        {
+            var m = new JsonArray
+            {
+                new JsonObject { ["role"] = "system", ["content"] = "You are a coding agent." },
+                new JsonObject { ["role"] = "system", ["content"] = "Local model context-awareness rules." }
+            };
+            for (var i = 0; i < turns; i++)
+            {
+                m.Add(Call($"read_{i}", "read_files", $"file_{i}.cs"));
+                m.Add(Text($"read_{i}", new string('a', resultSize)));
+            }
+            return m;
+        }
+    }
+
+    [Fact]
     public void Filter_drops_a_bulk_dump_shell_call_and_keeps_a_normal_write()
     {
         var dump = new JsonObject
@@ -320,3 +505,4 @@ public sealed class LocalSessionArtifactPolicyTests
             }
         };
 }
+

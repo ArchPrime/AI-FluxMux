@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>FluxMux.Updates</RootNamespace>
+    <AssemblyName>FluxMux.Updates</AssemblyName>
+    <Description>Standalone updater for AI-FluxMux, llama-server, and DeepSeek Harness. Run only while AI-FluxMux is closed.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\FluxMux.Updates.Core\FluxMux.Updates.Core.csproj" />
+  </ItemGroup>
+</Project>

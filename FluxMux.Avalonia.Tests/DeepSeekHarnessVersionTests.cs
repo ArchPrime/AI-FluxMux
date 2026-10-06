@@ -1,4 +1,4 @@
-using FluxMux.Avalonia.Services;
+using FluxMux.Updates.Core;
 using Xunit;
 
 namespace FluxMux.Avalonia.Tests;

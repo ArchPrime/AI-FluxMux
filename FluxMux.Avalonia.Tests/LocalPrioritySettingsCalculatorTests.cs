@@ -406,4 +406,385 @@ public sealed class LocalPrioritySettingsCalculatorTests
             (items[start], items[i]) = (items[i], items[start]);
         }
     }
+
+    private static FluxMuxRuntimeService.LocalHardwareLaunchAdvice AdviceWithNative(int nativeCtx)
+    {
+        return new FluxMuxRuntimeService.LocalHardwareLaunchAdvice
+        {
+            GpuTotalGb = 32,
+            ModelFileGb = 16,
+            NvidiaAvailable = true,
+            ContextPriorityFirst = Math.Min(nativeCtx, 65536),
+            ContextPrioritySecond = Math.Min(nativeCtx, 49152),
+            ContextSafeDefault = Math.Min(nativeCtx, 32768),
+            ContextPriorityLower = Math.Min(nativeCtx, 16384),
+            ModelMaxCtx = nativeCtx,
+            OffloadMode = "GPU only",
+            OffloadModeAtMaxContext = "GPU + CPU",
+            GpuLayers = "Auto",
+            BatchSize = "512",
+            UbatchSize = "128",
+            FlashAttention = "Enabled",
+            PreferFitEnabled = true,
+            SpecType = "ngram-simple",
+            EnableSwaFull = false,
+            MaxTokens = "4096",
+            CacheRam = "8192"
+        };
+    }
+
+    [Fact]
+    public void Extend_context_off_keeps_native_ceiling_and_no_yarn()
+    {
+        var advice = AdviceWithNative(131072);
+        // Context length first.
+        var resolved = LocalPrioritySettingsCalculator.ResolveOrder(new[]
+        {
+            "Context length", "Speed", "Fidelity", "Reasoning depth", "Reply length", "Stability"
+        });
+        var settings = LocalPrioritySettingsCalculator.Calculate(
+            resolved,
+            advice,
+            chatTemplate: "qwen",
+            specType: "ngram-simple",
+            currentSwaFull: "Disabled",
+            autoCompress: true,
+            visionEnabled: "Disabled",
+            visionProjectorPath: string.Empty,
+            visionMaxImageEdge: "1344",
+            overrideThreads: "8",
+            threadsBatch: "8",
+            extendContextIntoRam: false);
+
+        // Native ceiling: ContextPriorityFirst is capped at modelMaxCtx (131072), so 65536.
+        Assert.Equal("65536", settings["OverrideContext"]);
+        Assert.Equal("Auto", settings["LocalRopeScaling"]);
+        Assert.Equal("Auto", settings["LocalRopeScale"]);
+    }
+
+    [Fact]
+    public void Extend_context_on_lifts_context_past_native_and_sets_yarn()
+    {
+        var advice = AdviceWithNative(131072);
+        var resolved = LocalPrioritySettingsCalculator.ResolveOrder(new[]
+        {
+            "Context length", "Speed", "Fidelity", "Reasoning depth", "Reply length", "Stability"
+        });
+        var settings = LocalPrioritySettingsCalculator.Calculate(
+            resolved,
+            advice,
+            chatTemplate: "qwen",
+            specType: "ngram-simple",
+            currentSwaFull: "Disabled",
+            autoCompress: true,
+            visionEnabled: "Disabled",
+            visionProjectorPath: string.Empty,
+            visionMaxImageEdge: "1344",
+            overrideThreads: "8",
+            threadsBatch: "8",
+            extendContextIntoRam: true);
+
+        // Extended ceiling = 131072 * 2 = 262144.
+        Assert.Equal("262144", settings["OverrideContext"]);
+        Assert.Equal("yarn", settings["LocalRopeScaling"]);
+        // target/native = 2.0 -> smallest option >= 2.0 is "2".
+        Assert.Equal("2", settings["LocalRopeScale"]);
+        // Overflow must spill to RAM.
+        Assert.Equal("GPU + CPU", settings["LocalGpuOffloadMode"]);
+        Assert.Equal("Unlimited", settings["LocalCacheRam"]);
+    }
+
+    [Fact]
+    public void Extend_context_on_with_yarn_disabled_still_extends_but_no_rope_scaling()
+    {
+        var advice = AdviceWithNative(131072);
+        var resolved = LocalPrioritySettingsCalculator.ResolveOrder(new[]
+        {
+            "Context length", "Speed", "Fidelity", "Reasoning depth", "Reply length", "Stability"
+        });
+        var settings = LocalPrioritySettingsCalculator.Calculate(
+            resolved,
+            advice,
+            chatTemplate: "qwen",
+            specType: "ngram-simple",
+            currentSwaFull: "Disabled",
+            autoCompress: true,
+            visionEnabled: "Disabled",
+            visionProjectorPath: string.Empty,
+            visionMaxImageEdge: "1344",
+            overrideThreads: "8",
+            threadsBatch: "8",
+            extendContextIntoRam: true,
+            useYarn: false);
+
+        // The context still extends past the native window (overflow spills to RAM)...
+        Assert.Equal("262144", settings["OverrideContext"]);
+        Assert.Equal("GPU + CPU", settings["LocalGpuOffloadMode"]);
+        Assert.Equal("Unlimited", settings["LocalCacheRam"]);
+        // ...but no YaRN rope scaling is applied.
+        Assert.Equal("Auto", settings["LocalRopeScaling"]);
+        Assert.Equal("Auto", settings["LocalRopeScale"]);
+    }
+
+    [Theory]
+    [InlineData(131072, "q8_0", 524288)]   // 4x native, KV at floor -> rope bound
+    [InlineData(131072, "q4_1", 262144)]   // KV below floor -> 2x native KV bound
+    [InlineData(131072, "q6_k", 262144)]   // KV below floor -> 2x native KV bound
+    [InlineData(0, "q8_0", 0)]             // no native window -> no bound
+    public void Effective_useful_ceiling_bounded_by_rope_and_kv_fidelity(int native, string kv, int expected)
+    {
+        Assert.Equal(expected, LocalPrioritySettingsCalculator.EffectiveUsefulCeiling(native, kv));
+    }
+
+    [Fact]
+    public void Extend_context_on_with_context_not_top_priority_still_uses_native_quality_pick()
+    {
+        var advice = AdviceWithNative(131072);
+        // Speed first, Fidelity second, context third (rank 2) -> not a top priority, so no extension.
+        var resolved = LocalPrioritySettingsCalculator.ResolveOrder(new[]
+        {
+            "Speed", "Fidelity", "Context length", "Reasoning depth", "Reply length", "Stability"
+        });
+        var settings = LocalPrioritySettingsCalculator.Calculate(
+            resolved,
+            advice,
+            chatTemplate: "qwen",
+            specType: "ngram-simple",
+            currentSwaFull: "Disabled",
+            autoCompress: true,
+            visionEnabled: "Disabled",
+            visionProjectorPath: string.Empty,
+            visionMaxImageEdge: "1344",
+            overrideThreads: "8",
+            threadsBatch: "8",
+            extendContextIntoRam: true);
+
+        // Context is rank 2 (third of six), so it uses the lower window (capped at native) and no YaRN.
+        Assert.Equal("16384", settings["OverrideContext"]);
+        Assert.Equal("Auto", settings["LocalRopeScaling"]);
+        Assert.Equal("Auto", settings["LocalRopeScale"]);
+    }
+
+    [Fact]
+    public void Extend_context_scale_picks_smallest_option_reaching_target()
+    {
+        // Native 131072, extended 262144 -> ratio 2.0 -> "2".
+        var advice = AdviceWithNative(131072);
+        var resolved = LocalPrioritySettingsCalculator.ResolveOrder(new[]
+        {
+            "Context length", "Speed", "Fidelity", "Reasoning depth", "Reply length", "Stability"
+        });
+        var settings = LocalPrioritySettingsCalculator.Calculate(
+            resolved,
+            advice,
+            chatTemplate: "qwen",
+            specType: "ngram-simple",
+            currentSwaFull: "Disabled",
+            autoCompress: true,
+            visionEnabled: "Disabled",
+            visionProjectorPath: string.Empty,
+            visionMaxImageEdge: "1344",
+            overrideThreads: "8",
+            threadsBatch: "8",
+            extendContextIntoRam: true);
+        Assert.Equal("2", settings["LocalRopeScale"]);
+    }
+
+    [Fact]
+    public void Extend_context_on_disables_fit_to_vram()
+    {
+        // When YaRN extends the context past the native window, the overflow is meant to live
+        // in RAM, so Fit-to-VRAM (KV compression) should be disabled.
+        var advice = AdviceWithNative(131072);
+        var resolved = LocalPrioritySettingsCalculator.ResolveOrder(new[]
+        {
+            "Context length", "Speed", "Fidelity", "Reasoning depth", "Reply length", "Stability"
+        });
+        var settings = LocalPrioritySettingsCalculator.Calculate(
+            resolved,
+            advice,
+            chatTemplate: "qwen",
+            specType: "ngram-simple",
+            currentSwaFull: "Disabled",
+            autoCompress: true,
+            visionEnabled: "Disabled",
+            visionProjectorPath: string.Empty,
+            visionMaxImageEdge: "1344",
+            overrideThreads: "8",
+            threadsBatch: "8",
+            extendContextIntoRam: true);
+        Assert.Equal("Disabled", settings["LocalFit"]);
+    }
+
+    [Fact]
+    public void Extend_context_off_keeps_fit_enabled_by_default()
+    {
+        // Without YaRN extension, Fit-to-VRAM follows the normal priority logic (enabled unless
+        // Speed is first and the hardware doesn't prefer fit).
+        var advice = AdviceWithNative(131072);
+        var resolved = LocalPrioritySettingsCalculator.ResolveOrder(new[]
+        {
+            "Context length", "Speed", "Fidelity", "Reasoning depth", "Reply length", "Stability"
+        });
+        var settings = LocalPrioritySettingsCalculator.Calculate(
+            resolved,
+            advice,
+            chatTemplate: "qwen",
+            specType: "ngram-simple",
+            currentSwaFull: "Disabled",
+            autoCompress: true,
+            visionEnabled: "Disabled",
+            visionProjectorPath: string.Empty,
+            visionMaxImageEdge: "1344",
+            overrideThreads: "8",
+            threadsBatch: "8",
+            extendContextIntoRam: false);
+        Assert.Equal("Enabled", settings["LocalFit"]);
+    }
+
+    [Fact]
+    public void Yarn_target_from_option_maps_fixed_targets()
+    {
+        Assert.Equal(512 * 1024, LocalPrioritySettingsCalculator.YarnTargetFromOption("512K", 131072));
+        Assert.Equal(768 * 1024, LocalPrioritySettingsCalculator.YarnTargetFromOption("768K", 131072));
+        Assert.Equal(1024 * 1024, LocalPrioritySettingsCalculator.YarnTargetFromOption("1M", 131072));
+        // Auto returns a large value (so the RAM bound is the limiting factor).
+        Assert.True(LocalPrioritySettingsCalculator.YarnTargetFromOption("Auto", 131072) > 1024 * 1024);
+        // Never below the native window.
+        Assert.True(LocalPrioritySettingsCalculator.YarnTargetFromOption("512K", 600000) >= 600000);
+    }
+
+    [Fact]
+    public void Ram_bounded_yarn_ceiling_uses_available_ram()
+    {
+        // 64 GB total RAM, 16 GB reserve -> 48 GB available.
+        // q8_0 KV = 262144 bytes/token -> 48 GB / 262144 ≈ 196,608 overflow tokens.
+        // VRAM window = max(native 131072, ContextPriorityFirst 65536) = 131072.
+        // Ceiling ≈ 131072 + 196608 = 327680, snapped to 1024 boundary.
+        var advice = new FluxMuxRuntimeService.LocalHardwareLaunchAdvice
+        {
+            GpuTotalGb = 32,
+            ModelFileGb = 16,
+            NvidiaAvailable = true,
+            ContextPriorityFirst = 65536,
+            ModelMaxCtx = 131072,
+            TotalRamGb = 64.0,
+            KvBytesPerToken = 262144,
+            OffloadMode = "GPU + CPU"
+        };
+        var ceiling = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(advice, 131072);
+        // Should be well above the native window (extended) but bounded by RAM.
+        Assert.True(ceiling > 131072, $"Expected extension above native, got {ceiling}");
+        Assert.True(ceiling <= 1024 * 1024, $"Expected ceiling under 1M, got {ceiling}");
+        // Should be a multiple of 1024.
+        Assert.Equal(0, ceiling % 1024);
+    }
+
+    [Fact]
+    public void Ram_bounded_yarn_ceiling_uses_effective_kv_when_provided()
+    {
+        // Same 64 GB RAM as the default test, but the effective KV bytes per token is
+        // reduced (hybrid-KV + Flash Attention) so more tokens fit in the same RAM.
+        var advice = new FluxMuxRuntimeService.LocalHardwareLaunchAdvice
+        {
+            GpuTotalGb = 32,
+            ModelFileGb = 16,
+            NvidiaAvailable = true,
+            ContextPriorityFirst = 65536,
+            ModelMaxCtx = 131072,
+            TotalRamGb = 64.0,
+            KvBytesPerToken = 262144,
+            OffloadMode = "GPU + CPU"
+        };
+        var defaultCeiling = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(advice, 131072);
+        // Effective KV ~38% of default (hybrid-KV) -> more overflow tokens -> higher ceiling.
+        var effectiveCeiling = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(advice, 131072, (long)(262144 * 0.38));
+        Assert.True(effectiveCeiling > defaultCeiling,
+            $"Expected effective-KV ceiling ({effectiveCeiling}) to exceed default ({defaultCeiling})");
+        Assert.Equal(0, effectiveCeiling % 1024);
+        // A larger effective KV (e.g. f16) should yield a lower ceiling than the default.
+        var largeCeiling = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(advice, 131072, 524288);
+        Assert.True(largeCeiling < defaultCeiling,
+            $"Expected larger-KV ceiling ({largeCeiling}) to be below default ({defaultCeiling})");
+    }
+
+    [Fact]
+    public void Extend_context_with_1m_target_reaches_higher_than_ram_bound()
+    {
+        // With a 1M target and ample RAM, the context should extend well past the native window.
+        var advice = new FluxMuxRuntimeService.LocalHardwareLaunchAdvice
+        {
+            GpuTotalGb = 32,
+            ModelFileGb = 16,
+            NvidiaAvailable = true,
+            ContextPriorityFirst = 131072,
+            ModelMaxCtx = 131072,
+            TotalRamGb = 64.0,
+            KvBytesPerToken = 262144,
+            OffloadMode = "GPU + CPU",
+            OffloadModeAtMaxContext = "GPU + CPU"
+        };
+        var resolved = LocalPrioritySettingsCalculator.ResolveOrder(new[]
+        {
+            "Context length", "Speed", "Fidelity", "Reasoning depth", "Reply length", "Stability"
+        });
+        var settings = LocalPrioritySettingsCalculator.Calculate(
+            resolved,
+            advice,
+            chatTemplate: "qwen",
+            specType: "ngram-simple",
+            currentSwaFull: "Disabled",
+            autoCompress: true,
+            visionEnabled: "Disabled",
+            visionProjectorPath: string.Empty,
+            visionMaxImageEdge: "1344",
+            overrideThreads: "8",
+            threadsBatch: "8",
+            extendContextIntoRam: true,
+            yarnMaxContext: "1M");
+        var ctx = int.Parse(settings["OverrideContext"]);
+        Assert.True(ctx > 131072, $"Expected context above native 131072, got {ctx}");
+        Assert.Equal("yarn", settings["LocalRopeScaling"]);
+        Assert.Equal("GPU + CPU", settings["LocalGpuOffloadMode"]);
+        Assert.Equal("Disabled", settings["LocalFit"]);
+    }
+
+    [Fact]
+    public void Extend_context_auto_is_bounded_by_ram()
+    {
+        // With Auto and limited RAM, the context should be bounded by the RAM estimate.
+        var advice = new FluxMuxRuntimeService.LocalHardwareLaunchAdvice
+        {
+            GpuTotalGb = 32,
+            ModelFileGb = 16,
+            NvidiaAvailable = true,
+            ContextPriorityFirst = 131072,
+            ModelMaxCtx = 131072,
+            TotalRamGb = 32.0, // 32 GB total, 16 GB reserve -> 16 GB available
+            KvBytesPerToken = 262144,
+            OffloadMode = "GPU + CPU"
+        };
+        var resolved = LocalPrioritySettingsCalculator.ResolveOrder(new[]
+        {
+            "Context length", "Speed", "Fidelity", "Reasoning depth", "Reply length", "Stability"
+        });
+        var settings = LocalPrioritySettingsCalculator.Calculate(
+            resolved,
+            advice,
+            chatTemplate: "qwen",
+            specType: "ngram-simple",
+            currentSwaFull: "Disabled",
+            autoCompress: true,
+            visionEnabled: "Disabled",
+            visionProjectorPath: string.Empty,
+            visionMaxImageEdge: "1344",
+            overrideThreads: "8",
+            threadsBatch: "8",
+            extendContextIntoRam: true,
+            yarnMaxContext: "Auto");
+        var ctx = int.Parse(settings["OverrideContext"]);
+        // 16 GB / 262144 ≈ 65536 overflow tokens. Ceiling ≈ 131072 + 65536 = 196608.
+        Assert.True(ctx > 131072, $"Expected extension, got {ctx}");
+        Assert.True(ctx < 512 * 1024, $"Expected RAM-bounded context under 512K, got {ctx}");
+    }
 }
