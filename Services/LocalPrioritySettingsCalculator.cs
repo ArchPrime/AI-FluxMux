@@ -277,12 +277,87 @@ public static class LocalPrioritySettingsCalculator
     {
         int target = (option ?? string.Empty).Trim().ToUpperInvariant() switch
         {
+            "256K" => 256 * 1024,
+            "384K" => 384 * 1024,
             "512K" => 512 * 1024,
             "768K" => 768 * 1024,
             "1M" => 1024 * 1024,
             _ => int.MaxValue // Auto: let the RAM bound decide
         };
         return Math.Max(target, nativeCeiling);
+    }
+
+    /// <summary>
+    /// Determines whether YaRN extension is actually useful given the priority order and hardware.
+    /// Returns false when:
+    ///   1. The priority order means the context target would be small (e.g., Speed is top priority),
+    ///      so extending the context would contradict the user's explicit priority choice.
+    ///   2. The VRAM can already hold the desired context natively (no overflow needed), so YaRN
+    ///      adds nothing.
+    /// When true, the second return value is the recommended extension target (capped at what RAM
+    /// can hold). When false, the second return value is 0.
+    /// </summary>
+    public static (bool IsUseful, int RecommendedTarget) EvaluateYarnUsefulness(
+        IReadOnlyList<string> resolvedOrder,
+        FluxMuxRuntimeService.LocalHardwareLaunchAdvice advice,
+        bool extendContextIntoRam,
+        string yarnMaxContext,
+        long? effectiveKvBytesPerToken = null)
+    {
+        if (!extendContextIntoRam || advice.ModelMaxCtx <= 0)
+        {
+            return (false, 0);
+        }
+
+        int Rank(string name)
+        {
+            for (var i = 0; i < resolvedOrder.Count; i++)
+            {
+                if (resolvedOrder[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+                    return i;
+            }
+            return resolvedOrder.Count;
+        }
+
+        var speed = Rank("Speed");
+        var context = Rank("Context length");
+        var nativeCeiling = advice.ModelMaxCtx;
+
+        // If Speed is the top priority, the user explicitly wants fast responses, not a huge
+        // context. Extending the context would contradict this choice.
+        if (speed == 0)
+        {
+            return (false, 0);
+        }
+
+        // If Context length is not a top priority (rank 0 or 1), the user doesn't want a huge
+        // context. Extending the context would contradict this choice.
+        if (context > 1)
+        {
+            return (false, 0);
+        }
+
+        // Compute the RAM-bounded ceiling.
+        int ramBounded = RamBoundedYarnCeiling(advice, nativeCeiling, effectiveKvBytesPerToken);
+        int userTarget = YarnTargetFromOption(yarnMaxContext, nativeCeiling);
+        int yarnPracticalCeiling = 1048576;
+        int extendedCeiling = Math.Min(userTarget, Math.Min(ramBounded, yarnPracticalCeiling));
+
+        // If the extended ceiling is not greater than the native window, YaRN adds nothing.
+        if (extendedCeiling <= nativeCeiling)
+        {
+            return (false, 0);
+        }
+
+        // If the VRAM can already hold the desired context natively (no overflow needed), YaRN
+        // adds nothing. The VRAM-resident window is ContextPriorityFirst.
+        int vramWindow = Math.Max(nativeCeiling, advice.ContextPriorityFirst);
+        if (extendedCeiling <= vramWindow)
+        {
+            return (false, 0);
+        }
+
+        return (true, extendedCeiling);
     }
 
     /// <summary>

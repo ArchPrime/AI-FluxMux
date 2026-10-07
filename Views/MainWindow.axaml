@@ -342,6 +342,7 @@
                                                                                           Content="Extend context into RAM (YaRN)"
                                                                                           ToolTip.Tip="Let the model keep more chat in mind than the graphics card can hold, by borrowing ordinary computer memory. The part that fits in graphics memory stays fast; the overflow is slower. AutoTune sizes the overflow from your free memory. Leave off for the fastest, shortest-context setup." />
                                                                             </StackPanel>
+                                                                            <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{DynamicResource FluxHeadingForeground}" IsVisible="{Binding LocalYarnUntickedByWizardNote, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}" Text="{Binding LocalYarnUntickedByWizardNote}" />
                                                                           <StackPanel Spacing="4" Margin="0,4,0,0">
                                                                               <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding LocalVariantExtendContextIntoRam}">
                                                                                   <TextBlock Text="How far:"

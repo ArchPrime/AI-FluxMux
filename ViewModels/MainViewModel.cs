@@ -5014,9 +5014,14 @@ public partial class MainViewModel : ViewModelBase
             RiskLevel = YarnContextRiskLevel.Safe
         });
 
-        // Define the fixed targets
+        // Define the fixed targets. Smaller targets (256K, 384K) are useful as an emergency
+        // overflow buffer — they prevent a chat turn from crashing for lack of context without
+        // committing to a huge extension. Larger targets (512K, 768K, 1M) keep more of the chat
+        // in mind but use more memory and run slower.
         var fixedTargets = new (string Display, int Tokens)[]
         {
+            ("256K", 256 * 1024),
+            ("384K", 384 * 1024),
             ("512K", 512 * 1024),
             ("768K", 768 * 1024),
             ("1M", 1024 * 1024)
@@ -5100,6 +5105,14 @@ public partial class MainViewModel : ViewModelBase
     /// </summary>
     [ObservableProperty]
     private string _localYarnMaxContextAdvisoryText = string.Empty;
+
+    /// <summary>
+    /// Note shown when the wizard unticks "Extend into RAM (YaRN)" because the extension is not
+    /// useful given the current priority order and hardware. Empty string when the wizard did not
+    /// untick it.
+    /// </summary>
+    [ObservableProperty]
+    private string _localYarnUntickedByWizardNote = string.Empty;
 
     /// <summary>Recomputes the wizard's hardware-bounded "how far to extend" options and advisory.</summary>
     private void RefreshYarnMaxContextWizardOptions()
@@ -18118,8 +18131,42 @@ public partial class MainViewModel : ViewModelBase
         ApplyCanonicalLocalPrioritySettings(preset.Settings);
         LocalQuickAutoTuneInfoText = "Updated detailed settings to match your new priority order.";
         LocalPriorityMinimalEffectNote = string.Empty;
+
+        // Check if YaRN extension is actually useful given the priority order and hardware.
+        // If not, untick "Extend into RAM" and show a note explaining why.
+        EvaluateAndApplyYarnUsefulness();
+
         UpdateLocalPrioritySummaryTexts();
         UpdateProfileFootprintIndicators();
+    }
+
+    /// <summary>
+    /// Evaluates whether YaRN extension is useful given the current priority order and hardware.
+    /// If not useful, unticks "Extend into RAM" and sets a note explaining why. If useful,
+    /// clears the note.
+    /// </summary>
+    private void EvaluateAndApplyYarnUsefulness()
+    {
+        var advice = CurrentLocalHardwareAdvice();
+        var resolved = ResolveLocalPriorityOrder(LocalPriorityOrder);
+        var (isUseful, _) = LocalPrioritySettingsCalculator.EvaluateYarnUsefulness(
+            resolved,
+            advice,
+            LocalVariantExtendContextIntoRam,
+            LocalVariantYarnMaxContext,
+            ComputeEffectiveKvBytesPerToken());
+
+        if (LocalVariantExtendContextIntoRam && !isUseful)
+        {
+            // The user ticked "Extend into RAM" but the wizard determines it's not useful.
+            // Untick it and show a note.
+            LocalVariantExtendContextIntoRam = false;
+            LocalYarnUntickedByWizardNote = "Unticked by wizard: extending context into RAM would contradict your priority order (Speed or a non-context priority is top) or would add no usable overflow given your hardware. Tick it manually to override.";
+        }
+        else
+        {
+            LocalYarnUntickedByWizardNote = string.Empty;
+        }
     }
 
     private void ApplyCanonicalLocalPrioritySettings(IReadOnlyDictionary<string, string> canonical)
