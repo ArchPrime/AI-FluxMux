@@ -1963,9 +1963,45 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
-        if (promptTokens <= vramContext)
+
+        // Compute the overflow (how much of the prompt is in slow RAM) and the urgency level.
+        //   Urgency 0: prompt is at 85%+ of the VRAM window but not yet spilling — compact to
+        //               keep the working set on the fast card.
+        //   Urgency 1: prompt has spilled into RAM, but the overflow is small (<= 25% of the VRAM
+        //               window) — compacting a few turns would pull it back onto the card.
+        //   Urgency 2: the overflow is large (> 25% of the VRAM window) — most of the context is
+        //               running in slow RAM; compacting is strongly recommended.
+        int overflow = Math.Max(0, promptTokens - vramContext);
+        int headroomThreshold = (int)(vramContext * 0.85);
+        int recoverableThreshold = (int)(vramContext * 0.25);
+
+        int urgency;
+        if (promptTokens >= headroomThreshold && overflow <= 0)
         {
-            return; // still fits on the graphics card
+            urgency = 0; // at the edge of the VRAM window, not yet spilling
+        }
+        else if (overflow > 0 && overflow <= recoverableThreshold)
+        {
+            urgency = 1; // spilling, but recoverable with a modest compaction
+        }
+        else if (overflow > recoverableThreshold)
+        {
+            urgency = 2; // large overflow, most context in slow RAM
+        }
+        else
+        {
+            return; // still comfortably within the VRAM window
+        }
+
+        // Dynamic SSD guardrail: sample live available RAM. If it's below a safety floor, the
+        // machine is at risk of paging to SSD (very slow). Escalate urgency to the maximum and
+        // warn the user. This reacts to competing usage by other apps and Windows in real time.
+        double availableRamGiB = HostTelemetrySampler.GetAvailablePhysicalRamGiB();
+        const double ramSafetyFloorGiB = 4.0; // minimum free RAM before SSD paging becomes likely
+        bool nearSsdEdge = availableRamGiB > 0 && availableRamGiB < ramSafetyFloorGiB;
+        if (nearSsdEdge)
+        {
+            urgency = 2;
         }
 
         var existing = LoadLocalReload();
@@ -1981,8 +2017,28 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return; // already asking
         }
 
-        var reason = "This conversation is longer than the graphics-card context, so the overflow is running in ordinary memory (slower than the card)."
-            + " Compact older turns now to pull the working set back onto the graphics card? This shortens older messages; the full chat is kept in this Client app.";
+        // Build the reason text based on urgency and the SSD guardrail.
+        string reason;
+        if (nearSsdEdge)
+        {
+            reason = "Your computer is running low on memory (less than " + ramSafetyFloorGiB.ToString("0", CultureInfo.InvariantCulture) + " GB free), so the next overflow may spill to the SSD, which is very slow."
+                + " Compact older turns now to free up memory and keep the conversation fast? This shortens older messages; the full chat is kept in this Client app.";
+        }
+        else if (urgency == 2)
+        {
+            reason = "This conversation is much longer than the graphics-card context, so most of it is running in ordinary memory (much slower than the card)."
+                + " Compact older turns now to pull the working set back onto the graphics card? This shortens older messages; the full chat is kept in this Client app.";
+        }
+        else if (urgency == 1)
+        {
+            reason = "This conversation is longer than the graphics-card context, so the overflow is running in ordinary memory (slower than the card)."
+                + " Compact older turns now to pull the working set back onto the graphics card? This shortens older messages; the full chat is kept in this Client app.";
+        }
+        else
+        {
+            reason = "This conversation is approaching the graphics-card context limit. Compact older turns now to keep the working set on the fast card?"
+                + " This shortens older messages; the full chat is kept in this Client app.";
+        }
 
         SaveLocalReload(new JsonObject
         {
@@ -1996,16 +2052,17 @@ public sealed class FluxMuxGatewayHost : IDisposable
             ["hotContext"] = hotContext,
             ["neededContext"] = promptTokens,
             ["nearLimit"] = true,
-            ["destinationTight"] = false,
+            ["destinationTight"] = nearSsdEdge,
             ["compactRecommended"] = true,
             ["betterChance"] = false,
             ["forward_compact"] = compactAlreadyOn,
             ["spillCompact"] = true,
+            ["spillUrgency"] = urgency,
             ["allow_until"] = 0,
             ["suppress_until"] = 0,
             ["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
         });
-        Log("local spill compact recommend pending: prompt=" + promptTokens + " vram=" + vramContext + " window=" + hotContext);
+        Log("local spill compact recommend pending: prompt=" + promptTokens + " vram=" + vramContext + " window=" + hotContext + " urgency=" + urgency + " nearSsd=" + nearSsdEdge);
     }
 
     private static int EstimateNeededContext(JsonObject payload)

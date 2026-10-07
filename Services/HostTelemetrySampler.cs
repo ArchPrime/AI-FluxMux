@@ -52,6 +52,22 @@ public sealed class HostTelemetrySampler
             ReadNominalCpuGhz());
     }
 
+    /// <summary>
+    /// Returns the currently available physical RAM in GiB, sampled live from the OS. This
+    /// reflects competing usage by other apps and Windows at the moment of the call, so it can
+    /// be used as a dynamic guardrail (e.g. to detect when the machine is close to paging to SSD).
+    /// Returns 0 when the OS call fails.
+    /// </summary>
+    public static double GetAvailablePhysicalRamGiB()
+    {
+        var status = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
+        if (!GlobalMemoryStatusEx(ref status) || status.ullTotalPhys == 0)
+        {
+            return 0.0;
+        }
+        return status.ullAvailPhys / BytesPerGiB;
+    }
+
     public static (bool Available, string Name, double UsedGiB, double TotalGiB, double UtilizationPercent, double? TemperatureC, double? PowerW)
         ParseBestGpu(string csv)
     {
