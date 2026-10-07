@@ -5034,7 +5034,9 @@ public partial class MainViewModel : ViewModelBase
                 double totalRamGb = advice.TotalRamGb;
                 double physicalReserveGb = Math.Min(4.0, totalRamGb * 0.10); // 10% or 4 GB, whichever is smaller
                 double physicalAvailableGb = Math.Max(0.0, totalRamGb - physicalReserveGb);
-                long kvBytesPerToken = Math.Max(1L, advice.KvBytesPerToken);
+                // Use the effective KV bytes per token (accounts for the user's selected KV cache
+                // type, hybrid-KV, and Flash Attention), not the model's default.
+                long kvBytesPerToken = ComputeEffectiveKvBytesPerToken();
                 double physicalAvailableBytes = physicalAvailableGb * 1073741824.0;
                 int physicalAvailableTokens = (int)(physicalAvailableBytes / kvBytesPerToken);
                 int vramWindow = Math.Max(advice.ModelMaxCtx, advice.ContextPriorityFirst);
@@ -18877,7 +18879,11 @@ public partial class MainViewModel : ViewModelBase
             int userTarget = LocalPrioritySettingsCalculator.YarnTargetFromOption(LocalVariantYarnMaxContext, advice.ModelMaxCtx);
             int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
             int yarnCeiling = 1048576;
-            effectiveContext = Math.Max(context, Math.Min(userTarget, Math.Min(ramBounded, yarnCeiling)));
+            // Cap the effective context at what RAM can actually hold (ramBounded), but never
+            // go below the native window. The user's current context target is a ceiling, not a
+            // floor — if it exceeds what RAM can hold, we cap it at ramBounded and the info text
+            // will explain why.
+            effectiveContext = Math.Min(context, Math.Max(advice.ModelMaxCtx, Math.Min(userTarget, Math.Min(ramBounded, yarnCeiling))));
         }
 
         // Show the choice when the effective context exceeds 256K (where KV size starts to matter).
