@@ -1405,9 +1405,7 @@
                                             <CheckBox VerticalAlignment="Center"
                                                       Content="Port rules"
                                                       IsChecked="{Binding PortRules.Enabled}"
-                                                      ToolTip.Tip="When Port rules are on, they watch for conditions that can derail a Client-app turn on local models, and can pause runaway looping. Turn them off to simply forward turns to llama-server without intervention. Cloud models do not use Port rules." />
-                                            <views:HelpTopicLink TopicId="{x:Static svc:HelpTopicIds.PortRules}"
-                                                                 ToolTip.Tip="Open the Port rules Help topic." />
+                                                      ToolTip.Tip="Detailed control over how a local Client-app chat is sent on to llama-server, affecting management of context compaction, tool loops and hangs. Uncheck for default settings (recommended). Cloud models do not use these rules." />
                                         </StackPanel>
                                         <Expander Classes="fieldHeight"
                                                   Header="Advanced"
@@ -1423,8 +1421,10 @@
                                                         IsEnabled="{Binding PortRules.Enabled}">
                                                 <TextBlock TextWrapping="Wrap"
                                                            FontSize="11"
-                                                           Opacity="0.85"
-                                                           Text="One checkbox turns off the outlined group it sits in. Compact, omit, and Max pictures only change the pack forwarded to llama-server. The Client app still has the full chat. Client-app max tokens and Stop strings are a choice, not on/off." />
+                                                           Opacity="0.85">
+                                                    <Run Text="One checkbox turns off the outlined group it sits in. Compact, omit, and Max pictures only change the pack forwarded to llama-server. The Client app still has the full chat. Client-app max tokens and Stop strings are a choice, not on/off. " /><views:HelpTopicLink TopicId="{x:Static svc:HelpTopicIds.PortRules}"
+                                                                                   ToolTip.Tip="Open the Port rules Help topic." />
+                                                </TextBlock>
                                                 <StackPanel.Styles>
                                                     <Style Selector="NumericUpDown">
                                                         <Setter Property="HorizontalAlignment" Value="Stretch" />

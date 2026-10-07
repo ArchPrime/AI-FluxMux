@@ -1344,8 +1344,25 @@ public partial class MainWindow : Window
             }
         }
 
+        // The Help tab may not be fully laid out when this is called (e.g. when switching from
+        // another tab). Post the scroll at multiple priorities and with a small async delay to
+        // ensure the layout is complete before the offset is computed.
         Dispatcher.UIThread.Post(Scroll, DispatcherPriority.Loaded);
         Dispatcher.UIThread.Post(Scroll, DispatcherPriority.Background);
+        _ = DelayThenScrollAsync(Scroll);
+    }
+
+    private async Task DelayThenScrollAsync(Action scrollAction)
+    {
+        await Task.Delay(80);
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            scrollAction();
+        }
+        else
+        {
+            await Dispatcher.UIThread.InvokeAsync(scrollAction);
+        }
     }
 
     private static void CollectHelpText(Control node, StringBuilder text)
