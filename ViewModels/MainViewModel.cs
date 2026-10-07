@@ -4990,6 +4990,13 @@ public partial class MainViewModel : ViewModelBase
     private ObservableCollection<YarnContextOption> _localYarnMaxContextWizardOptions = new();
 
     /// <summary>
+    /// The currently selected "How far" option object. Bound to the ComboBox's SelectedItem.
+    /// Synced with LocalVariantYarnMaxContext (the string value used for persistence and logic).
+    /// </summary>
+    [ObservableProperty]
+    private YarnContextOption? _selectedYarnContextOption;
+
+    /// <summary>
     /// Builds the wizard's "how far to extend" options from the available RAM. Includes "Auto"
     /// (RAM decides) and all fixed targets (512K/768K/1M). Options that exceed available memory
     /// are marked with RiskLevel.ExceedsAvailable (displayed in red); options that exceed physical
@@ -5118,13 +5125,22 @@ public partial class MainViewModel : ViewModelBase
             LocalYarnMaxContextWizardOptions.Add(option);
         }
 
-        // If the current selection is no longer offered, fall back to Auto.
+        // Sync the selected option object with the current string value.
         var currentSelection = LocalVariantYarnMaxContext;
-        if (!LocalYarnMaxContextWizardOptions.Any(o => 
-                string.Equals(o.Display, currentSelection, StringComparison.OrdinalIgnoreCase)))
+        var match = LocalYarnMaxContextWizardOptions.FirstOrDefault(o =>
+            string.Equals(o.Display, currentSelection, StringComparison.OrdinalIgnoreCase));
+        if (match != null)
         {
-            LocalVariantYarnMaxContext = "Auto";
+            SelectedYarnContextOption = match;
         }
+        else
+        {
+            // Fall back to Auto.
+            LocalVariantYarnMaxContext = "Auto";
+            SelectedYarnContextOption = LocalYarnMaxContextWizardOptions.FirstOrDefault(o =>
+                string.Equals(o.Display, "Auto", StringComparison.OrdinalIgnoreCase));
+        }
+
         // Compute the advisory: which fixed targets the RAM heuristic says may not fit.
         LocalYarnMaxContextAdvisoryText = BuildYarnMaxContextAdvisoryText();
     }
@@ -10434,6 +10450,14 @@ public partial class MainViewModel : ViewModelBase
     }
     partial void OnLocalVariantYarnMaxContextChanged(string value)
         => AcceptLocalComboChange("LocalYarnMaxContext", value, restored => LocalVariantYarnMaxContext = restored);
+    partial void OnSelectedYarnContextOptionChanged(YarnContextOption? value)
+    {
+        // Sync the string value when the user picks a new option from the dropdown.
+        if (value != null && !string.Equals(value.Display, LocalVariantYarnMaxContext, StringComparison.OrdinalIgnoreCase))
+        {
+            LocalVariantYarnMaxContext = value.Display;
+        }
+    }
     partial void OnLocalKvCacheWizardChoiceChanged(string value)
     {
         UpdateLocalKvCacheWizardInfo();
@@ -18916,15 +18940,15 @@ public partial class MainViewModel : ViewModelBase
             LocalKvCacheWizardOptions.Add("Auto");
             foreach (var type in fitting)
             {
-                // Prevent duplicates
-                if (!LocalKvCacheWizardOptions.Contains(type, StringComparer.OrdinalIgnoreCase))
+                // Prevent duplicates (case-insensitive)
+                if (!LocalKvCacheWizardOptions.Any(t => string.Equals(t, type, StringComparison.OrdinalIgnoreCase)))
                 {
                     LocalKvCacheWizardOptions.Add(type);
                 }
             }
 
             // If the current selection is no longer in the list, fall back to Auto.
-            if (!LocalKvCacheWizardOptions.Contains(LocalKvCacheWizardChoice, StringComparer.OrdinalIgnoreCase))
+            if (!LocalKvCacheWizardOptions.Any(t => string.Equals(t, LocalKvCacheWizardChoice, StringComparison.OrdinalIgnoreCase)))
             {
                 LocalKvCacheWizardChoice = "Auto";
             }

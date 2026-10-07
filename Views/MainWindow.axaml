@@ -349,7 +349,7 @@
                                                                                              VerticalAlignment="Center"
                                                                                              Width="70" />
                                                                                    <ComboBox ItemsSource="{Binding LocalYarnMaxContextWizardOptions}"
-                                                                                             SelectedItem="{Binding LocalVariantYarnMaxContext}"
+                                                                                              SelectedItem="{Binding SelectedYarnContextOption}"
                                                                                              Width="130"
                                                                                              ToolTip.Tip="How far to stretch the context when Extend into RAM is on. Auto picks the largest size your computer memory can hold. The other options are fixed targets that your memory can actually hold. Bigger keeps more of the chat but uses more memory and runs slower.">
                                                                                      <ComboBox.ItemTemplate>
