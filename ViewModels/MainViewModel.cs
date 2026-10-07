@@ -17154,7 +17154,7 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
-    public void ReorderCloudPriority(string draggedPriority, string targetPriority)
+    public void ReorderCloudPriority(string draggedPriority, string targetPriority, bool applySettingsImmediately = true)
     {
         if (string.IsNullOrWhiteSpace(draggedPriority) || string.IsNullOrWhiteSpace(targetPriority) || draggedPriority == targetPriority)
         {
@@ -17170,6 +17170,18 @@ public partial class MainViewModel : ViewModelBase
 
         CloudPriorityOrder.Move(fromIndex, toIndex);
         SelectedCloudPriority = draggedPriority;
+        if (applySettingsImmediately)
+        {
+            ApplyCloudPriorityOrderToDetailedSettings(isAutoTune: false);
+        }
+    }
+
+    /// <summary>
+    /// Applies the detailed settings for the current cloud priority order. Called once when a
+    /// drag ends (or when the arrow buttons are used), not on every PointerMoved during a drag.
+    /// </summary>
+    public void ApplyCloudPriorityOrderToDetailedSettingsForDrag()
+    {
         ApplyCloudPriorityOrderToDetailedSettings(isAutoTune: false);
     }
 
@@ -18069,7 +18081,7 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
-    public void ReorderLocalPriority(string draggedPriority, string targetPriority)
+    public void ReorderLocalPriority(string draggedPriority, string targetPriority, bool applySettingsImmediately = true)
     {
         if (string.IsNullOrWhiteSpace(draggedPriority) || string.IsNullOrWhiteSpace(targetPriority) || draggedPriority == targetPriority)
         {
@@ -18085,6 +18097,18 @@ public partial class MainViewModel : ViewModelBase
 
         LocalPriorityOrder.Move(fromIndex, toIndex);
         SelectedLocalPriority = draggedPriority;
+        if (applySettingsImmediately)
+        {
+            ApplyLocalPriorityOrderToDetailedSettings();
+        }
+    }
+
+    /// <summary>
+    /// Applies the detailed settings for the current local priority order. Called once when a
+    /// drag ends (or when the arrow buttons are used), not on every PointerMoved during a drag.
+    /// </summary>
+    public void ApplyLocalPriorityOrderToDetailedSettingsForDrag()
+    {
         ApplyLocalPriorityOrderToDetailedSettings();
     }
 

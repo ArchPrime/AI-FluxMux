@@ -734,13 +734,15 @@ public partial class MainWindow : Window
                 break;
             }
 
+            // During the drag, only update the visual order (no settings application). The
+            // expensive settings application is deferred until the drag ends (FinishPriorityDrag).
             if (_draggedPriorityCollection == "cloud")
             {
-                vm.ReorderCloudPriority(_draggedPriorityName, targetPriority);
+                vm.ReorderCloudPriority(_draggedPriorityName, targetPriority, applySettingsImmediately: false);
             }
             else
             {
-                vm.ReorderLocalPriority(_draggedPriorityName, targetPriority);
+                vm.ReorderLocalPriority(_draggedPriorityName, targetPriority, applySettingsImmediately: false);
             }
         }
 
@@ -753,6 +755,20 @@ public partial class MainWindow : Window
         if (_draggedPriorityList is not null)
         {
             ReorderMoveAnimation.EndFollow(_draggedPriorityList, _draggedPriorityName);
+        }
+
+        // Apply the settings once when the drag ends. During the drag, only the visual order
+        // was updated (no settings application), so this is the single expensive call.
+        if (DataContext is MainViewModel vm && !string.IsNullOrWhiteSpace(_draggedPriorityCollection))
+        {
+            if (_draggedPriorityCollection == "cloud")
+            {
+                vm.ApplyCloudPriorityOrderToDetailedSettingsForDrag();
+            }
+            else
+            {
+                vm.ApplyLocalPriorityOrderToDetailedSettingsForDrag();
+            }
         }
 
         _draggedPriorityName = null;
