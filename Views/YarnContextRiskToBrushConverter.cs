@@ -14,6 +14,7 @@ public sealed class YarnContextRiskToBrushConverter : IValueConverter
     public static readonly YarnContextRiskToBrushConverter Instance = new();
 
     private static readonly IBrush SafeBrush = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33));
+    private static readonly IBrush PoorPerformanceBrush = new SolidColorBrush(Color.FromRgb(0xE0, 0x8A, 0x00));
     private static readonly IBrush ExceedsAvailableBrush = new SolidColorBrush(Color.FromRgb(0xCC, 0x00, 0x00));
 
     public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture)
@@ -23,6 +24,7 @@ public sealed class YarnContextRiskToBrushConverter : IValueConverter
             return riskLevel switch
             {
                 YarnContextRiskLevel.ExceedsAvailable => ExceedsAvailableBrush,
+                YarnContextRiskLevel.PoorPerformance => PoorPerformanceBrush,
                 _ => SafeBrush
             };
         }

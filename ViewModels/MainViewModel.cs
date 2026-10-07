@@ -48,7 +48,7 @@ public sealed class DiscoveredLocalServerOption
 /// </summary>
 public sealed class YarnContextOption
 {
-    public string Display { get; init; } = string.Empty;
+    public string Display { get; set; } = string.Empty;
     public int ContextTokens { get; init; }
     public YarnContextRiskLevel RiskLevel { get; init; }
 
@@ -62,6 +62,8 @@ public enum YarnContextRiskLevel
 {
     /// <summary>Option fits within available memory.</summary>
     Safe,
+    /// <summary>Option fits in memory but the RAM overflow is large enough to be very slow.</summary>
+    PoorPerformance,
     /// <summary>Option exceeds available memory but is within physical hardware limits.</summary>
     ExceedsAvailable,
     /// <summary>Option exceeds physical hardware limits (should be excluded from dropdown).</summary>
@@ -5002,11 +5004,20 @@ public partial class MainViewModel : ViewModelBase
     /// are marked with RiskLevel.ExceedsAvailable (displayed in red); options that exceed physical
     /// hardware limits are excluded from the list.
     /// </summary>
+    /// <summary>Formats a token count into a human-readable string (e.g. 262144 → "256K", 1048576 → "1M", 0 → "0").</summary>
+    private static string FormatTokens(int tokens)
+    {
+        if (tokens <= 0) return "0";
+        if (tokens >= 1048576) return $"{tokens / 1048576}M";
+        return $"{tokens / 1024}K";
+    }
+
     private ObservableCollection<YarnContextOption> BuildYarnMaxContextWizardOptions()
     {
         var options = new List<YarnContextOption>();
 
-        // Always include "Auto" (let RAM decide)
+        // Always include "Auto" (let RAM decide). The display is refined below once we know the
+        // hardware, so the user can see how much RAM overflow Auto would use.
         options.Add(new YarnContextOption
         {
             Display = "Auto",
@@ -5047,6 +5058,10 @@ public partial class MainViewModel : ViewModelBase
                 int vramWindow = Math.Max(advice.ModelMaxCtx, advice.ContextPriorityFirst);
                 int physicalCeiling = vramWindow + physicalAvailableTokens;
 
+                // Refine the "Auto" display so the user sees how much RAM overflow Auto would use.
+                int autoRamPortion = Math.Max(0, ramBounded - vramWindow);
+                options[0].Display = $"Auto (up to {FormatTokens(autoRamPortion)} in RAM)";
+
                 foreach (var (display, tokens) in fixedTargets)
                 {
                     // Exclude options that are at or below the native ceiling — they're not
@@ -5062,14 +5077,34 @@ public partial class MainViewModel : ViewModelBase
                         continue;
                     }
 
-                    // Mark options that exceed available memory (the more conservative ramBounded limit)
-                    YarnContextRiskLevel riskLevel = tokens > ramBounded
-                        ? YarnContextRiskLevel.ExceedsAvailable
-                        : YarnContextRiskLevel.Safe;
+                    // Compute the actual VRAM/RAM split for this option. The VRAM-resident portion
+                    // is capped at the hardware window; the rest overflows to system RAM (slower).
+                    int vramPortion = Math.Min(tokens, vramWindow);
+                    int ramPortion = Math.Max(0, tokens - vramWindow);
+
+                    // Three-tier risk:
+                    //   ExceedsAvailable (red)   — won't reliably fit in free RAM.
+                    //   PoorPerformance (orange) — fits, but the RAM overflow is at least as large
+                    //                              as the VRAM portion, so most of the context runs
+                    //                              at the slower RAM speed.
+                    //   Safe (default)           — fits and the VRAM portion dominates.
+                    YarnContextRiskLevel riskLevel;
+                    if (tokens > ramBounded)
+                    {
+                        riskLevel = YarnContextRiskLevel.ExceedsAvailable;
+                    }
+                    else if (ramPortion >= vramPortion)
+                    {
+                        riskLevel = YarnContextRiskLevel.PoorPerformance;
+                    }
+                    else
+                    {
+                        riskLevel = YarnContextRiskLevel.Safe;
+                    }
 
                     options.Add(new YarnContextOption
                     {
-                        Display = display,
+                        Display = $"{display} ({FormatTokens(vramPortion)} in VRAM, {FormatTokens(ramPortion)} in RAM)",
                         ContextTokens = tokens,
                         RiskLevel = riskLevel
                     });
