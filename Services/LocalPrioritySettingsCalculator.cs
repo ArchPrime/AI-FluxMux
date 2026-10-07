@@ -143,9 +143,11 @@ public static class LocalPrioritySettingsCalculator
         }
 
         int wizardContext = BaseContextPick();
-        if (extendContextIntoRam && extendedCeiling > 0 && context <= 1)
+        if (extendContextIntoRam && extendedCeiling > 0 && context == 0)
         {
-            // Context is a top priority and the user opted into extension: aim for the extended ceiling.
+            // Context length is the top priority and the user opted into extension: aim for the
+            // extended ceiling. If Speed is the top priority instead, keep the context small
+            // (for speed) even when extension is enabled — the user explicitly prioritized speed.
             wizardContext = Math.Max(wizardContext, extendedCeiling);
         }
 
