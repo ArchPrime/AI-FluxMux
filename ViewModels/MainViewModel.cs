@@ -15313,6 +15313,16 @@ public partial class MainViewModel : ViewModelBase
 
     private void AdoptExpandedLocalEditorSelection()
     {
+        // If the current selection is already an editable profile, keep it. Only adopt the
+        // expanded profile if the current selection is null or not editable. This prevents
+        // the focus from jumping away from the profile being edited when the user clicks
+        // Rename, Save, or Validate.
+        if (SelectedLocalVariantItem is { IsEditable: true })
+        {
+            UpdateVariantEditability();
+            return;
+        }
+
         var active = ResolveActiveLocalEditorItem();
         if (active is not null && !ReferenceEquals(SelectedLocalVariantItem, active))
         {
@@ -15325,6 +15335,16 @@ public partial class MainViewModel : ViewModelBase
 
     private void AdoptExpandedCloudEditorSelection()
     {
+        // If the current selection is already an editable profile, keep it. Only adopt the
+        // expanded profile if the current selection is null or not editable. This prevents
+        // the focus from jumping away from the profile being edited when the user clicks
+        // Rename, Save, or Validate.
+        if (SelectedCloudVariantItem is { IsEditable: true })
+        {
+            UpdateVariantEditability();
+            return;
+        }
+
         var active = ResolveActiveCloudEditorItem();
         if (active is not null && !ReferenceEquals(SelectedCloudVariantItem, active))
         {
