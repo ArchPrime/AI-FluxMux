@@ -5058,9 +5058,11 @@ public partial class MainViewModel : ViewModelBase
                 int vramWindow = Math.Max(advice.ModelMaxCtx, advice.ContextPriorityFirst);
                 int physicalCeiling = vramWindow + physicalAvailableTokens;
 
-                // Refine the "Auto" display so the user sees how much RAM overflow Auto would use.
+                // Refine the "Auto" display so the user sees the total context and how much of it
+                // would run in fast VRAM vs. slower RAM. Auto extends to the RAM-bounded ceiling.
+                int autoTotal = vramWindow + Math.Max(0, ramBounded - vramWindow);
                 int autoRamPortion = Math.Max(0, ramBounded - vramWindow);
-                options[0].Display = $"Auto (up to {FormatTokens(autoRamPortion)} in RAM)";
+                options[0].Display = $"Auto ({FormatTokens(autoTotal)} total: {FormatTokens(vramWindow)} in VRAM, {FormatTokens(autoRamPortion)} in RAM)";
 
                 foreach (var (display, tokens) in fixedTargets)
                 {

@@ -352,7 +352,7 @@
                                                                                    <ComboBox ItemsSource="{Binding LocalYarnMaxContextWizardOptions}"
                                                                                               SelectedItem="{Binding SelectedYarnContextOption}"
                                                                                               MinWidth="130"
-                                                                                              MaxWidth="320"
+                                                                                              MaxWidth="420"
                                                                                               ToolTip.Tip="How far to stretch the context when Extend into RAM is on. Each option shows how much runs in fast graphics memory (VRAM) vs. slower ordinary memory (RAM). Auto picks the largest size your computer memory can hold. Orange means the overflow is large enough to run slowly; red means it may not fit.">
                                                                                      <ComboBox.ItemTemplate>
                                                                                          <DataTemplate>
