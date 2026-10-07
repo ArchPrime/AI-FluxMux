@@ -5049,6 +5049,13 @@ public partial class MainViewModel : ViewModelBase
 
                 foreach (var (display, tokens) in fixedTargets)
                 {
+                    // Exclude options that are at or below the native ceiling — they're not
+                    // extensions, just the model's native limit.
+                    if (tokens <= advice.ModelMaxCtx)
+                    {
+                        continue;
+                    }
+
                     // Exclude options that exceed physical hardware limits
                     if (tokens > physicalCeiling)
                     {
