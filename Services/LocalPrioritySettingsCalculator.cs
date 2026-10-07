@@ -118,8 +118,17 @@ public static class LocalPrioritySettingsCalculator
         int extendedCeiling = 0;
         if (extendContextIntoRam && nativeCeiling > 0)
         {
-            int userTarget = YarnTargetFromOption(yarnMaxContext, nativeCeiling);
             int ramBounded = RamBoundedYarnCeiling(advice, nativeCeiling, effectiveKvBytesPerToken);
+            int userTarget;
+            if ((yarnMaxContext ?? string.Empty).Trim().ToUpperInvariant() == "AUTO")
+            {
+                // Auto: default to the largest safe target, not the absolute maximum.
+                userTarget = LargestSafeYarnTarget(advice, nativeCeiling, effectiveKvBytesPerToken);
+            }
+            else
+            {
+                userTarget = YarnTargetFromOption(yarnMaxContext, nativeCeiling);
+            }
             int yarnPracticalCeiling = 1048576; // ~1M, YaRN's practical limit
             extendedCeiling = Math.Min(userTarget, Math.Min(ramBounded, yarnPracticalCeiling));
             // Never extend below the native window.
@@ -288,6 +297,42 @@ public static class LocalPrioritySettingsCalculator
     }
 
     /// <summary>
+    /// Computes the largest "safe" YaRN extension target for the given hardware. A target is
+    /// "safe" when it fits within the RAM-bounded ceiling AND the RAM overflow is smaller than
+    /// the VRAM-resident portion (so most of the context runs at the faster VRAM speed). This is
+    /// the target that "Auto" should default to, so the user gets a reasonable extension without
+    /// running mostly in slow RAM. Returns the RAM-bounded ceiling if no fixed target is safe.
+    /// </summary>
+    public static int LargestSafeYarnTarget(
+        FluxMuxRuntimeService.LocalHardwareLaunchAdvice advice,
+        int nativeCeiling,
+        long? effectiveKvBytesPerToken = null)
+    {
+        int ramBounded = RamBoundedYarnCeiling(advice, nativeCeiling, effectiveKvBytesPerToken);
+        int vramWindow = Math.Max(nativeCeiling, advice.ContextPriorityFirst);
+
+        var fixedTargets = new[] { 256 * 1024, 384 * 1024, 512 * 1024, 768 * 1024, 1024 * 1024 };
+        int largestSafe = ramBounded; // fallback: absolute maximum
+
+        foreach (int tokens in fixedTargets)
+        {
+            if (tokens <= nativeCeiling)
+            {
+                continue;
+            }
+            int vramPortion = Math.Min(tokens, vramWindow);
+            int ramPortion = Math.Max(0, tokens - vramWindow);
+            bool isSafe = tokens <= ramBounded && ramPortion < vramPortion;
+            if (isSafe)
+            {
+                largestSafe = tokens;
+            }
+        }
+
+        return largestSafe;
+    }
+
+    /// <summary>
     /// Determines whether YaRN extension is actually useful given the priority order and hardware.
     /// Returns false when:
     ///   1. The priority order means the context target would be small (e.g., Speed is top priority),
@@ -339,7 +384,15 @@ public static class LocalPrioritySettingsCalculator
 
         // Compute the RAM-bounded ceiling.
         int ramBounded = RamBoundedYarnCeiling(advice, nativeCeiling, effectiveKvBytesPerToken);
-        int userTarget = YarnTargetFromOption(yarnMaxContext, nativeCeiling);
+        int userTarget;
+        if ((yarnMaxContext ?? string.Empty).Trim().ToUpperInvariant() == "AUTO")
+        {
+            userTarget = LargestSafeYarnTarget(advice, nativeCeiling, effectiveKvBytesPerToken);
+        }
+        else
+        {
+            userTarget = YarnTargetFromOption(yarnMaxContext, nativeCeiling);
+        }
         int yarnPracticalCeiling = 1048576;
         int extendedCeiling = Math.Min(userTarget, Math.Min(ramBounded, yarnPracticalCeiling));
 
