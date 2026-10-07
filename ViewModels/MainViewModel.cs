@@ -48,6 +48,9 @@ public sealed class DiscoveredLocalServerOption
 /// </summary>
 public sealed class YarnContextOption
 {
+    /// <summary>The short value used for persistence and logic (e.g. "Auto", "512K").</summary>
+    public string Value { get; set; } = string.Empty;
+    /// <summary>The long display string shown in the dropdown (e.g. "512K (256K in VRAM, 256K in RAM)").</summary>
     public string Display { get; set; } = string.Empty;
     public int ContextTokens { get; init; }
     public YarnContextRiskLevel RiskLevel { get; init; }
@@ -5090,6 +5093,7 @@ public partial class MainViewModel : ViewModelBase
         // hardware, so the user can see how much RAM overflow Auto would use.
         options.Add(new YarnContextOption
         {
+            Value = "Auto",
             Display = "Auto",
             ContextTokens = 0,
             RiskLevel = YarnContextRiskLevel.Safe
@@ -5129,9 +5133,27 @@ public partial class MainViewModel : ViewModelBase
                 int physicalCeiling = vramWindow + physicalAvailableTokens;
 
                 // Refine the "Auto" display so the user sees the total context and how much of it
-                // would run in fast VRAM vs. slower RAM. Auto extends to the RAM-bounded ceiling.
-                int autoTotal = vramWindow + Math.Max(0, ramBounded - vramWindow);
-                int autoRamPortion = Math.Max(0, ramBounded - vramWindow);
+                // would run in fast VRAM vs. slower RAM. Auto defaults to the largest SAFE target
+                // (not orange, not red), so the user gets a reasonable extension without running
+                // mostly in slow RAM. If no target is safe, Auto falls back to the RAM-bounded
+                // ceiling (the absolute maximum the hardware can hold).
+                int autoTarget = ramBounded; // fallback: absolute maximum
+                foreach (var (display, tokens) in fixedTargets)
+                {
+                    if (tokens <= advice.ModelMaxCtx || tokens > physicalCeiling)
+                    {
+                        continue;
+                    }
+                    int vramPortion = Math.Min(tokens, vramWindow);
+                    int ramPortion = Math.Max(0, tokens - vramWindow);
+                    bool isSafe = tokens <= ramBounded && ramPortion < vramPortion;
+                    if (isSafe)
+                    {
+                        autoTarget = tokens;
+                    }
+                }
+                int autoTotal = autoTarget;
+                int autoRamPortion = Math.Max(0, autoTotal - vramWindow);
                 options[0].Display = $"Auto ({FormatTokens(autoTotal)} total: {FormatTokens(vramWindow)} in VRAM, {FormatTokens(autoRamPortion)} in RAM)";
 
                 foreach (var (display, tokens) in fixedTargets)
@@ -5176,6 +5198,7 @@ public partial class MainViewModel : ViewModelBase
 
                     options.Add(new YarnContextOption
                     {
+                        Value = display,
                         Display = $"{display} ({FormatTokens(vramPortion)} in VRAM, {FormatTokens(ramPortion)} in RAM)",
                         ContextTokens = tokens,
                         RiskLevel = riskLevel
@@ -5189,6 +5212,7 @@ public partial class MainViewModel : ViewModelBase
                 {
                     options.Add(new YarnContextOption
                     {
+                        Value = display,
                         Display = display,
                         ContextTokens = tokens,
                         RiskLevel = YarnContextRiskLevel.Safe
@@ -5203,6 +5227,7 @@ public partial class MainViewModel : ViewModelBase
             {
                 options.Add(new YarnContextOption
                 {
+                    Value = display,
                     Display = display,
                     ContextTokens = tokens,
                     RiskLevel = YarnContextRiskLevel.Safe
@@ -5257,7 +5282,7 @@ public partial class MainViewModel : ViewModelBase
         // Sync the selected option object with the current string value.
         var currentSelection = LocalVariantYarnMaxContext;
         var match = LocalYarnMaxContextWizardOptions.FirstOrDefault(o =>
-            string.Equals(o.Display, currentSelection, StringComparison.OrdinalIgnoreCase));
+            string.Equals(o.Value, currentSelection, StringComparison.OrdinalIgnoreCase));
         if (match != null)
         {
             SelectedYarnContextOption = match;
@@ -5267,7 +5292,7 @@ public partial class MainViewModel : ViewModelBase
             // Fall back to Auto.
             LocalVariantYarnMaxContext = "Auto";
             SelectedYarnContextOption = LocalYarnMaxContextWizardOptions.FirstOrDefault(o =>
-                string.Equals(o.Display, "Auto", StringComparison.OrdinalIgnoreCase));
+                string.Equals(o.Value, "Auto", StringComparison.OrdinalIgnoreCase));
         }
 
         // Compute the advisory: which fixed targets the RAM heuristic says may not fit.
@@ -10581,10 +10606,10 @@ public partial class MainViewModel : ViewModelBase
         => AcceptLocalComboChange("LocalYarnMaxContext", value, restored => LocalVariantYarnMaxContext = restored);
     partial void OnSelectedYarnContextOptionChanged(YarnContextOption? value)
     {
-        // Sync the string value when the user picks a new option from the dropdown.
-        if (value != null && !string.Equals(value.Display, LocalVariantYarnMaxContext, StringComparison.OrdinalIgnoreCase))
+        // Sync the short value (not the long display string) when the user picks a new option.
+        if (value != null && !string.Equals(value.Value, LocalVariantYarnMaxContext, StringComparison.OrdinalIgnoreCase))
         {
-            LocalVariantYarnMaxContext = value.Display;
+            LocalVariantYarnMaxContext = value.Value;
         }
     }
     partial void OnLocalKvCacheWizardChoiceChanged(string value)
