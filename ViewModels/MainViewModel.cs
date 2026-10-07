@@ -3479,6 +3479,19 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial bool LocalReloadCompactVisible { get; set; }
 
+    // Document context dialog properties
+    [ObservableProperty]
+    public partial bool DocumentContextDialogVisible { get; set; }
+
+    [ObservableProperty]
+    public partial string DocumentContextDialogText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial int DocumentContextKeepTurns { get; set; } = 3;
+
+    [ObservableProperty]
+    public partial bool DocumentContextSummarizeWarningVisible { get; set; }
+
     public ObservableCollection<RecoveryReplacementOption> RecoveryReplacementOptions { get; } = [];
 
     [ObservableProperty]
@@ -3557,9 +3570,66 @@ public partial class MainViewModel : ViewModelBase
         RefreshLocalReloadRecommendBanner();
     }
 
+    [RelayCommand]
+    private void DocumentContextFullThisTurn()
+    {
+        _runtimeService.AnswerDocumentContextDialog("full_this_turn");
+        DocumentContextDialogVisible = false;
+        StatusMessage = "Reading the document at full precision. It will run in ordinary memory (slower) for this turn. Older turns may be compacted next turn to return to the fast card.";
+        RefreshLocalReloadRecommendBanner();
+    }
+
+    [RelayCommand]
+    private void DocumentContextFullNTurns()
+    {
+        var turns = Math.Clamp(DocumentContextKeepTurns, 1, 20);
+        _runtimeService.AnswerDocumentContextDialog("full_n_turns", turns);
+        DocumentContextDialogVisible = false;
+        StatusMessage = "Reading the document at full precision for the next " + turns + " turn" + (turns == 1 ? "" : "s") + ". It will run in ordinary memory (slower). After " + turns + " turn" + (turns == 1 ? "" : "s") + ", older parts may be compacted to return to the fast card.";
+        RefreshLocalReloadRecommendBanner();
+    }
+
+    [RelayCommand]
+    private void DocumentContextSummarize()
+    {
+        _runtimeService.AnswerDocumentContextDialog("summarize");
+        DocumentContextDialogVisible = false;
+        StatusMessage = "Creating a compact summary of the document. This may lose important details — good if you just need the gist, risky if you need precise answers. The full document is kept in this Client app.";
+        RefreshLocalReloadRecommendBanner();
+    }
+
+    [RelayCommand]
+    private void DocumentContextCancel()
+    {
+        _runtimeService.AnswerDocumentContextDialog("cancel");
+        DocumentContextDialogVisible = false;
+        StatusMessage = "Turn cancelled. You can break the document into smaller pieces or try a different approach.";
+        RefreshLocalReloadRecommendBanner();
+    }
+
     private void RefreshLocalReloadRecommendBanner()
     {
         var snapshot = _runtimeService.ReadLocalReloadRecommend();
+
+        // Handle the document context dialog separately — it has its own UI and commands.
+        if (snapshot is not null && snapshot.DocumentContext)
+        {
+            var docText = "This turn includes a large document (~" + (snapshot.DocumentContextTokens / 1024) + "K tokens). "
+                + "It won't fit in graphics-card memory, so it will run in ordinary memory (slower). "
+                + "How should context be handled?";
+            DocumentContextDialogText = docText;
+            DocumentContextDialogVisible = true;
+            // Hide the regular reload banner when the document dialog is showing.
+            LocalReloadRecommendVisible = false;
+            LocalReloadLoadVisible = false;
+            LocalReloadCompactVisible = false;
+            RefreshRecoveryReplacementChoices();
+            return;
+        }
+
+        // No document dialog — hide it.
+        DocumentContextDialogVisible = false;
+
         if (snapshot is null || snapshot.CloudFailover)
         {
             LocalReloadRecommendVisible = false;

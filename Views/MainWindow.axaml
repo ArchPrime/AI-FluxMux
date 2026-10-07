@@ -2812,6 +2812,42 @@
                             </WrapPanel>
                         </StackPanel>
                     </Border>
+                    <Border IsVisible="{Binding DocumentContextDialogVisible}"
+                            Background="{DynamicResource FluxTintAmberBackground}"
+                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="8,6">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="{Binding DocumentContextDialogText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="12" />
+                            <WrapPanel>
+                                <Button Content="Full fidelity, this turn only"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DocumentContextFullThisTurnCommand}"
+                                        ToolTip.Tip="Read the whole document at full precision. It will run in ordinary memory (slower) for this turn. Next turn, older parts may be compacted to return to the fast card." />
+                                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,0,8,4" VerticalAlignment="Center">
+                                    <Button Content="Full fidelity, keep for"
+                                            Command="{Binding DocumentContextFullNTurnsCommand}"
+                                            ToolTip.Tip="Keep the whole document in context for the next N turns, then compact. Slower for N turns, but the model remembers the document." />
+                                    <NumericUpDown Minimum="1" Maximum="20"
+                                                   Value="{Binding DocumentContextKeepTurns}"
+                                                   Width="60"
+                                                   ToolTip.Tip="How many turns to keep the document at full precision." />
+                                    <TextBlock Text="turns" VerticalAlignment="Center" FontSize="12" />
+                                </StackPanel>
+                                <Button Content="Summarize the document"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DocumentContextSummarizeCommand}"
+                                        ToolTip.Tip="Create a compact summary that fits in graphics memory. This may lose important details — good if you just need the gist, risky if you need precise answers. The full document is kept in this Client app." />
+                                <Button Content="Cancel this turn"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DocumentContextCancelCommand}"
+                                        ToolTip.Tip="Don't send this turn. You can break the document into smaller pieces or try a different approach." />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
                     <Border IsVisible="{Binding RecoveryReplacementVisible}"
                             Background="{DynamicResource FluxMutedBackground}"
                             BorderBrush="{DynamicResource FluxMutedBorder}"

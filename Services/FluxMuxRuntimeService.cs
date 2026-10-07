@@ -50,7 +50,10 @@ public sealed record LocalReloadRecommendSnapshot(
     bool DestinationTight = false,
     bool ForwardCompactActive = false,
     bool CloudFailover = false,
-    bool SpillCompact = false);
+    bool SpillCompact = false,
+    bool DocumentContext = false,
+    int DocumentContextTokens = 0,
+    int DocumentContextTotal = 0);
 
 public sealed class FluxMuxRuntimeService
 {
@@ -1160,7 +1163,10 @@ public sealed class FluxMuxRuntimeService
 				ParseBool(GetString(root, "destinationTight"), false),
 				ParseBool(GetString(root, "forward_compact"), false),
 				ParseBool(GetString(root, "cloud_failover"), false),
-				ParseBool(GetString(root, "spillCompact"), false));
+				ParseBool(GetString(root, "spillCompact"), false),
+				GetString(root, "documentContextMode").Equals("pending", StringComparison.OrdinalIgnoreCase),
+				ParseInt(GetString(root, "documentContextTokens"), 0),
+				ParseInt(GetString(root, "documentContextTotal"), 0));
 		}
 		catch
 		{
@@ -1290,6 +1296,58 @@ public sealed class FluxMuxRuntimeService
 			else if (!loadSuggested)
 			{
 				jsonObject["forward_compact"] = false;
+			}
+
+			jsonObject["updatedUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+			File.WriteAllText(_proxyLocalReloadRecommendPath, jsonObject.ToJsonString(new JsonSerializerOptions
+			{
+				WriteIndented = true
+			}));
+		}
+	}
+
+	/// <summary>
+	/// Answers the document context dialog. The mode is one of:
+	/// "full_this_turn" (run the document in RAM at full precision for this turn),
+	/// "full_n_turns" (run at full precision for N turns),
+	/// "summarize" (create a compact summary), or
+	/// "cancel" (abort the turn).
+	/// </summary>
+	public void AnswerDocumentContextDialog(string mode, int turns = 0)
+	{
+		lock (_proxyStateLock)
+		{
+			JsonObject jsonObject = (File.Exists(_proxyLocalReloadRecommendPath) ? LoadJson(_proxyLocalReloadRecommendPath) : new JsonObject());
+			long until = DateTimeOffset.UtcNow.AddMinutes(15.0).ToUnixTimeSeconds();
+
+			if (mode.Equals("cancel", StringComparison.OrdinalIgnoreCase))
+			{
+				// Cancel: abort the turn, suppress similar prompts for 15 minutes.
+				jsonObject["status"] = "no";
+				jsonObject["documentContextMode"] = "cancelled";
+				jsonObject["suppress_until"] = until;
+				jsonObject["allow_until"] = 0;
+			}
+			else if (mode.Equals("summarize", StringComparison.OrdinalIgnoreCase))
+			{
+				// Summarize: let compaction proceed (the document will be summarized).
+				jsonObject["status"] = "no";
+				jsonObject["documentContextMode"] = "summarize";
+				jsonObject["forward_compact"] = true;
+				jsonObject["suppress_until"] = 0;
+				jsonObject["allow_until"] = 0;
+			}
+			else
+			{
+				// Full fidelity (this turn or N turns): skip compaction, run in RAM.
+				jsonObject["status"] = "yes";
+				jsonObject["documentContextMode"] = (mode.Equals("full_n_turns", StringComparison.OrdinalIgnoreCase) && turns > 0)
+					? "full_n_turns"
+					: "full_this_turn";
+				jsonObject["documentContextTurns"] = turns.ToString();
+				jsonObject["forward_compact"] = false;
+				jsonObject["suppress_until"] = 0;
+				jsonObject["allow_until"] = 0;
 			}
 
 			jsonObject["updatedUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
