@@ -494,6 +494,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         var compactOn = ParseBool(Str(LoadLocalReload(), "forward_compact"));
         var compactApplied = TryApplyForwardCompact(payload, state, compactOn);
         OfferSpillCompactIfNeeded(state, payload, compactApplied);
+        OfferDocumentContextDialogIfNeeded(state, payload, compactApplied);
         var reloadOffered = false;
         var decision = FluxMuxGatewayRouting.DecideRoute(state, payload, forceRoute);
         var promptChars = 0;
@@ -1850,9 +1851,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         var rules = CurrentRules();
 
+        // Check if the user has chosen "full fidelity" for a document. In this case, we skip
+        // auto-compaction to let the document run in RAM at full precision.
+        var reloadState = LoadLocalReload();
+        var docMode = Str(reloadState, "documentContextMode");
+        bool fullFidelityActive = docMode.Equals("full_this_turn", StringComparison.OrdinalIgnoreCase)
+            || docMode.Equals("full_n_turns", StringComparison.OrdinalIgnoreCase);
+
         // Wizard-controlled auto-compaction: independent of Port rules.
         // Fires when the prompt exceeds the trigger threshold (default 80% of native context).
-        if (rules.AutoCompactEnabled)
+        if (rules.AutoCompactEnabled && !fullFidelityActive)
         {
             var autoContext = ParseInt(Str(state, "local_context"), 0);
             if (autoContext > 0)
@@ -1888,7 +1896,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         // Port-rules compaction: the original path, gated by CompactEnabled.
-        if (!rules.CompactEnabled)
+        // Skipped when full fidelity is active for a document.
+        if (!rules.CompactEnabled || fullFidelityActive)
         {
             return false;
         }
@@ -2063,6 +2072,118 @@ public sealed class FluxMuxGatewayHost : IDisposable
             ["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
         });
         Log("local spill compact recommend pending: prompt=" + promptTokens + " vram=" + vramContext + " window=" + hotContext + " urgency=" + urgency + " nearSsd=" + nearSsdEdge);
+    }
+
+    /// <summary>
+    /// Offers a "Large document detected" dialog when the prompt contains a dominant document
+    /// message that exceeds the VRAM window. The user chooses how to handle context:
+    /// full fidelity for this turn, full fidelity for N turns, summarize, or cancel.
+    /// </summary>
+    private void OfferDocumentContextDialogIfNeeded(JsonObject state, JsonObject payload, bool compactAlreadyApplied)
+    {
+        if (compactAlreadyApplied)
+        {
+            return; // already compacted this turn
+        }
+
+        if (!LocalTargetReady(state))
+        {
+            return;
+        }
+
+        // Only relevant for profiles that opted into YaRN context extension (stamped at launch).
+        if (!ParseBool(Str(state, "local_extend_context_into_ram")))
+        {
+            return;
+        }
+
+        var hotContext = ParseInt(Str(state, "local_context"), 0);
+        if (hotContext <= 0)
+        {
+            return;
+        }
+
+        var vramContext = ParseInt(Str(state, "local_vram_context"), 0);
+        if (vramContext <= 0 || vramContext >= hotContext)
+        {
+            return; // not actually extended, or no VRAM boundary to talk about
+        }
+
+        // Detect a dominant document message.
+        var (hasDocument, docTokens, totalTokens) = LocalRequestOverlayRouting.DetectDominantDocument(payload);
+        if (!hasDocument)
+        {
+            return; // no large document in this turn
+        }
+
+        // Only offer the dialog if the document exceeds the VRAM window.
+        if (totalTokens <= vramContext)
+        {
+            return; // still fits on the graphics card
+        }
+
+        // Check if we're already in a "full fidelity for N turns" mode from a previous turn.
+        var existing = LoadLocalReload();
+        var docMode = Str(existing, "documentContextMode");
+        if (docMode.Equals("full_n_turns", StringComparison.OrdinalIgnoreCase))
+        {
+            var remainingTurns = ParseInt(Str(existing, "documentContextTurns"), 0);
+            if (remainingTurns > 1)
+            {
+                // Decrement the counter and keep the full-fidelity mode.
+                SaveLocalReload(new JsonObject
+                {
+                    ["status"] = "pending",
+                    ["documentContextMode"] = "full_n_turns",
+                    ["documentContextTurns"] = (remainingTurns - 1).ToString(),
+                    ["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
+                });
+                return; // no dialog needed, already in full-fidelity mode
+            }
+        }
+
+        // Check if we're already asking for a document context decision.
+        if (Str(existing, "status").Equals("pending", StringComparison.OrdinalIgnoreCase)
+            && Str(existing, "documentContextMode").Equals("pending", StringComparison.OrdinalIgnoreCase))
+        {
+            return; // already asking
+        }
+
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (ParseLong(Str(existing, "suppress_until"), 0) > now)
+        {
+            return;
+        }
+
+        var reason = "This turn includes a large document (~" + (docTokens / 1024) + "K tokens). "
+            + "It won't fit in graphics-card memory, so it will run in ordinary memory (slower). "
+            + "How should context be handled?";
+
+        SaveLocalReload(new JsonObject
+        {
+            ["status"] = "pending",
+            ["reason"] = reason,
+            ["documentContextMode"] = "pending",
+            ["documentContextTokens"] = docTokens.ToString(),
+            ["documentContextTotal"] = totalTokens.ToString(),
+            ["model"] = string.Empty,
+            ["variant"] = string.Empty,
+            ["displayName"] = string.Empty,
+            ["hotModel"] = Str(state, "local_preferred_model"),
+            ["hotVariant"] = Str(state, "local_variant"),
+            ["hotContext"] = hotContext,
+            ["neededContext"] = totalTokens,
+            ["nearLimit"] = true,
+            ["destinationTight"] = false,
+            ["compactRecommended"] = false,
+            ["betterChance"] = false,
+            ["forward_compact"] = ParseBool(Str(existing, "forward_compact")),
+            ["spillCompact"] = false,
+            ["allow_until"] = 0,
+            ["suppress_until"] = 0,
+            ["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
+        });
+        Log("document context dialog pending: doc=" + docTokens + " total=" + totalTokens + " vram=" + vramContext);
     }
 
     private static int EstimateNeededContext(JsonObject payload)

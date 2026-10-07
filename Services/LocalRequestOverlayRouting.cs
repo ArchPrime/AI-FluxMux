@@ -246,6 +246,51 @@ public static class LocalRequestOverlayRouting
         return EstimatePromptTokens(payload) + 1 + Math.Max(0, headroom) > hotContext;
     }
 
+    /// <summary>
+    /// Detects whether the prompt contains a dominant document message — a single user message
+    /// that is large enough to suggest the user is introducing a document for analysis.
+    /// Returns the document's estimated token count and the total prompt token count.
+    /// A message is "dominant" if it is >50K tokens OR >50% of the total prompt.
+    /// </summary>
+    public static (bool HasDocument, int DocumentTokens, int TotalTokens) DetectDominantDocument(JsonObject payload)
+    {
+        var messages = payload["messages"] as JsonArray;
+        if (messages is null || messages.Count == 0)
+        {
+            return (false, 0, 0);
+        }
+
+        int totalTokens = EstimatePromptTokens(payload);
+        int largestUserTokens = 0;
+
+        foreach (var node in messages)
+        {
+            if (node is not JsonObject msg)
+            {
+                continue;
+            }
+
+            var role = msg["role"]?.ToString() ?? string.Empty;
+            if (!role.Equals("user", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            // Estimate the token count for just this message.
+            var singleMsgPayload = new JsonObject
+            {
+                ["messages"] = new JsonArray { msg }
+            };
+            int msgTokens = EstimatePromptTokens(singleMsgPayload);
+            largestUserTokens = Math.Max(largestUserTokens, msgTokens);
+        }
+
+        bool hasDocument = largestUserTokens > 50_000
+            || (totalTokens > 0 && largestUserTokens * 2 > totalTokens);
+
+        return (hasDocument, largestUserTokens, totalTokens);
+    }
+
     public static int ClampMaxTokensToContext(JsonObject payload, int hotContext, int headroom = LocalHistoryCompaction.Headroom)
     {
         var requested = ParseInt(Str(payload, "max_tokens"), 0);
