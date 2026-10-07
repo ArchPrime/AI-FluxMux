@@ -380,6 +380,23 @@ public static class LocalPrioritySettingsCalculator
     }
 
     /// <summary>
+    /// Estimates the KV cache size in GB for a given context length, using an explicit
+    /// bytes-per-token value (e.g. the effective KV bytes per token that accounts for
+    /// hybrid-KV and Flash Attention). Use this when the bytes-per-token has already been
+    /// adjusted for the model's characteristics, rather than deriving it from the KV type.
+    /// </summary>
+    public static double EstimateKvCacheGb(int contextTokens, double bytesPerToken)
+    {
+        if (contextTokens <= 0 || bytesPerToken <= 0)
+        {
+            return 0.0;
+        }
+
+        double totalBytes = contextTokens * bytesPerToken;
+        return totalBytes / 1073741824.0; // to GB
+    }
+
+    /// <summary>
     /// Returns true when <paramref name="kvType"/> is coarser than <see cref="MinimumKvCacheType"/> (q8_0).
     /// Unknown or empty values are treated as below the floor so callers raise them to q8_0.
     /// </summary>

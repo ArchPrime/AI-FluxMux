@@ -18477,6 +18477,25 @@ public partial class MainViewModel : ViewModelBase
     private long ComputeEffectiveKvBytesPerToken()
     {
         var baseBytes = ResolveKvBytesPerToken(LocalVariantKvCacheTypeK, LocalVariantKvCacheTypeV);
+        return ApplyKvAdjustments(baseBytes);
+    }
+
+    /// <summary>
+    /// Computes the effective KV cache bytes per token for a specific KV type string
+    /// (e.g. "q4_1"), adjusted for hybrid-KV and Flash Attention. Used when evaluating
+    /// different KV types in the wizard's options list.
+    /// </summary>
+    private long ComputeEffectiveKvBytesPerTokenForType(string kvType)
+    {
+        var baseBytes = LocalPrioritySettingsCalculator.KvBytesPerTokenForType(kvType);
+        return ApplyKvAdjustments(baseBytes);
+    }
+
+    /// <summary>
+    /// Applies hybrid-KV and Flash Attention adjustments to a base KV bytes-per-token value.
+    /// </summary>
+    private long ApplyKvAdjustments(double baseBytes)
+    {
         var advice = CurrentLocalHardwareAdvice();
 
         // Hybrid-KV models (e.g. Qwen3.8) use ~38% of the full-attention KV per token.
@@ -18909,7 +18928,11 @@ public partial class MainViewModel : ViewModelBase
         var fitting = new List<string>();
         foreach (var type in allTypes)
         {
-            double typeGb = LocalPrioritySettingsCalculator.EstimateKvCacheGb(effectiveContext, type);
+            // Use the effective KV bytes per token for THIS type (accounts for hybrid-KV and
+            // Flash Attention), so the estimate is consistent with RamBoundedYarnCeiling.
+            double typeGb = LocalPrioritySettingsCalculator.EstimateKvCacheGb(
+                effectiveContext,
+                (double)ComputeEffectiveKvBytesPerTokenForType(type));
 
             // Speed check first: if more than 50% of the KV cache lives in system RAM,
             // token generation will be dominated by PCIe transfers. Exclude it.
@@ -18969,7 +18992,11 @@ public partial class MainViewModel : ViewModelBase
             autoNote = $"Auto picks {choice}. ";
         }
 
-        double kvGb = LocalPrioritySettingsCalculator.EstimateKvCacheGb(effectiveContext, choice);
+        // Use the effective KV bytes per token for the chosen type (accounts for hybrid-KV and
+        // Flash Attention), so the estimate is consistent with the options list and the ceiling.
+        double kvGb = LocalPrioritySettingsCalculator.EstimateKvCacheGb(
+            effectiveContext,
+            (double)ComputeEffectiveKvBytesPerTokenForType(choice));
         double contextGb = kvGb;
 
         double gpuFits = Math.Max(0.0, availableGpu);
