@@ -22,8 +22,11 @@ Desktop router for local and cloud models. Designed for any OpenAI-compatible Cl
    It is about 76 MB. Do **not** use the "Source code (zip)" download on the repo's Code menu — that is the source to build from, not the app, and it has no ready-to-run exe.
 2. Unzip it. You get a folder named `AI-FluxMux-0.3.0-beta`. Move or open that folder somewhere you own (for example `C:\AI-FluxMux`). Do not use Program Files — Help updates write next to the program, and Windows will refuse that there.
 3. Double-click `FluxMux.Avalonia.exe` **inside that unzipped folder**. If Windows SmartScreen appears, choose **More info**, then **Run anyway**. This build is not code-signed.
-4. Open the **Help** tab and follow **1 Install AI-FluxMux**, then **2 Install llama-server**, then your local model folder and Client app (Cline or DeepSeek Harness).
-5. Point the Client app at Port `http://127.0.0.1:5001`, model id `local`. Do not point it at llama-server or at a Harness web port (often 3080).
+4. Open the **Help** tab in AI-FluxMux and follow the instructions there. In a nutshell:
+   - Install the latest `llama-server` version for your GPU (don't forget the CUDA DLLs if applicable).
+   - Nominate your local model folder.
+   - Point your Client app at `http://127.0.0.1:5001` (or whatever free port you prefer), model id `local`, API key `""`.
+   - Do **not** point it at llama-server directly, or at a Harness web port (often 3080).
 
 Settings are stored in `%AppData%\AI-FluxMux\`, not in the unzip folder.
 
