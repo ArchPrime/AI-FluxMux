@@ -50,12 +50,22 @@ public sealed class YarnContextOption
 {
     /// <summary>The short value used for persistence and logic (e.g. "Auto", "512K").</summary>
     public string Value { get; set; } = string.Empty;
-    /// <summary>The long display string shown in the dropdown (e.g. "512K=256K VRAM+256K RAM", or "Auto → 384K (...)").</summary>
+    /// <summary>The long display string shown in the dropdown (e.g. "512K=256K VRAM+256K RAM", or "Auto → 384K=256K VRAM+128K RAM").</summary>
     public string Display { get; set; } = string.Empty;
     public int ContextTokens { get; init; }
     public YarnContextRiskLevel RiskLevel { get; init; }
 
     public override string ToString() => Display;
+
+    // Value-based equality so the ComboBox can match the selection after the options
+    // list is rebuilt (Clear + Add creates new object instances; without this the
+    // SelectedItem binding orphans and the dropdown shows blank).
+    public override bool Equals(object? obj) =>
+        obj is YarnContextOption other &&
+        string.Equals(Value, other.Value, StringComparison.OrdinalIgnoreCase);
+
+    public override int GetHashCode() =>
+        string.IsNullOrEmpty(Value) ? 0 : StringComparer.OrdinalIgnoreCase.GetHashCode(Value);
 }
 
 /// <summary>
@@ -88,6 +98,16 @@ public sealed class KvCacheWizardOption
     public string Display { get; init; } = string.Empty;
 
     public override string ToString() => Display;
+
+    // Value-based equality so the ComboBox can match the selection after the options
+    // list is rebuilt (Clear + Add creates new object instances; without this the
+    // SelectedItem binding orphans and the dropdown shows blank).
+    public override bool Equals(object? obj) =>
+        obj is KvCacheWizardOption other &&
+        string.Equals(Value, other.Value, StringComparison.OrdinalIgnoreCase);
+
+    public override int GetHashCode() =>
+        string.IsNullOrEmpty(Value) ? 0 : StringComparer.OrdinalIgnoreCase.GetHashCode(Value);
 }
 
 /// <summary>
@@ -5215,7 +5235,7 @@ public partial class MainViewModel : ViewModelBase
                 }
                 int autoTotal = autoTarget;
                 int autoRamPortion = Math.Max(0, autoTotal - vramWindow);
-                options[0].Display = $"Auto → {FormatTokens(autoTotal)} ({FormatTokens(vramWindow)} VRAM+{FormatTokens(autoRamPortion)} RAM)";
+                options[0].Display = $"Auto → {FormatTokens(autoTotal)}={FormatTokens(vramWindow)} VRAM+{FormatTokens(autoRamPortion)} RAM";
 
                 foreach (var (display, tokens) in fixedTargets)
                 {
