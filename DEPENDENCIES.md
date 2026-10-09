@@ -62,17 +62,22 @@ These are pulled automatically by `dotnet build` / `dotnet restore` from [nuget.
 
 ---
 
-## 3. Runtime / external components the app manages at runtime
+## 3. Runtime / external components (needed to run local models)
 
-These are **not** build dependencies — the app detects/downloads/manages them itself (see the in-app "Servers" / update tooling). Listed so you know what the app expects on a working machine:
+These are **not** build dependencies — they're only needed at *runtime* to serve local models. The app **detects and reports** them, but **you install the first one yourself**, because the right version depends on your hardware.
 
-| Component | Role | Where the app gets it |
-|-----------|------|----------------------|
-| **llama-server** (llama.cpp) | Local LLM inference server | In-app updater / `FluxMux.Updates.exe` (downloads matching release from https://github.com/ggml-org/llama.cpp/releases) |
-| **Model files (`.gguf`)** | LLM weights | User-supplied (e.g. Hugging Face: https://huggingface.co/models) |
-| **DeepSeek Harness** | Optional cloud/local harness | In-app updater |
+| Component | Role | How you get it |
+|-----------|------|----------------|
+| **llama-server** (llama.cpp) | Local LLM inference server | **You identify & install the first version yourself** — pick the build that matches your hardware (CPU vs. CUDA/ROCm GPU, and the matching GPU driver/CUDA version). The app's **Environment → "Local runtime"** panel shows the *minimum required* vs. *installed* version and its status, and **Environment → "Install guides"** links the official download page. |
+| **Model files (`.gguf`)** | LLM weights | **You supply these** (e.g. Hugging Face: https://huggingface.co/models). Choose a model that fits your RAM/VRAM. |
+| **DeepSeek Harness** | Optional cloud/local harness | Optional; managed via the in-app updater. |
 
-> No manual install of llama.cpp is required for *building* the app. It's only needed at *runtime* to serve local models.
+### Where things live in the app
+- **Environment tab → "AI-FluxMux updates"** — check for / install **AI-FluxMux app updates** (this is where updates are done, *not* the Servers tab).
+- **Environment tab → "Local runtime"** — shows llama-server (and other core components): *Minimum / Installed / Status*. Use this to confirm your llama-server version is acceptable.
+- **Environment tab → "Install guides"** — official download pages (including llama.cpp) with an "Open in browser" button.
+
+> **llama.cpp is hardware-dependent.** There is no single "right" version — it depends on your CPU/GPU, driver, and CUDA/ROCm setup. The app tells you the *minimum* it supports; you choose a version you know works on your machine. No manual install of llama.cpp is required to *build* the app — only to *run* local models.
 
 ---
 
