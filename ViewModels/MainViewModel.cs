@@ -5441,6 +5441,10 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     private bool _showLocalKvCacheWizardChoice;
 
+    /// <summary>The KV cache type that "Auto" resolves to (e.g. "q8_0"). Empty when Auto is not in the options.</summary>
+    [ObservableProperty]
+    private string _localKvCacheAutoResolvedType = string.Empty;
+
     // Re-entrancy guard: UpdateLocalKvCacheWizardInfo sets LocalKvCacheWizardChoice,
     // which fires OnLocalKvCacheWizardChoiceChanged → UpdateLocalKvCacheWizardInfo,
     // causing infinite recursion and a stack overflow. This flag breaks the cycle.
@@ -16751,7 +16755,11 @@ public partial class MainViewModel : ViewModelBase
             var kvType = LocalKvCacheWizardChoice;
             if (string.IsNullOrWhiteSpace(kvType) || kvType.Equals("Auto", StringComparison.OrdinalIgnoreCase))
             {
-                kvType = LocalVariantKvCacheTypeK;
+                // When Auto is selected, show the resolved type (what Auto actually picks),
+                // not the stale profile default.
+                kvType = !string.IsNullOrWhiteSpace(LocalKvCacheAutoResolvedType)
+                    ? LocalKvCacheAutoResolvedType
+                    : LocalVariantKvCacheTypeK;
             }
             if (!string.IsNullOrWhiteSpace(kvType) && kvType != "Auto")
             {
@@ -19621,11 +19629,13 @@ public partial class MainViewModel : ViewModelBase
             LocalKvCacheWizardOptions.Add(new KvCacheWizardOption { Value = "q4_1", Display = "q4_1" });
             LocalKvCacheWizardChoice = "q4_1";
             SelectedKvCacheWizardOption = LocalKvCacheWizardOptions[0];
+            LocalKvCacheAutoResolvedType = string.Empty;
         }
         else
         {
             // Determine what "Auto" resolves to (the first fitting type).
             var autoResolved = fitting[0];
+            LocalKvCacheAutoResolvedType = autoResolved;
             LocalKvCacheWizardOptions.Add(new KvCacheWizardOption
             {
                 Value = "Auto",
