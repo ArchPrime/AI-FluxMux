@@ -5153,6 +5153,15 @@ public partial class MainViewModel : ViewModelBase
     private YarnContextOption? _selectedYarnContextOption;
 
     /// <summary>
+    /// The selected index in the "How far" (YaRN max-context) dropdown. Bound to the ComboBox's
+    /// SelectedIndex instead of SelectedItem to avoid the blank-on-rebuild issue: when the options
+    /// list is cleared and rebuilt, a SelectedItem binding orphans (still points to the old object
+    /// instance), but a SelectedIndex binding re-resolves cleanly to the new object at that index.
+    /// </summary>
+    [ObservableProperty]
+    private int _selectedYarnContextWizardIndex = 0;
+
+    /// <summary>
     /// Builds the wizard's "how far to extend" options from the available RAM. Includes "Auto"
     /// (RAM decides) and all fixed targets (512K/768K/1M). Options that exceed available memory
     /// are marked with RiskLevel.ExceedsAvailable (displayed in red); options that exceed physical
@@ -5366,20 +5375,30 @@ public partial class MainViewModel : ViewModelBase
             LocalYarnMaxContextWizardOptions.Add(option);
         }
 
-        // Sync the selected option object with the current string value.
+        // Sync the selected index with the current string value. Using SelectedIndex (an int)
+        // instead of SelectedItem (an object reference) avoids the blank-on-rebuild issue:
+        // when the list is cleared and rebuilt, a SelectedItem binding orphans (still points to
+        // the old object instance), but a SelectedIndex binding re-resolves cleanly to the new
+        // object at that index.
         var currentSelection = LocalVariantYarnMaxContext;
-        var match = LocalYarnMaxContextWizardOptions.FirstOrDefault(o =>
-            string.Equals(o.Value, currentSelection, StringComparison.OrdinalIgnoreCase));
-        if (match != null)
+        int matchIndex = -1;
+        for (int i = 0; i < LocalYarnMaxContextWizardOptions.Count; i++)
         {
-            SetSelectedYarnContextOptionSafely(match);
+            if (string.Equals(LocalYarnMaxContextWizardOptions[i].Value, currentSelection, StringComparison.OrdinalIgnoreCase))
+            {
+                matchIndex = i;
+                break;
+            }
+        }
+        if (matchIndex >= 0)
+        {
+            SelectedYarnContextWizardIndex = matchIndex;
         }
         else
         {
-            // Fall back to Auto.
+            // Fall back to Auto (index 0).
             LocalVariantYarnMaxContext = "Auto";
-            SetSelectedYarnContextOptionSafely(LocalYarnMaxContextWizardOptions.FirstOrDefault(o =>
-                string.Equals(o.Value, "Auto", StringComparison.OrdinalIgnoreCase)));
+            SelectedYarnContextWizardIndex = 0;
         }
 
         // Compute the advisory: which fixed targets the RAM heuristic says may not fit.
@@ -5456,6 +5475,14 @@ public partial class MainViewModel : ViewModelBase
     /// <summary>The selected KV cache wizard option (bound to the ComboBox).</summary>
     [ObservableProperty]
     private KvCacheWizardOption? _selectedKvCacheWizardOption;
+
+    /// <summary>
+    /// The selected index in the KV-cache dropdown. Bound to the ComboBox's SelectedIndex instead
+    /// of SelectedItem to avoid the blank-on-rebuild issue (same reason as
+    /// <see cref="SelectedYarnContextWizardIndex"/>).
+    /// </summary>
+    [ObservableProperty]
+    private int _selectedKvCacheWizardIndex = 0;
 
     [ObservableProperty]
     private string _localKvCacheWizardInfoText = string.Empty;
@@ -10931,6 +10958,18 @@ public partial class MainViewModel : ViewModelBase
             LocalVariantYarnMaxContext = value.Value;
         }
     }
+    partial void OnSelectedYarnContextWizardIndexChanged(int value)
+    {
+        // Sync the short value when the user picks a new option via the index binding.
+        if (value >= 0 && value < LocalYarnMaxContextWizardOptions.Count)
+        {
+            var selected = LocalYarnMaxContextWizardOptions[value];
+            if (!string.Equals(selected.Value, LocalVariantYarnMaxContext, StringComparison.OrdinalIgnoreCase))
+            {
+                LocalVariantYarnMaxContext = selected.Value;
+            }
+        }
+    }
     partial void OnSelectedLocalAutoCompactModeOptionChanged(LocalAutoCompactModeOption? value)
     {
         // Sync the internal key (not the display label) so the gateway/runtime keep seeing
@@ -10961,6 +11000,19 @@ public partial class MainViewModel : ViewModelBase
         if (!string.Equals(value.Value, LocalKvCacheWizardChoice, StringComparison.OrdinalIgnoreCase))
         {
             LocalKvCacheWizardChoice = value.Value;
+        }
+    }
+    partial void OnSelectedKvCacheWizardIndexChanged(int value)
+    {
+        // Sync the ComboBox selection back to the underlying string value via the index binding.
+        if (value < 0 || value >= LocalKvCacheWizardOptions.Count || _isUpdatingLocalKvCacheWizard)
+        {
+            return;
+        }
+        var selected = LocalKvCacheWizardOptions[value];
+        if (!string.Equals(selected.Value, LocalKvCacheWizardChoice, StringComparison.OrdinalIgnoreCase))
+        {
+            LocalKvCacheWizardChoice = selected.Value;
         }
     }
     partial void OnLocalVariantFitChanged(string value)
@@ -19684,7 +19736,7 @@ public partial class MainViewModel : ViewModelBase
             // can see why (won't run, or too slow) and adjust the context target.
             LocalKvCacheWizardOptions.Add(new KvCacheWizardOption { Value = "q4_1", Display = "q4_1" });
             LocalKvCacheWizardChoice = "q4_1";
-            SelectedKvCacheWizardOption = LocalKvCacheWizardOptions[0];
+            SelectedKvCacheWizardIndex = 0;
             LocalKvCacheAutoResolvedType = string.Empty;
         }
         else
@@ -19712,10 +19764,17 @@ public partial class MainViewModel : ViewModelBase
                 LocalKvCacheWizardChoice = "Auto";
             }
 
-            // Sync the SelectedKvCacheWizardOption to match the current choice.
-            SelectedKvCacheWizardOption = LocalKvCacheWizardOptions.FirstOrDefault(t =>
-                string.Equals(t.Value, LocalKvCacheWizardChoice, StringComparison.OrdinalIgnoreCase))
-                ?? LocalKvCacheWizardOptions[0];
+            // Sync the SelectedKvCacheWizardIndex to match the current choice.
+            int matchIndex = -1;
+            for (int i = 0; i < LocalKvCacheWizardOptions.Count; i++)
+            {
+                if (string.Equals(LocalKvCacheWizardOptions[i].Value, LocalKvCacheWizardChoice, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchIndex = i;
+                    break;
+                }
+            }
+            SelectedKvCacheWizardIndex = matchIndex >= 0 ? matchIndex : 0;
         }
 
         var choice = LocalKvCacheWizardChoice;
