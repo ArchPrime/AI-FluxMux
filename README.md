@@ -24,7 +24,7 @@ Desktop router for local and cloud models. Designed for any OpenAI-compatible Cl
 3. Double-click `FluxMux.Avalonia.exe` **inside that unzipped folder**. If Windows SmartScreen appears, choose **More info**, then **Run anyway**. This build is not code-signed.
 4. Open the **Help** tab in AI-FluxMux and follow the instructions there. In a nutshell:
    - Install the latest `llama-server` version for your GPU (don't forget the CUDA DLLs if applicable).
-   - Nominate your local model folder.
+   - Nominate your local GGUF models folder.
    - Point your Client app at `http://127.0.0.1:5001` (or whatever free port you prefer), model id `local`, API key `""`.
    - Do **not** point it at llama-server directly, or at a Harness web port (often 3080).
 
