@@ -370,6 +370,25 @@ Single source of truth for open work (consolidated from the former `TODO.md`, no
 11. **God-file split** — see the "Refactor plan" section above (Phase 1: Model Profiles tab).
 12. **YaRN context-extension dropdowns go blank when the user makes a change** (reported 10/10) — **RESOLVED (fixed 10/10, compiled clean, NOT DEPLOYED).** Root cause: both ComboBoxes bound `SelectedItem` to an object property (`SelectedYarnContextOption` / `SelectedKvCacheWizardOption`). When the options list was rebuilt (`Clear()` + `Add()` creates new object instances), the `SelectedItem` binding orphaned (still pointed to the old instance, which was no longer in the list) and displayed blank. The earlier `Equals`/`GetHashCode` fix alone was insufficient because the ComboBox's internal selection state uses reference equality. Fix: switched both ComboBox bindings from `SelectedItem` to `SelectedIndex` (an int, which re-resolves cleanly after the rebuild). Added `SelectedYarnContextWizardIndex` + `SelectedKvCacheWizardIndex` properties and updated the handlers to sync via index. *Files: `MainViewModel.cs` (index properties + handlers + sync logic), `MainWindow.axaml` (binding changes).*
 13. **Compact the Auto "How far" display string + reduce ComboBox padding** (reported 10/10) — **RESOLVED (fixed 10/10, compiled clean, NOT DEPLOYED).** (a) Changed the Auto option's display string from `Auto → 384K (256K VRAM+128K RAM)` to `Auto → 384K=256K VRAM+128K RAM` (matching the fixed-target options). (b) Reduced the global `ComboBox` padding from `8,4` to `4,4` in `App.axaml` to tighten the text and reduce the "extra right padding" the user sees. *Files: `MainViewModel.cs` (line ~5218 `options[0].Display`), `App.axaml` (line ~152).*
+14. **Reorganize YaRN + Auto-compact controls into a three-axis model** (planned 10/10): separate launch-time specialist settings (YaRN) from runtime coal-face settings (auto-compact), and put each where it belongs. The wizard stays simple (two tickboxes + priority order); the detail lives where it's relevant.
+   **Three-axis model:**
+   - **Axis 1 — Priority order** (wizard): the high-level intent ranking (Speed/Context/Quality/...). AutoTune tunes the derived settings (threads, context, KV type) to fill leftover room.
+   - **Axis 2 — YaRN** (launch-time, specialist, opt-in): tickbox in **both** wizard and detailed settings column (synced). The *detail* (target, guardrails, orange/red warning) lives in the **detailed settings column**, shown when the tickbox is on. AutoTune **ignores** YaRN unless the user explicitly opts in.
+   - **Axis 3 — Auto-compact** (runtime, coal-face, dynamic): tickbox in **wizard, detailed settings column, AND Quick Select profile** (three-way synced). The *controls* (3-way mode: Port-rules / Model-specific / None-endpoint-managed + thresholds: keep turns, trigger %, tool-results) live in the **Quick Select profile**, alongside temperature + other dynamic per-turn params. AutoTune configures the thresholds from the priority order (when mode = "Model-specific").
+   **Layout:**
+   | Control | Wizard | Detailed column | Quick Select profile |
+   |---------|:------:|:---------------:|:--------------------:|
+   | YaRN tickbox | ✅ | ✅ (synced) | ❌ |
+   | YaRN target/guardrails/warning | ❌ | ✅ | ❌ |
+   | Auto-compact tickbox | ✅ | ✅ (synced) | ✅ (synced) |
+   | Auto-compact 3-way mode + thresholds | ❌ | ❌ | ✅ |
+   **Sync rules:** (1) YaRN tickbox: wizard ↔ detailed, two-way. (2) YaRN target/guardrails/warning: detailed column only. (3) Auto-compact tickbox: wizard ↔ detailed ↔ Quick Select profile, three-way. (4) Auto-compact 3-way mode + thresholds: Quick Select profile only. (5) Explicit user choices win over inferred values.
+   **Phases (each independently testable + deployable):**
+   - **Phase 1:** Move YaRN target/guardrails/warning from wizard to detailed column. Keep wizard tickbox; add synced tickbox in detailed column. Wire the two-way sync. *Files: `MainWindow.axaml`, `MainViewModel.cs`.*
+   - **Phase 2:** Move auto-compact thresholds + 3-way mode from wizard to Quick Select profile. Keep wizard tickbox; add synced tickbox in detailed column + Quick Select profile. Wire the three-way sync. *Files: `MainWindow.axaml`, `MainViewModel.cs`.*
+   - **Phase 3:** Update AutoTune to ignore YaRN (unless opted in) + configure auto-compact thresholds from priority order. *Files: `MainViewModel.cs`, `LocalPrioritySettingsCalculator.cs`.*
+   - **Phase 4:** Document the three-axis model + sync rules in STATUS.md.
+   **Note:** The per-turn dynamic compacting (`OfferSpillCompactIfNeeded` + `TryApplyForwardCompact`) already exists and is unchanged — this plan only reorganizes the *configuration* UI.
 
 ## Recently completed (summary)
 
