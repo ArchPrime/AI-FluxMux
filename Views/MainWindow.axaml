@@ -345,10 +345,6 @@
                                                                             <TextBlock FontSize="11" TextWrapping="Wrap" Foreground="{DynamicResource FluxHeadingForeground}" IsVisible="{Binding LocalYarnUntickedByWizardNote, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}" Text="{Binding LocalYarnUntickedByWizardNote}" />
                                                                           <StackPanel Spacing="4" Margin="0,4,0,0">
                                                                               <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding LocalVariantExtendContextIntoRam}">
-                                                                                  <TextBlock Text="How far:"
-                                                                                             FontSize="11"
-                                                                                             VerticalAlignment="Center"
-                                                                                             Width="70" />
                                                                                    <ComboBox ItemsSource="{Binding LocalYarnMaxContextWizardOptions}"
                                                                                               SelectedItem="{Binding SelectedYarnContextOption}"
                                                                                               MinWidth="130"
@@ -411,13 +407,14 @@
                                                                                            Content="Auto-compact"
                                                                                            ToolTip.Tip="Silently summarize older turns when the prompt gets long. No pause, no dialog. The model continues with a compressed memory of early work." />
                                                                              </StackPanel>
-                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
                                                                                   <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}"
                                                                                             SelectedItem="{Binding SelectedLocalAutoCompactModeOption}"
                                                                                             HorizontalAlignment="Stretch"
                                                                                             ToolTip.Tip="Auto-compact settings here override the default Port rules compaction settings. Port rules default uses the global defaults from Servers - Advanced: Port rules. Profile-specific uses the per-profile settings below. None / endpoint managed disables FluxMux compaction and lets the Client app manage it." />
                                                                               </StackPanel>
+                                                                              <StackPanel Orientation="Horizontal" Spacing="6"
+                                                                                             IsVisible="{Binding LocalAutoCompactMode, Converter={x:Static vm:StringEqualsConverter.Instance}, ConverterParameter=per-profile}">
                                                                                  <TextBlock Text="Trigger:"
                                                                                             FontSize="11"
                                                                                             VerticalAlignment="Center"

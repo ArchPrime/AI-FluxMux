@@ -50,7 +50,7 @@ public sealed class YarnContextOption
 {
     /// <summary>The short value used for persistence and logic (e.g. "Auto", "512K").</summary>
     public string Value { get; set; } = string.Empty;
-    /// <summary>The long display string shown in the dropdown (e.g. "512K=256K VRAM+256K RAM").</summary>
+    /// <summary>The long display string shown in the dropdown (e.g. "512K=256K VRAM+256K RAM", or "Auto → 384K (...)").</summary>
     public string Display { get; set; } = string.Empty;
     public int ContextTokens { get; init; }
     public YarnContextRiskLevel RiskLevel { get; init; }
@@ -5215,7 +5215,7 @@ public partial class MainViewModel : ViewModelBase
                 }
                 int autoTotal = autoTarget;
                 int autoRamPortion = Math.Max(0, autoTotal - vramWindow);
-                options[0].Display = $"Auto={FormatTokens(autoTotal)} ({FormatTokens(vramWindow)} VRAM+{FormatTokens(autoRamPortion)} RAM)";
+                options[0].Display = $"Auto → {FormatTokens(autoTotal)} ({FormatTokens(vramWindow)} VRAM+{FormatTokens(autoRamPortion)} RAM)";
 
                 foreach (var (display, tokens) in fixedTargets)
                 {
