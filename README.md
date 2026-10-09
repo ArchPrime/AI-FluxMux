@@ -1,6 +1,6 @@
 # AI-FluxMux 0.3.0 beta
 
-Desktop router for local (llama-server + GGUF) and cloud models. An OpenAI-compatible **Client app** (Cline, Harness, and similar) connects to **Port** `http://127.0.0.1:5001`.
+Desktop router for local (llama-server + GGUF) and cloud models, for Cline, Harness, and similar.
 
 **Requirements:** Windows 10/11 (x64). No .NET install needed — the app is self-contained.
 
