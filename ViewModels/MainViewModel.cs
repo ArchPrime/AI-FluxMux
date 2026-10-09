@@ -347,6 +347,8 @@ public partial class MainViewModel : ViewModelBase
             PortForwardingRulesStore.BesideConfig(_configService.ConfigPath),
             _runtimeService.SetPortForwardingRules);
         PortRules.Load();
+        // Bidirectional sync: wizard "Auto-compact" ↔ detailed "Compact" tickbox.
+        PortRules.PropertyChanged += OnPortRulesPropertyChanged;
         var configDir = Path.GetDirectoryName(_configService.ConfigPath) ?? string.Empty;
         _secretsPath = Path.Combine(configDir, "fluxmux_secrets.json");
         CloudCredentialsHelpText = "Cloud credentials file: " + _secretsPath + " (preferred). Fallback keys can also be read from: " + _configService.ConfigPath;
@@ -5452,6 +5454,47 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     private bool _localAutoCompactEnabled = true;
+
+    // Re-entrancy guard: syncing LocalAutoCompactEnabled ↔ PortRules.CompactEnabled
+    // can cause infinite recursion if both change handlers fire each other.
+    private bool _isSyncingAutoCompact;
+
+    partial void OnLocalAutoCompactEnabledChanged(bool value)
+    {
+        if (_isSyncingAutoCompact) return;
+        _isSyncingAutoCompact = true;
+        try
+        {
+            if (PortRules.CompactEnabled != value)
+            {
+                PortRules.CompactEnabled = value;
+            }
+        }
+        finally
+        {
+            _isSyncingAutoCompact = false;
+        }
+    }
+
+    private void OnPortRulesPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (_isSyncingAutoCompact) return;
+        if (e.PropertyName == nameof(PortForwardingRulesViewModel.CompactEnabled))
+        {
+            _isSyncingAutoCompact = true;
+            try
+            {
+                if (LocalAutoCompactEnabled != PortRules.CompactEnabled)
+                {
+                    LocalAutoCompactEnabled = PortRules.CompactEnabled;
+                }
+            }
+            finally
+            {
+                _isSyncingAutoCompact = false;
+            }
+        }
+    }
 
     [ObservableProperty]
     private string _localAutoCompactMode = "port-rules";
