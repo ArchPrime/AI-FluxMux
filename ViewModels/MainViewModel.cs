@@ -5462,6 +5462,9 @@ public partial class MainViewModel : ViewModelBase
     partial void OnLocalAutoCompactEnabledChanged(bool value)
     {
         if (_isSyncingAutoCompact) return;
+        // Only sync to PortRules when mode is "port-rules". When "per-profile" or "none",
+        // the wizard settings are profile-specific and should not override the global PortRules.
+        if (!string.Equals(LocalAutoCompactMode, "port-rules", StringComparison.OrdinalIgnoreCase)) return;
         _isSyncingAutoCompact = true;
         try
         {
@@ -5479,6 +5482,9 @@ public partial class MainViewModel : ViewModelBase
     private void OnPortRulesPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (_isSyncingAutoCompact) return;
+        // Only sync from PortRules when mode is "port-rules". When "per-profile" or "none",
+        // the wizard settings are profile-specific and should not be overridden by global PortRules.
+        if (!string.Equals(LocalAutoCompactMode, "port-rules", StringComparison.OrdinalIgnoreCase)) return;
         if (e.PropertyName == nameof(PortForwardingRulesViewModel.CompactEnabled))
         {
             _isSyncingAutoCompact = true;
