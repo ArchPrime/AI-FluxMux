@@ -2370,6 +2370,16 @@
                                              ToolTip.Tip="Optional. A custom source for llama-server updates. Leave blank to use the default llama.cpp nightlies." />
                                 </Grid>
                                 <TextBlock TextWrapping="Wrap" Opacity="0.88" Text="{Binding LlamaServerUpdateStatusText}" />
+                                <!-- CUDA-minor picker: shown when the release ships multiple CUDA-minor zips -->
+                                <StackPanel Orientation="Horizontal" Spacing="8"
+                                            IsVisible="{Binding LlamaCudaMinorPickerVisible}">
+                                    <TextBlock VerticalAlignment="Center" Text="CUDA minor:"
+                                               ToolTip.Tip="The llama.cpp release ships multiple CUDA-minor zips. Pick the one that matches your install (e.g. 12.4, 12.6). This choice is remembered for next time." />
+                                    <ComboBox ItemsSource="{Binding LlamaCudaMinorChoices}"
+                                              SelectedItem="{Binding LlamaCudaMinor}"
+                                              Width="120"
+                                              ToolTip.Tip="Pick the CUDA minor that matches your GPU driver. This is remembered so future updates don't need a manual pick." />
+                                </StackPanel>
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button Content="Check for updates"
                                             Command="{Binding CheckForLlamaServerUpdatesCommand}">
