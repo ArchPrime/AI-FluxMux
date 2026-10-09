@@ -420,7 +420,8 @@
                                                                                             FontSize="11"
                                                                                             VerticalAlignment="Center" />
                                                                              </StackPanel>
-                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                             <StackPanel Orientation="Horizontal" Spacing="6"
+                                                                                            IsVisible="{Binding LocalAutoCompactMode, Converter={x:Static vm:StringEqualsConverter.Instance}, ConverterParameter=per-profile}">
                                                                                  <TextBlock Text="Keep turns:"
                                                                                             FontSize="11"
                                                                                             VerticalAlignment="Center"
@@ -430,7 +431,8 @@
                                                                                                Width="130"
                                                                                                ToolTip.Tip="Recent turns kept full. Older turns get summarized." />
                                                                              </StackPanel>
-                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                             <StackPanel Orientation="Horizontal" Spacing="6"
+                                                                                            IsVisible="{Binding LocalAutoCompactMode, Converter={x:Static vm:StringEqualsConverter.Instance}, ConverterParameter=per-profile}">
                                                                                  <TextBlock Text="Tool results:"
                                                                                             FontSize="11"
                                                                                             VerticalAlignment="Center"
@@ -440,7 +442,8 @@
                                                                                                Width="130"
                                                                                                ToolTip.Tip="Recent tool results kept. Older results get cleared." />
                                                                              </StackPanel>
-                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                             <StackPanel Orientation="Horizontal" Spacing="6"
+                                                                                            IsVisible="{Binding LocalAutoCompactMode, Converter={x:Static vm:StringEqualsConverter.Instance}, ConverterParameter=per-profile}">
                                                                                  <TextBlock Text="Pin user:"
                                                                                             FontSize="11"
                                                                                             VerticalAlignment="Center"
