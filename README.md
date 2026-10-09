@@ -1,6 +1,6 @@
 # AI-FluxMux 0.3.0 beta
 
-Desktop router for local (llama-server + GGUF) and cloud models, for Cline, Harness, and similar.
+Desktop router for local and cloud models. Designed for any OpenAI-compatible Client app (Cline, DeepSeek Harness, and similar). Extensive control, turn by turn, or per stored model profile, or via port rules, over model behavior. Model tuning wizard, model switch testing, YaRN context extension and more.
 
 **Requirements:** Windows 10/11 (x64). No .NET install needed — the app is self-contained.
 
