@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json.Nodes;
 using FluxMux.Avalonia.Services;
 using Xunit;
@@ -26,35 +27,31 @@ public sealed class LocalSessionArtifactPolicyTests
         // and (badly) keeps creating diagnostic dumps and screenshots.
         var messages = new JsonArray();
 
-        void AddToolCall(string tool, string path, string? content = null)
+        // Each step is an assistant tool-call (OpenAI "tool_calls" shape) followed by its
+        // tool result. This matches what LocalSessionArtifactPolicy.ListToolPaths parses
+        // (it reads message["tool_calls"], not a top-level "name"/"content").
+        void AddToolStep(string tool, string path, string? content = null)
         {
-            messages.Add(new JsonObject
-            {
-                ["role"] = "tool",
-                ["tool_call_id"] = Guid.NewGuid().ToString("N"),
-                ["name"] = tool,
-                ["content"] = new JsonArray
-                {
-                    new JsonObject { ["type"] = "text", ["text"] = content ?? $"result of {tool} on {path}" }
-                }
-            });
+            var id = Guid.NewGuid().ToString("N");
+            messages.Add(Call(id, tool, path));
+            messages.Add(Text(id, content ?? $"result of {tool} on {path}"));
         }
 
         // 1. Read the source file we're about to edit.
-        AddToolCall("read_file", @"C:\proj\src\Panel.cs");
+        AddToolStep("read_file", @"C:\proj\src\Panel.cs");
         // 2. Edit it 5 times (looping).
         for (var i = 0; i < 5; i++)
         {
-            AddToolCall("replace_in_file", @"C:\proj\src\Panel.cs");
+            AddToolStep("replace_in_file", @"C:\proj\src\Panel.cs");
         }
         // 3. Create diagnostic dumps (these ARE artifacts).
-        AddToolCall("write_to_file", @"C:\proj\debug_dump_1.md");
-        AddToolCall("write_to_file", @"C:\proj\diagnostic_trace.txt");
-        AddToolCall("write_to_file", @"C:\proj\vanishing_axes.png");
+        AddToolStep("write_to_file", @"C:\proj\debug_dump_1.md");
+        AddToolStep("write_to_file", @"C:\proj\diagnostic_trace.txt");
+        AddToolStep("write_to_file", @"C:\proj\vanishing_axes.png");
         // 4. A screenshot observation.
-        AddToolCall("take_screenshot", @"C:\proj\shot.png");
+        AddToolStep("take_screenshot", @"C:\proj\shot.png");
         // 5. Create a legit new source file (NOT an artifact).
-        AddToolCall("write_to_file", @"C:\proj\src\NewHelper.cs");
+        AddToolStep("write_to_file", @"C:\proj\src\NewHelper.cs");
 
         var artifacts = LocalSessionArtifactPolicy.Inspect(messages);
 
@@ -271,20 +268,27 @@ public sealed class LocalSessionArtifactPolicyTests
         };
 
         // A single "read" turn: an assistant tool-call plus a tool result.
-        // The result is ~4 KB so each turn adds ~4 KB to the prompt.
-        const int resultSize = 4_000;
-        const int turns = 25; // 25 turns * ~4 KB = ~100 KB, enough to overflow the window.
+        // Tokens are estimated as chars/4, so a 16 KB result is ~4,000 tokens.
+        // 25 turns * ~4,000 = ~100,000 tokens, which crosses the 80% threshold
+        // (80,000) around turn 20 and stays above it through the end.
+        const int resultSize = 16_000;
+        const int turns = 25; // enough turns to overflow the window and trigger a compact.
 
         var log = new List<string>();
         log.Add($"window={window}  autoCompactThreshold={service.AutoCompactThreshold}  " +
                 $"targetAfterCompact={service.TargetAfterCompact}");
+
+        // Wrap the messages array in ONE prompt object and reuse it across the walk. A
+        // JsonNode can only have one parent, so re-wrapping the same array in a fresh
+        // JsonObject each iteration throws "The node already has a parent" on iteration 2.
+        // (CountPromptTokens / Evaluate only read the prompt, they never re-parent it.)
+        var prompt = new JsonObject { ["messages"] = messages };
 
         for (var i = 0; i < turns; i++)
         {
             messages.Add(Call($"read_{i}", "read_files", $"file_{i}.cs"));
             messages.Add(Text($"read_{i}", new string('a', resultSize)));
 
-            var prompt = new JsonObject { ["messages"] = messages };
             var tokens = LocalSessionArtifactPolicy.CountPromptTokens(prompt);
             var decision = service.Evaluate(prompt, messages);
 
@@ -316,10 +320,11 @@ public sealed class LocalSessionArtifactPolicyTests
         // 2. At least one turn in the walk crossed the threshold and triggered a compact.
         Assert.Contains(log, line => line.Contains("autoCompact=True"));
 
-        // 3. After the compact, the prompt is back below the target.
-        var after = LocalSessionArtifactPolicy.CountPromptTokens(new JsonObject { ["messages"] = messages });
-        Assert.True(after < service.TargetAfterCompact,
-            $"post-compact tokens {after} should be below target {service.TargetAfterCompact}");
+        // 3. After the compact, the prompt is back below the target (a fraction of the window).
+        var after = LocalSessionArtifactPolicy.CountPromptTokens(prompt);
+        var targetTokens = (int)(service.TargetAfterCompact * window);
+        Assert.True(after < targetTokens,
+            $"post-compact tokens {after} should be below target {targetTokens} ({service.TargetAfterCompact:P0} of {window})");
         log.Add($"post-compact tokens={after}  ({100.0 * after / window:5.1}%)  target={service.TargetAfterCompact}");
 
         // 4. The two system messages survived the compact.

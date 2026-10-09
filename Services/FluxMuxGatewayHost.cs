@@ -86,6 +86,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
     public Func<JsonObject, JsonObject>? EnrichState { get; set; }
 
+    public Func<string, string, (string Mode, double TriggerPercent, int KeepTurns, int KeepToolResults, int PinUserChars)? >? GetLocalAutoCompactSettings { get; set; }
+
     public Action<string>? ReportPortRulesPostMortem { get; set; }
 
     public Action<PortRulesTelemetry>? ReportPortRulesTelemetry { get; set; }
@@ -1142,6 +1144,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     ReportPortRulesFinding(PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules));
                 }
                 else if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
+                    && portRules.Loading503Enabled
                     && LocalLoadingRetryPolicy.LooksLikeDaemonLoading(status, detail))
                 {
                     ReportPortRulesFinding(PortRulesPostMortem.FormatLoading503(loadingRetries, portRules));
@@ -1365,7 +1368,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         quietSeconds,
                         hangClock.WaitLongerCount,
                         (int)hangClock.FirstByteDeadline.TotalSeconds,
-                        portRules);
+                        portRules,
+                        localModelReady: LocalTargetReady(LoadState()));
                     ReportPortRulesFinding(hangDetails);
                 }
 
@@ -1860,37 +1864,85 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
         // Wizard-controlled auto-compaction: independent of Port rules.
         // Fires when the prompt exceeds the trigger threshold (default 80% of native context).
-        if (rules.AutoCompactEnabled && !fullFidelityActive)
+        // Per-profile settings override Port rules defaults.
+        if (!fullFidelityActive)
         {
+            // Look up per-profile auto-compact settings (independent of local_context).
+            var model = Str(state, "local_preferred_model");
+            var variant = Str(state, "local_variant");
+            var perProfile = GetLocalAutoCompactSettings?.Invoke(model, variant);
+
+            // "None / endpoint managed": the user explicitly opted out of gateway
+            // compaction. Skip both the wizard path and the Port-rules fallback so the
+            // endpoint (llama.cpp / the model itself) manages context. This check is
+            // outside the autoContext > 0 gate so it works even when local_context is 0.
+            if (perProfile is not null)
+            {
+                var (mode, _, _, _, _) = perProfile.Value;
+                if (mode == "none")
+                {
+                    return false;
+                }
+            }
+
             var autoContext = ParseInt(Str(state, "local_context"), 0);
             if (autoContext > 0)
             {
-                var autoPromptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
-                var triggerThreshold = (int)(autoContext * rules.AutoCompactTriggerPercent);
-                if (autoPromptTokens >= triggerThreshold)
+                // Determine which settings to use.
+                bool autoCompactEnabled;
+                double triggerPercent;
+                int keepTurns;
+                int keepToolResults;
+                int pinUserChars;
+
+                if (perProfile is not null)
                 {
-                    var autoRules = rules with
+                    var (mode, trigger, keepT, keepTool, pinUser) = perProfile.Value;
+                    autoCompactEnabled = mode == "per-profile";
+                    triggerPercent = trigger;
+                    keepTurns = keepT;
+                    keepToolResults = keepTool;
+                    pinUserChars = pinUser;
+                }
+                else
+                {
+                    // Fall back to Port rules defaults.
+                    autoCompactEnabled = rules.AutoCompactEnabled;
+                    triggerPercent = rules.AutoCompactTriggerPercent;
+                    keepTurns = rules.AutoCompactKeepTurns;
+                    keepToolResults = rules.AutoCompactKeepToolResults;
+                    pinUserChars = rules.AutoCompactPinUserChars;
+                }
+
+                if (autoCompactEnabled)
+                {
+                    var autoPromptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+                    var triggerThreshold = (int)(autoContext * triggerPercent);
+                    if (autoPromptTokens >= triggerThreshold)
                     {
-                        CompactKeepTurns = rules.AutoCompactKeepTurns,
-                        CompactToolKeepTurns = rules.AutoCompactKeepToolResults,
-                        CompactPreservedUserChars = rules.AutoCompactPinUserChars
-                    };
-                    if (LocalHistoryCompaction.TryCompactPayload(payload, autoRules, force: true))
-                    {
+                        var autoRules = rules with
+                        {
+                            CompactKeepTurns = keepTurns,
+                            CompactToolKeepTurns = keepToolResults,
+                            CompactPreservedUserChars = pinUserChars
+                        };
+                        if (LocalHistoryCompaction.TryCompactPayload(payload, autoRules, force: true))
+                        {
+                            Log("auto-compact: prompt " + autoPromptTokens.ToString(CultureInfo.InvariantCulture)
+                                + " tokens exceeded trigger " + triggerThreshold.ToString(CultureInfo.InvariantCulture)
+                                + " — shortened older turns before routing");
+                            var autoInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
+                            if (autoInserted > 0)
+                            {
+                                Log("local chat: inserted a user turn so the Qwen template has a query");
+                            }
+                            return true;
+                        }
+
                         Log("auto-compact: prompt " + autoPromptTokens.ToString(CultureInfo.InvariantCulture)
                             + " tokens exceeded trigger " + triggerThreshold.ToString(CultureInfo.InvariantCulture)
-                            + " — shortened older turns before routing");
-                        var autoInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
-                        if (autoInserted > 0)
-                        {
-                            Log("local chat: inserted a user turn so the Qwen template has a query");
-                        }
-                        return true;
+                            + " but older turns could not be shortened (too few turns, or one over-full turn)");
                     }
-
-                    Log("auto-compact: prompt " + autoPromptTokens.ToString(CultureInfo.InvariantCulture)
-                        + " tokens exceeded trigger " + triggerThreshold.ToString(CultureInfo.InvariantCulture)
-                        + " but older turns could not be shortened (too few turns, or one over-full turn)");
                 }
             }
         }

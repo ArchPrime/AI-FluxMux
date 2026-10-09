@@ -99,6 +99,17 @@ public sealed class UpdaterForm : Form
             TextRenderer.MeasureText("Updating llama-server", titleFont).Width + 80);
         titleFont.Dispose();
 
+        // DPI-aware vertical spacing: derive the gap between the content block and the
+        // action button from the font's line height so it scales with system DPI/font
+        // instead of a static pixel value. This keeps the button from crowding/clipping
+        // the status/detail text above it on high-DPI or large-font displays.
+        var uiFont = SystemFonts.MessageBoxFont ?? new Font("Segoe UI", 9F);
+        var gap = Math.Max(12, (int)Math.Round(uiFont.Height * 0.75f));
+        var sidePad = Math.Max(16, (int)Math.Round(uiFont.Height * 0.6f));
+        var topPad = Math.Max(16, (int)Math.Round(uiFont.Height * 0.6f));
+        var bottomPad = Math.Max(12, (int)Math.Round(uiFont.Height * 0.5f));
+        uiFont.Dispose();
+
         _progressBar.Width = contentWidth;
         _detailLabel.MaximumSize = new Size(contentWidth, 0);
 
@@ -111,7 +122,7 @@ public sealed class UpdaterForm : Form
             WrapContents = false,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Padding = new Padding(16, 16, 16, 4)
+            Padding = new Padding(sidePad, topPad, sidePad, gap)
         };
         content.Controls.Add(_titleLabel);
         content.Controls.Add(_statusLabel);
@@ -124,7 +135,7 @@ public sealed class UpdaterForm : Form
             Dock = DockStyle.Bottom,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Padding = new Padding(16, 8, 16, 12)
+            Padding = new Padding(sidePad, 0, sidePad, bottomPad)
         };
         _actionButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
         buttonPanel.Controls.Add(_actionButton);

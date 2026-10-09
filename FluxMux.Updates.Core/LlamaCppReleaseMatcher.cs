@@ -27,6 +27,8 @@ public sealed class LlamaServerUpdateMatch
     public string? CudartZipName { get; init; }
     public string? CudartZipUrl { get; init; }
     public bool MultipleCudaMinors { get; init; }
+    /// <summary>The distinct CUDA-minor labels available in the release (e.g. "12.4", "12.6").</summary>
+    public IReadOnlyList<string> CudaMinors { get; init; } = [];
 }
 
 public static class LlamaCppReleaseMatcher
@@ -79,7 +81,8 @@ public static class LlamaCppReleaseMatcher
     public static LlamaServerUpdateMatch? FindNewerMatching(
         IReadOnlyList<LlamaCppGithubRelease> releases,
         LlamaServerFamily family,
-        int? installedBuild)
+        int? installedBuild,
+        string? preferredCudaMinor = null)
     {
         if (!family.CanMatch)
         {
@@ -142,15 +145,39 @@ public static class LlamaCppReleaseMatcher
             .ToList();
         var ambiguous = family.Backend == "cuda" && family.CudaExact is null && cudaMinors.Count > 1;
 
+        // If the CUDA minor is ambiguous but the caller has a remembered preference, use it
+        // to pick the matching zip. This makes the "Update now" button work without manual
+        // selection when the user has previously chosen a minor.
+        string? resolvedServerZipName = null;
+        string? resolvedServerZipUrl = null;
+        string? resolvedCudartZipName = null;
+        string? resolvedCudartZipUrl = null;
+        if (ambiguous && !string.IsNullOrWhiteSpace(preferredCudaMinor))
+        {
+            var preferred = serverZips.FirstOrDefault(asset =>
+                string.Equals(ExtractCudaMinor(asset.Name), preferredCudaMinor, StringComparison.OrdinalIgnoreCase));
+            if (preferred is not null)
+            {
+                resolvedServerZipName = preferred.Name;
+                resolvedServerZipUrl = preferred.BrowserDownloadUrl;
+                var preferredCudart = cudartZips.FirstOrDefault(asset =>
+                    string.Equals(ExtractCudaMinor(asset.Name), preferredCudaMinor, StringComparison.OrdinalIgnoreCase));
+                resolvedCudartZipName = preferredCudart?.Name;
+                resolvedCudartZipUrl = preferredCudart?.BrowserDownloadUrl;
+                ambiguous = false; // resolved
+            }
+        }
+
         return new LlamaServerUpdateMatch
         {
             RemoteBuild = bestBuild,
             ReleaseUrl = best.HtmlUrl,
-            ServerZipName = ambiguous ? null : serverZips.FirstOrDefault()?.Name,
-            ServerZipUrl = ambiguous ? null : serverZips.FirstOrDefault()?.BrowserDownloadUrl,
-            CudartZipName = ambiguous ? null : cudartZips.FirstOrDefault()?.Name,
-            CudartZipUrl = ambiguous ? null : cudartZips.FirstOrDefault()?.BrowserDownloadUrl,
-            MultipleCudaMinors = ambiguous
+            ServerZipName = ambiguous ? null : (resolvedServerZipName ?? serverZips.FirstOrDefault()?.Name),
+            ServerZipUrl = ambiguous ? null : (resolvedServerZipUrl ?? serverZips.FirstOrDefault()?.BrowserDownloadUrl),
+            CudartZipName = ambiguous ? null : (resolvedCudartZipName ?? cudartZips.FirstOrDefault()?.Name),
+            CudartZipUrl = ambiguous ? null : (resolvedCudartZipUrl ?? cudartZips.FirstOrDefault()?.BrowserDownloadUrl),
+            MultipleCudaMinors = ambiguous,
+            CudaMinors = cudaMinors
         };
     }
 

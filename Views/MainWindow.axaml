@@ -450,7 +450,7 @@
                                                                                                Width="130"
                                                                                                ToolTip.Tip="How much of an older user task to preserve verbatim. The model never loses sight of what it was asked to do." />
                                                                              </StackPanel>
-                                                                             </StackPanel>
+                                                                         </StackPanel>
                                                                     </StackPanel>
                                                                     <StackPanel Spacing="2" Margin="0,6,0,0">
                                                                         <TextBlock FontSize="11" TextWrapping="Wrap" Text="{Binding LocalVariantFootprintText}" />

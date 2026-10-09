@@ -481,13 +481,15 @@ public sealed class LocalHistoryCompactionTests
         Assert.True(emptyTokens < (int)(rules.AutoCompactTriggerPercent * contextTokens));
 
         // 2. At full 20 turns, compact should fire.
+        // Each turn is sized so the 20-turn payload clearly exceeds the 80% trigger
+        // (0.80 * 32768 = 26,214 tokens). ~1,600 tokens/turn * 20 = ~32,000 tokens.
         var fullSlice = new JsonArray
         {
             new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." }
         };
         for (var i = 0; i < 20; i++)
         {
-            fullSlice.Add(new JsonObject { ["role"] = "user", ["content"] = $"Turn {i}. " + new string('u', 300) });
+            fullSlice.Add(new JsonObject { ["role"] = "user", ["content"] = $"Turn {i}. " + new string('u', 2000) });
             fullSlice.Add(new JsonObject
             {
                 ["role"] = "assistant",
@@ -501,8 +503,8 @@ public sealed class LocalHistoryCompactionTests
                     }
                 }
             });
-            fullSlice.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = "call_" + i, ["content"] = new string('t', 800) });
-            fullSlice.Add(new JsonObject { ["role"] = "assistant", ["content"] = $"Reply {i}. " + new string('a', 300) });
+            fullSlice.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = "call_" + i, ["content"] = new string('t', 4000) });
+            fullSlice.Add(new JsonObject { ["role"] = "assistant", ["content"] = $"Reply {i}. " + new string('a', 2000) });
         }
         var fullPayload = new JsonObject { ["messages"] = fullSlice };
         var fullTokens = LocalRequestOverlayRouting.EstimatePromptTokens(fullPayload);

@@ -160,16 +160,6 @@ public partial class MainWindow : Window
         }
 
         StopHelpFileWatchers();
-        await Dispatcher.UIThread.InvokeAsync(() =>
-        {
-            if (Application.Current?.ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
-            {
-                desktop.Shutdown();
-                return;
-            }
-
-            Close();
-        });
         Environment.Exit(0);
     }
 

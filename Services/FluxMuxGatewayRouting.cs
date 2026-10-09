@@ -33,7 +33,7 @@ public static class FluxMuxGatewayRouting
     public const string LocalContextOverflowMessage =
         PortRulesPostMortem.ChatTurnCannotContinue
         + "it is too large for the local model's Context. "
-        + "Raise **Context** on this model profile, or start a new chat with a smaller next step.";
+        + "Launch a model profile with higher **Context**, or start a new chat with a smaller next step.";
     public const string RepeatedToolType = "cline_repeated_command";
     public const string RepeatedToolMessage =
         PortRulesPostMortem.ChatTurnCannotContinue

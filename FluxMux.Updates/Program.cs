@@ -190,7 +190,8 @@ internal static class Program
         try
         {
             var releases = LlamaCppReleaseMatcher.ParseReleases(FetchReleasesJson(http));
-            match = LlamaCppReleaseMatcher.FindNewerMatching(releases, family, installedBuild);
+            var preferredCudaMinor = options.TryGetValue("cuda-minor", out var cm) ? cm : null;
+            match = LlamaCppReleaseMatcher.FindNewerMatching(releases, family, installedBuild, preferredCudaMinor);
         }
         catch (Exception ex)
         {

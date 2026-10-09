@@ -63,9 +63,14 @@ public static class UpdatePlan
     /// <summary>
     /// Builds the argument array for the llama-server subcommand.
     /// </summary>
-    public static IReadOnlyList<string> LlamaArgs(string serverDir)
+    public static IReadOnlyList<string> LlamaArgs(string serverDir, string? preferredCudaMinor = null)
     {
         var args = new List<string> { "llama", "--server-dir", serverDir };
+        if (!string.IsNullOrWhiteSpace(preferredCudaMinor))
+        {
+            args.Add("--cuda-minor");
+            args.Add(preferredCudaMinor);
+        }
         return args;
     }
 

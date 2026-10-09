@@ -39,6 +39,27 @@ public partial class App : Application
 
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
+            // Crash diagnostics: write full stack to Desktop on any unhandled exception.
+            // In Avalonia 12.1.1 the event lives on Avalonia.Threading.Dispatcher
+            // (not on Application); the UI dispatcher is Dispatcher.UIThread.
+            Dispatcher.UIThread.UnhandledException += (_, args) =>
+            {
+                CrashLogger.LogUnhandled(args.Exception, "Avalonia UI thread (Dispatcher.UnhandledException)");
+                args.Handled = false; // let the normal crash flow continue
+            };
+            AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            {
+                if (args.ExceptionObject is Exception ex)
+                {
+                    CrashLogger.LogUnhandled(ex, "AppDomain.UnhandledException");
+                }
+            };
+            TaskScheduler.UnobservedTaskException += (_, args) =>
+            {
+                CrashLogger.LogUnhandled(args.Exception, "TaskScheduler.UnobservedTaskException");
+                args.SetObserved();
+            };
+
             if (!TryAcquireSingleInstance())
             {
                 desktop.Shutdown();

@@ -50,10 +50,42 @@ public sealed class YarnContextOption
 {
     /// <summary>The short value used for persistence and logic (e.g. "Auto", "512K").</summary>
     public string Value { get; set; } = string.Empty;
-    /// <summary>The long display string shown in the dropdown (e.g. "512K (256K in VRAM, 256K in RAM)").</summary>
+    /// <summary>The long display string shown in the dropdown (e.g. "512K=256K VRAM+256K RAM").</summary>
     public string Display { get; set; } = string.Empty;
     public int ContextTokens { get; init; }
     public YarnContextRiskLevel RiskLevel { get; init; }
+
+    public override string ToString() => Display;
+}
+
+/// <summary>
+/// A dropdown option for the per-profile "Auto-compact" mode. <see cref="Value"/> is the
+/// internal key persisted to the profile and consumed by the gateway/runtime
+/// ("port-rules", "per-profile", "none"); <see cref="Display"/> is the friendly label
+/// shown in the ComboBox. Keeping the two separate means the UI can show "Use settings
+/// below" while the underlying setting stays the stable "per-profile" key.
+/// </summary>
+public sealed class LocalAutoCompactModeOption
+{
+    public string Value { get; init; } = string.Empty;
+
+    public string Display { get; init; } = string.Empty;
+
+    public override string ToString() => Display;
+}
+
+/// <summary>
+/// A dropdown option for the per-profile "KV cache for extended context" wizard.
+/// <see cref="Value"/> is the internal key persisted to the profile ("Auto", "q8_0", etc.);
+/// <see cref="Display"/> is the friendly label shown in the ComboBox. For "Auto", the
+/// Display shows the resolved type (e.g. "Auto → q8_0") so the user can see what Auto
+/// actually picks, matching the YaRN context dropdown's behaviour.
+/// </summary>
+public sealed class KvCacheWizardOption
+{
+    public string Value { get; init; } = string.Empty;
+
+    public string Display { get; init; } = string.Empty;
 
     public override string ToString() => Display;
 }
@@ -222,6 +254,7 @@ public partial class MainViewModel : ViewModelBase
     private bool _dependencyTabInitialized;
     private CancellationTokenSource? _localReadinessPollCts;
     private CancellationTokenSource? _localLaunchCountdownCts;
+    private CancellationTokenSource? _localValidateCts;
     private CancellationTokenSource? _activeEndpointHealthCts;
     private bool _benchmarkStatusActive;
     private bool _suppressStatusDiagnostic;
@@ -3914,6 +3947,11 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         var preference = WindowsGpuPreference.PreferenceForLabel(SelectedDesktopGpu);
         DesktopGpuBusy = true;
         ApplyDesktopGpuCommand.NotifyCanExecuteChanged();
@@ -4855,6 +4893,20 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial bool LlamaServerUpdateAvailable { get; set; }
 
+    /// <summary>
+    /// The CUDA minor the user chose when the llama.cpp release ships multiple CUDA-minor zips.
+    /// Persisted to config so future checks are unambiguous. Empty when no choice has been made.
+    /// </summary>
+    [ObservableProperty]
+    public partial string LlamaCudaMinor { get; set; } = string.Empty;
+
+    /// <summary>True when the last update check found multiple CUDA-minor zips and a picker is needed.</summary>
+    [ObservableProperty]
+    public partial bool LlamaCudaMinorPickerVisible { get; set; }
+
+    /// <summary>The available CUDA-minor labels from the last update check (e.g. "12.4", "12.6").</summary>
+    public ObservableCollection<string> LlamaCudaMinorChoices { get; } = [];
+
     [ObservableProperty]
     public partial bool LlamaServerUpdating { get; set; }
 
@@ -5065,6 +5117,13 @@ public partial class MainViewModel : ViewModelBase
     private ObservableCollection<YarnContextOption> _localYarnMaxContextWizardOptions = new();
 
     /// <summary>
+    /// Guards against re-entrant refreshes of the "How far" wizard options. Set while
+    /// <see cref="SetSelectedYarnContextOptionSafely"/> re-applies the selection so that a
+    /// cascading <c>OnSelectedYarnContextOptionChanged</c> does not re-enter the refresh loop.
+    /// </summary>
+    private bool _isRefreshingYarnWizardOptions;
+
+    /// <summary>
     /// The currently selected "How far" option object. Bound to the ComboBox's SelectedItem.
     /// Synced with LocalVariantYarnMaxContext (the string value used for persistence and logic).
     /// </summary>
@@ -5154,7 +5213,7 @@ public partial class MainViewModel : ViewModelBase
                 }
                 int autoTotal = autoTarget;
                 int autoRamPortion = Math.Max(0, autoTotal - vramWindow);
-                options[0].Display = $"Auto ({FormatTokens(autoTotal)} total: {FormatTokens(vramWindow)} in VRAM, {FormatTokens(autoRamPortion)} in RAM)";
+                options[0].Display = $"Auto={FormatTokens(autoTotal)} ({FormatTokens(vramWindow)} VRAM+{FormatTokens(autoRamPortion)} RAM)";
 
                 foreach (var (display, tokens) in fixedTargets)
                 {
@@ -5199,7 +5258,7 @@ public partial class MainViewModel : ViewModelBase
                     options.Add(new YarnContextOption
                     {
                         Value = display,
-                        Display = $"{display} ({FormatTokens(vramPortion)} in VRAM, {FormatTokens(ramPortion)} in RAM)",
+                        Display = $"{display}={FormatTokens(vramPortion)} VRAM+{FormatTokens(ramPortion)} RAM",
                         ContextTokens = tokens,
                         RiskLevel = riskLevel
                     });
@@ -5273,6 +5332,12 @@ public partial class MainViewModel : ViewModelBase
         // the bound ComboBox, which throws "Cannot change source while update is in progress"
         // when this runs during a UI update (e.g. the AutoTune command flow). Clear + Add
         // raises CollectionChanged events instead, which Avalonia handles safely.
+        //
+        // Do NOT null SelectedYarnContextOption before clearing: doing so fires
+        // OnSelectedYarnContextOptionChanged (via the ObservableProperty setter) while the
+        // ComboBox binding is mid-update, which can re-enter the binding and crash. Instead,
+        // clear the list, re-apply the matching option object, and guard against the
+        // re-entrancy that the re-apply can trigger.
         LocalYarnMaxContextWizardOptions.Clear();
         foreach (var option in options)
         {
@@ -5285,18 +5350,42 @@ public partial class MainViewModel : ViewModelBase
             string.Equals(o.Value, currentSelection, StringComparison.OrdinalIgnoreCase));
         if (match != null)
         {
-            SelectedYarnContextOption = match;
+            SetSelectedYarnContextOptionSafely(match);
         }
         else
         {
             // Fall back to Auto.
             LocalVariantYarnMaxContext = "Auto";
-            SelectedYarnContextOption = LocalYarnMaxContextWizardOptions.FirstOrDefault(o =>
-                string.Equals(o.Value, "Auto", StringComparison.OrdinalIgnoreCase));
+            SetSelectedYarnContextOptionSafely(LocalYarnMaxContextWizardOptions.FirstOrDefault(o =>
+                string.Equals(o.Value, "Auto", StringComparison.OrdinalIgnoreCase)));
         }
 
         // Compute the advisory: which fixed targets the RAM heuristic says may not fit.
         LocalYarnMaxContextAdvisoryText = BuildYarnMaxContextAdvisoryText();
+    }
+
+    /// <summary>
+    /// Sets <see cref="SelectedYarnContextOption"/> while guarding against re-entrancy.
+    /// Re-applying the selection after the options list is rebuilt can fire
+    /// <c>OnSelectedYarnContextOptionChanged</c>, which in turn can re-enter
+    /// <c>RefreshYarnMaxContextWizardOptions</c>. The guard prevents that loop.
+    /// </summary>
+    private void SetSelectedYarnContextOptionSafely(YarnContextOption? option)
+    {
+        if (_isRefreshingYarnWizardOptions)
+        {
+            return;
+        }
+
+        _isRefreshingYarnWizardOptions = true;
+        try
+        {
+            SelectedYarnContextOption = option;
+        }
+        finally
+        {
+            _isRefreshingYarnWizardOptions = false;
+        }
     }
 
     /// <summary>
@@ -5337,10 +5426,14 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>Wizard KV cache choices, filtered to what the hardware can actually handle.</summary>
-    public ObservableCollection<string> LocalKvCacheWizardOptions { get; } = [];
+    public ObservableCollection<KvCacheWizardOption> LocalKvCacheWizardOptions { get; } = [];
 
     [ObservableProperty]
     private string _localKvCacheWizardChoice = "Auto";
+
+    /// <summary>The selected KV cache wizard option (bound to the ComboBox).</summary>
+    [ObservableProperty]
+    private KvCacheWizardOption? _selectedKvCacheWizardOption;
 
     [ObservableProperty]
     private string _localKvCacheWizardInfoText = string.Empty;
@@ -5348,8 +5441,26 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     private bool _showLocalKvCacheWizardChoice;
 
+    // Re-entrancy guard: UpdateLocalKvCacheWizardInfo sets LocalKvCacheWizardChoice,
+    // which fires OnLocalKvCacheWizardChoiceChanged → UpdateLocalKvCacheWizardInfo,
+    // causing infinite recursion and a stack overflow. This flag breaks the cycle.
+    private bool _isUpdatingLocalKvCacheWizard;
+
     [ObservableProperty]
     private bool _localAutoCompactEnabled = true;
+
+    [ObservableProperty]
+    private string _localAutoCompactMode = "port-rules";
+
+    public ObservableCollection<LocalAutoCompactModeOption> LocalAutoCompactModeOptions { get; } =
+    [
+        new LocalAutoCompactModeOption { Value = "port-rules", Display = "Port rules default" },
+        new LocalAutoCompactModeOption { Value = "per-profile", Display = "Profile-specific" },
+        new LocalAutoCompactModeOption { Value = "none", Display = "None / endpoint managed" }
+    ];
+
+    [ObservableProperty]
+    private LocalAutoCompactModeOption? _selectedLocalAutoCompactModeOption;
 
     [ObservableProperty]
     private decimal _localAutoCompactTriggerPercent = 80;
@@ -5564,6 +5675,8 @@ public partial class MainViewModel : ViewModelBase
         LlamaReleasePageAvailable = false;
         LlamaServerUpdateAvailable = false;
         LlamaServerUpdating = false;
+        LlamaCudaMinorPickerVisible = false;
+        LlamaCudaMinorChoices.Clear();
         _llamaServerZipUrl = string.Empty;
         _llamaCudartZipUrl = string.Empty;
         _llamaReleaseUrl = string.Empty;
@@ -5573,7 +5686,31 @@ public partial class MainViewModel : ViewModelBase
         http.DefaultRequestHeaders.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
         try
         {
-            var llamaResult = await LlamaServerUpdateCheck.CheckAsync(http, LocalServerExecutablePath, LlamaUpdateSource);
+            LlamaServerUpdateResult llamaResult;
+            // Use reflection to call CheckAsync: the Core DLL may be stale (predates the
+            // preferredCudaMinor parameter). A direct call to the 5-param overload throws
+            // MissingMethodException at JIT resolution time (before any try-catch can catch
+            // it), so we must use reflection to probe for the method dynamically.
+            var checkMethod = typeof(LlamaServerUpdateCheck).GetMethod(
+                "CheckAsync",
+                new[] { typeof(HttpClient), typeof(string), typeof(string), typeof(CancellationToken), typeof(string) });
+            if (checkMethod is not null)
+            {
+                // New Core DLL: 5-param CheckAsync with preferredCudaMinor.
+                var task = (System.Threading.Tasks.Task<LlamaServerUpdateResult>)checkMethod.Invoke(
+                    null, new object[] { http, LocalServerExecutablePath, LlamaUpdateSource, CancellationToken.None, LlamaCudaMinor });
+                llamaResult = await task;
+            }
+            else
+            {
+                // Stale Core DLL: fall back to the 4-param CheckAsync (no preferredCudaMinor).
+                var oldMethod = typeof(LlamaServerUpdateCheck).GetMethod(
+                    "CheckAsync",
+                    new[] { typeof(HttpClient), typeof(string), typeof(string), typeof(CancellationToken) });
+                var task = (System.Threading.Tasks.Task<LlamaServerUpdateResult>)oldMethod.Invoke(
+                    null, new object[] { http, LocalServerExecutablePath, LlamaUpdateSource, CancellationToken.None });
+                llamaResult = await task;
+            }
             LlamaServerUpdateStatusText = llamaResult.StatusText;
             if (!string.IsNullOrWhiteSpace(llamaResult.InstalledBuildLabel))
             {
@@ -5587,9 +5724,33 @@ public partial class MainViewModel : ViewModelBase
             LlamaReleasePageAvailable = !string.IsNullOrWhiteSpace(_llamaReleaseUrl);
             LlamaServerUpdateAvailable = llamaResult.NewerAvailable
                 && !string.IsNullOrWhiteSpace(_llamaServerZipUrl);
+            // If the CUDA minor is ambiguous, show the picker so the user can choose.
+            // Use reflection: the Core DLL may be stale (predates CudaMinorAmbiguous).
+            // A direct property access throws MissingMethodException at JIT resolution time.
+            var cudaMinorAmbiguousProp = typeof(LlamaServerUpdateResult).GetProperty("CudaMinorAmbiguous");
+            var cudaMinorsProp = typeof(LlamaServerUpdateResult).GetProperty("CudaMinors");
+            if (cudaMinorAmbiguousProp is not null && cudaMinorsProp is not null)
+            {
+                bool isAmbiguous = (bool)cudaMinorAmbiguousProp.GetValue(llamaResult);
+                var minors = (System.Collections.Generic.IReadOnlyList<string>)cudaMinorsProp.GetValue(llamaResult);
+                if (isAmbiguous && minors.Count > 0)
+                {
+                    LlamaCudaMinorPickerVisible = true;
+                    foreach (var minor in minors)
+                    {
+                        if (!LlamaCudaMinorChoices.Contains(minor))
+                        {
+                            LlamaCudaMinorChoices.Add(minor);
+                        }
+                    }
+                }
+            }
             if (llamaResult.NewerAvailable)
             {
-                StatusMessage = "A matching llama-server zip is available. Confirm this folder still matches this GPU before downloading.";
+                StatusMessage = LlamaCudaMinorPickerVisible
+                    ? "A newer llama-server is available, but the release ships multiple CUDA-minor zips. Pick the one that matches your install."
+                    : "A matching llama-server zip is available. Confirm this folder still matches this GPU before downloading.";
+                LlamaServerUpdateStatusText += GpuUpdateAdvice();
             }
         }
         catch (Exception ex)
@@ -5648,84 +5809,6 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand]
     private void OpenLlamaReleasePage()
         => OpenExternalLink(string.IsNullOrWhiteSpace(_llamaReleaseUrl) ? null : _llamaReleaseUrl);
-
-    [RelayCommand(CanExecute = nameof(CanUpdateLlamaServerNow))]
-    private async Task UpdateLlamaServerNowAsync()
-    {
-        if (string.IsNullOrWhiteSpace(_llamaServerZipUrl))
-        {
-            LlamaServerUpdateProgressText = "No matching llama-server zip is available yet. Run Check for updates first.";
-            return;
-        }
-
-        var installDir = Path.GetDirectoryName(LocalServerExecutablePath);
-        if (string.IsNullOrWhiteSpace(installDir) || !Directory.Exists(installDir))
-        {
-            LlamaServerUpdateProgressText = "The llama-server folder is not set. Choose llama-server.exe on the Servers tab first.";
-            return;
-        }
-
-        var running = LlamaServerUpdateService.GetRunningLlamaPids();
-        if (running.Count > 0)
-        {
-            LlamaServerUpdateProgressText = "llama-server is running (PID " + string.Join(", ", running)
-                + "). Stop it first, then run the update again.";
-            StatusMessage = LlamaServerUpdateProgressText;
-            return;
-        }
-
-        var confirmed = ThemedDialog.Confirm(
-            "Update llama-server now",
-            "This downloads the matching llama-server zip"
-            + (string.IsNullOrWhiteSpace(_llamaCudartZipUrl) ? string.Empty : " and the matching CUDA DLLs zip")
-            + " and swaps it into " + installDir
-            + ". The current folder is kept as a backup. Continue?",
-            "Update now",
-            "Cancel");
-        if (!confirmed)
-        {
-            return;
-        }
-
-        LlamaServerUpdating = true;
-        LlamaServerUpdateProgressText = "Starting the update...";
-        StatusMessage = "Updating llama-server...";
-        using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd(FluxMuxAppInfo.UserAgent);
-        try
-        {
-            var outcome = await LlamaServerUpdateService.UpdateAsync(
-                http,
-                installDir,
-                _llamaServerZipUrl,
-                string.IsNullOrWhiteSpace(_llamaCudartZipUrl) ? null : _llamaCudartZipUrl,
-                reportProgress: message =>
-                {
-                    LlamaServerUpdateProgressText = message;
-                    StatusMessage = message;
-                });
-            LlamaServerUpdateProgressText = outcome.StatusText;
-            StatusMessage = outcome.StatusText;
-            if (outcome.Succeeded)
-            {
-                LlamaServerUpdateAvailable = false;
-            }
-        }
-        catch (Exception ex)
-        {
-            LlamaServerUpdateProgressText = "The update could not be completed: " + ex.Message;
-            StatusMessage = LlamaServerUpdateProgressText;
-        }
-        finally
-        {
-            LlamaServerUpdating = false;
-        }
-    }
-
-    private bool CanUpdateLlamaServerNow()
-        => !LlamaServerUpdating
-            && !string.IsNullOrWhiteSpace(_llamaServerZipUrl)
-            && !string.IsNullOrWhiteSpace(LocalServerExecutablePath);
 
     // ------------------------------------------------------------------
     // "Update now" buttons: check for a newer version first, report when
@@ -5843,7 +5926,36 @@ public partial class MainViewModel : ViewModelBase
         LlamaServerUpdateResult? llamaResult;
         try
         {
-            llamaResult = await LlamaServerUpdateCheck.CheckAsync(http, LocalServerExecutablePath, LlamaUpdateSource);
+            // Use reflection to call CheckAsync: the Core DLL may be stale (predates the
+            // preferredCudaMinor parameter). A direct call to the 5-param overload throws
+            // MissingMethodException at JIT resolution time (before any try-catch can catch
+            // it), so we must use reflection to probe for the method dynamically.
+            var checkMethod = typeof(LlamaServerUpdateCheck).GetMethod(
+                "CheckAsync",
+                new[] { typeof(HttpClient), typeof(string), typeof(string), typeof(CancellationToken), typeof(string) });
+            if (checkMethod is not null)
+            {
+                // New Core DLL: 5-param CheckAsync with preferredCudaMinor.
+                var task = (System.Threading.Tasks.Task<LlamaServerUpdateResult>)checkMethod.Invoke(
+                    null, new object[] { http, LocalServerExecutablePath, LlamaUpdateSource, CancellationToken.None, LlamaCudaMinor });
+                llamaResult = await task;
+            }
+            else
+            {
+                // Stale Core DLL: fall back to the 4-param CheckAsync (no preferredCudaMinor).
+                var oldMethod = typeof(LlamaServerUpdateCheck).GetMethod(
+                    "CheckAsync",
+                    new[] { typeof(HttpClient), typeof(string), typeof(string), typeof(CancellationToken) });
+                if (oldMethod is null)
+                {
+                    LlamaServerUpdateStatusText = "Could not locate a compatible llama-server update check in the loaded updater library. Rebuild and restart AI-FluxMux.";
+                    StatusMessage = LlamaServerUpdateStatusText;
+                    return;
+                }
+                var task = (System.Threading.Tasks.Task<LlamaServerUpdateResult>)oldMethod.Invoke(
+                    null, new object[] { http, LocalServerExecutablePath, LlamaUpdateSource, CancellationToken.None });
+                llamaResult = await task;
+            }
         }
         catch (Exception ex)
         {
@@ -5852,7 +5964,12 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        LlamaServerUpdateStatusText = llamaResult.StatusText;
+        // The user just clicked "Update now", so the check result's trailing
+        // "Click Update now to back up and replace..." instruction is circular
+        // here. Keep the informative part (family, build, matching zip) and
+        // replace that tail with a status that matches this moment.
+        LlamaServerUpdateStatusText = TrimUpdateNowInstruction(llamaResult.StatusText)
+            + " Closing AI-FluxMux to run the updater...";
         _llamaServerZipUrl = llamaResult.ServerZipUrl ?? string.Empty;
         _llamaCudartZipUrl = llamaResult.CudartZipUrl ?? string.Empty;
         _llamaReleaseUrl = llamaResult.ReleaseUrl ?? string.Empty;
@@ -5873,7 +5990,7 @@ public partial class MainViewModel : ViewModelBase
             "Update llama-server",
             "A newer llama-server is available. This closes AI-FluxMux, then runs the standalone updater to back up and replace your llama-server folder. "
                 + "When it finishes, AI-FluxMux will restart.",
-            UpdatePlan.LlamaArgs(serverDir));
+            BuildLlamaArgsSafe(serverDir, LlamaCudaMinor));
     }
 
     // ------------------------------------------------------------------
@@ -5902,7 +6019,7 @@ public partial class MainViewModel : ViewModelBase
             "Update llama-server",
             "This closes AI-FluxMux, then runs the standalone updater to back up and replace your llama-server folder. "
                 + "When it finishes, AI-FluxMux will restart.",
-            UpdatePlan.LlamaArgs(serverDir));
+            BuildLlamaArgsSafe(serverDir, LlamaCudaMinor));
     }
 
     [RelayCommand]
@@ -6004,6 +6121,113 @@ public partial class MainViewModel : ViewModelBase
         catch
         {
             // No browser available; the URL is also shown in the dialog message.
+        }
+    }
+
+    /// <summary>
+    /// Builds llama-server updater args via reflection so a stale Core DLL (2-param LlamaArgs)
+    /// does not crash the app. Falls back to the 2-param overload when the 3-param version
+    /// is not present.
+    /// </summary>
+    /// <summary>
+    /// Removes the trailing "Click Update now to back up and replace the
+    /// llama-server folder automatically." instruction from a check-result
+    /// status string. Used on the "Update now" path, where that instruction is
+    /// circular (the user just clicked the button). Returns the text with the
+    /// instruction stripped and trailing whitespace trimmed; if the instruction
+    /// is not present, returns the original text unchanged.
+    /// </summary>
+    private static string TrimUpdateNowInstruction(string statusText)
+    {
+        const string instruction = "Click Update now to back up and replace the llama-server folder automatically.";
+        var index = statusText.IndexOf(instruction, StringComparison.Ordinal);
+        if (index < 0)
+        {
+            return statusText;
+        }
+
+        return statusText.Substring(0, index).TrimEnd();
+    }
+
+    /// <summary>
+    /// Builds the args for the standalone llama-server updater, probing for the
+    /// 3-param <c>UpdatePlan.LlamaArgs</c> (with the optional
+    /// <c>preferredCudaMinor</c>) via reflection so a stale Core DLL (2-param
+    /// signature) does not throw <c>MissingMethodException</c>.
+    /// </summary>
+    private static IReadOnlyList<string> BuildLlamaArgsSafe(string serverDir, string? preferredCudaMinor)
+    {
+        var newMethod = typeof(UpdatePlan).GetMethod(
+            "LlamaArgs",
+            new[] { typeof(string), typeof(string) });
+        // The 3-param overload has an optional param, so it appears as (string, string) in
+        // the metadata only when called with both. Probe for the method with the optional
+        // parameter by checking parameter count.
+        var allMethods = typeof(UpdatePlan).GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+            .Where(m => m.Name == "LlamaArgs")
+            .ToList();
+        var threeParam = allMethods.FirstOrDefault(m => m.GetParameters().Length == 2 && m.GetParameters()[1].IsOptional);
+        if (threeParam is not null)
+        {
+            return (IReadOnlyList<string>)threeParam.Invoke(null, new object[] { serverDir, preferredCudaMinor });
+        }
+
+        // Stale Core DLL: fall back to the 2-param LlamaArgs (no preferredCudaMinor).
+        var twoParam = allMethods.FirstOrDefault(m => m.GetParameters().Length == 1);
+        if (twoParam is not null)
+        {
+            return (IReadOnlyList<string>)twoParam.Invoke(null, new object[] { serverDir });
+        }
+
+        // Last resort: build the args manually.
+        var args = new List<string> { "llama", "--server-dir", serverDir };
+        if (!string.IsNullOrWhiteSpace(preferredCudaMinor))
+        {
+            args.Add("--cuda-minor");
+            args.Add(preferredCudaMinor);
+        }
+        return args;
+    }
+
+    /// <summary>
+    /// Returns GPU-specific advice to append to the llama-server update status text.
+    /// Detects the GPU type (NVIDIA CUDA, AMD/Intel Vulkan, or unknown) and gives
+    /// relevant guidance about which zip family to use.
+    /// </summary>
+    private string GpuUpdateAdvice()
+    {
+        try
+        {
+            var snapshot = _hostTelemetrySampler.Sample();
+            var gpuName = snapshot.GpuName ?? string.Empty;
+
+            if (gpuName.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase)
+                || gpuName.Contains("GeForce", StringComparison.OrdinalIgnoreCase)
+                || gpuName.Contains("RTX", StringComparison.OrdinalIgnoreCase)
+                || gpuName.Contains("Quadro", StringComparison.OrdinalIgnoreCase)
+                || gpuName.Contains("Tesla", StringComparison.OrdinalIgnoreCase))
+            {
+                return " Your GPU is an NVIDIA card (" + gpuName + "), so the updater will use the CUDA zip.";
+            }
+
+            if (gpuName.Contains("AMD", StringComparison.OrdinalIgnoreCase)
+                || gpuName.Contains("Radeon", StringComparison.OrdinalIgnoreCase)
+                || gpuName.Contains("Intel", StringComparison.OrdinalIgnoreCase)
+                || gpuName.Contains("Arc", StringComparison.OrdinalIgnoreCase))
+            {
+                return " Your GPU is a " + gpuName + ", so the updater will use the Vulkan zip.";
+            }
+
+            if (!string.IsNullOrWhiteSpace(gpuName))
+            {
+                return " Your GPU is a " + gpuName + ". The updater will pick the matching zip family.";
+            }
+
+            return " The updater will pick the zip that matches your GPU.";
+        }
+        catch
+        {
+            return " Pick the zip that matches your GPU (CUDA for NVIDIA, Vulkan for AMD/Intel).";
         }
     }
 
@@ -7303,6 +7527,17 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        // Cancel any in-flight "Validate to endpoint" so it stops polling the
+        // endpoint we are about to kill. Without this, the validation loop keeps
+        // running until its 5-minute timeout and the Stop button appears to do nothing.
+        try
+        {
+            _localValidateCts?.Cancel();
+        }
+        catch
+        {
+        }
+
         StatusMessage = "Killing local model now (abort)...";
         try
         {
@@ -7319,6 +7554,16 @@ public partial class MainViewModel : ViewModelBase
     private async Task StopLocalRouteAsync(string slotLabel)
     {
         CancelLocalRuntimeMonitors();
+        // Cancel any in-flight "Validate to endpoint" so it stops polling the
+        // endpoint we are about to stop. Without this, the validation loop keeps
+        // running until its 5-minute timeout and the Stop button appears to do nothing.
+        try
+        {
+            _localValidateCts?.Cancel();
+        }
+        catch
+        {
+        }
         StatusMessage = $"{slotLabel}: stopping the active managed local runtime...";
         var stoppedModel = FirstNonEmpty(_runningLocalModel, _mountedRouteType.Equals("Local", StringComparison.OrdinalIgnoreCase) ? SelectedLocalProfile : string.Empty);
         var stoppedVariant = FirstNonEmpty(_runningLocalVariant, BaseVariantDisplayName);
@@ -8820,7 +9065,9 @@ public partial class MainViewModel : ViewModelBase
         RememberLocalVisionForm(visionEnabled, visionProjector, visionMaxEdge);
 
         CancelLocalRuntimeMonitors();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        _localValidateCts?.Dispose();
+        _localValidateCts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        var timeout = _localValidateCts;
         var launchStartedUtc = DateTime.UtcNow;
         if (!skipReload)
         {
@@ -8972,15 +9219,22 @@ public partial class MainViewModel : ViewModelBase
         }
         catch (OperationCanceledException)
         {
+            var elapsedMs = (DateTime.UtcNow - launchStartedUtc).TotalMilliseconds;
+            var stoppedByUser = elapsedMs < 4 * 60 * 1000;
+            var warning = stoppedByUser
+                ? "Validate to endpoint was stopped."
+                : "Validate to endpoint stopped because it took too long.";
             SetLocalVariantEndpointValidated(
                 model,
                 variantName,
                 validated: false,
-                warning: "Validate to endpoint stopped because it took too long.");
+                warning: warning);
             RememberMountedLocal(model, variantName);
             LocalRouteIndicatorState = RouteIndicatorState.Fault;
             RefreshProfileWarningSurfaces();
-            ReportTuneProgress("Validate to endpoint stopped because it took too long. '" + model + ": " + variantName + "' is not yet in Quick Select.");
+            ReportTuneProgress(stoppedByUser
+                ? "Validate to endpoint was stopped. '" + model + ": " + variantName + "' is not yet in Quick Select."
+                : "Validate to endpoint stopped because it took too long. '" + model + ": " + variantName + "' is not yet in Quick Select.");
             RestoreLocalVariantForm(snapshot);
         }
         finally
@@ -8993,6 +9247,10 @@ public partial class MainViewModel : ViewModelBase
             _isValidatingLocalProfile = false;
             RefreshProfileEndpointStatusSurfaces();
             _suppressVariantExpanderSelection = false;
+            // Reset the cancellation source so the next validation starts clean
+            // (a Stop during this run leaves it cancelled).
+            _localValidateCts?.Dispose();
+            _localValidateCts = null;
         }
     }
 
@@ -10183,6 +10441,7 @@ public partial class MainViewModel : ViewModelBase
         FluxMuxUpdateSource = FirstNonEmpty(_config.GetString("FluxMuxUpdateSource", FluxMuxUpdateSource), FluxMuxUpdateSource);
         LlamaUpdateSource = FirstNonEmpty(_config.GetString("LlamaUpdateSource", LlamaUpdateSource), LlamaUpdateSource);
         HarnessUpdateSource = FirstNonEmpty(_config.GetString("HarnessUpdateSource", HarnessUpdateSource), HarnessUpdateSource);
+        LlamaCudaMinor = FirstNonEmpty(_config.GetString("LlamaCudaMinor", LlamaCudaMinor), LlamaCudaMinor);
 
         var port = _config.GetInt("OrchestratorPort", (int)OrchestratorPort);
         if (port < 1 || port > 65535)
@@ -10612,9 +10871,37 @@ public partial class MainViewModel : ViewModelBase
             LocalVariantYarnMaxContext = value.Value;
         }
     }
+    partial void OnSelectedLocalAutoCompactModeOptionChanged(LocalAutoCompactModeOption? value)
+    {
+        // Sync the internal key (not the display label) so the gateway/runtime keep seeing
+        // the stable "port-rules" / "per-profile" / "none" values.
+        if (value != null && !string.Equals(value.Value, LocalAutoCompactMode, StringComparison.OrdinalIgnoreCase))
+        {
+            LocalAutoCompactMode = value.Value;
+        }
+    }
     partial void OnLocalKvCacheWizardChoiceChanged(string value)
     {
+        // Skip when UpdateLocalKvCacheWizardInfo is already running and set the choice
+        // programmatically — otherwise the setter fires this callback, which calls
+        // UpdateLocalKvCacheWizardInfo again, causing infinite recursion.
+        if (_isUpdatingLocalKvCacheWizard)
+        {
+            return;
+        }
         UpdateLocalKvCacheWizardInfo();
+    }
+    partial void OnSelectedKvCacheWizardOptionChanged(KvCacheWizardOption? value)
+    {
+        // Sync the ComboBox selection back to the underlying string value.
+        if (value is null || _isUpdatingLocalKvCacheWizard)
+        {
+            return;
+        }
+        if (!string.Equals(value.Value, LocalKvCacheWizardChoice, StringComparison.OrdinalIgnoreCase))
+        {
+            LocalKvCacheWizardChoice = value.Value;
+        }
     }
     partial void OnLocalVariantFitChanged(string value)
     {
@@ -11694,6 +11981,7 @@ public partial class MainViewModel : ViewModelBase
         _config.SetString("FluxMuxUpdateSource", FluxMuxUpdateSource?.Trim() ?? string.Empty);
         _config.SetString("LlamaUpdateSource", LlamaUpdateSource?.Trim() ?? string.Empty);
         _config.SetString("HarnessUpdateSource", HarnessUpdateSource?.Trim() ?? string.Empty);
+        _config.SetString("LlamaCudaMinor", LlamaCudaMinor?.Trim() ?? string.Empty);
         _config.SetInt("OrchestratorPort", (int)OrchestratorPort);
         _config.SetString("EndpointApp", SelectedEndpointApp?.Trim() ?? string.Empty);
         _config.SetInt("HarnessWebPort", (int)HarnessWebPort);
@@ -12940,6 +13228,12 @@ public partial class MainViewModel : ViewModelBase
         QuickSelectSlots.Clear();
         if (_config.Root["RouteSlots"] is JsonArray slots)
         {
+            // Repair slots that point at a profile/variant that no longer exists (e.g. the
+            // profile was renamed or deleted after the slot was assigned, or a crash/reboot
+            // happened mid-edit). Without this, Quick Select shows a stale variant that does
+            // not match anything in the Model profiles tab.
+            RepairStaleQuickSelectSlotAssignments(slots);
+
             foreach (var node in slots.OfType<JsonObject>()
                          .Where(node => ParseBool(node["enabled"]?.ToString(), true))
                          .Take(QuickSelectSlotLimit))
@@ -12975,6 +13269,78 @@ public partial class MainViewModel : ViewModelBase
         }
 
         RefreshQuickSelectSlotMetadata();
+    }
+
+    /// <summary>
+    /// Repairs Quick Select slots that point at a profile/variant that no longer exists in the
+    /// config (e.g. the profile was renamed or deleted after the slot was assigned, or a crash
+    /// happened mid-edit). Such a slot would otherwise show a stale variant in Quick Select that
+    /// does not match anything in the Model profiles tab. The slot is reset to an unassigned
+    /// state so the user can pick a valid profile again.
+    /// </summary>
+    private void RepairStaleQuickSelectSlotAssignments(JsonArray slots)
+    {
+        var localKeys = new HashSet<string>(
+            _config.GetObjectKeys("LocalProfiles"), StringComparer.OrdinalIgnoreCase);
+        var cloudKeys = new HashSet<string>(
+            _config.GetObjectKeys("CloudProfiles"), StringComparer.OrdinalIgnoreCase);
+        var changed = false;
+
+        foreach (var node in slots.OfType<JsonObject>())
+        {
+            var routeType = NormalizeSelectionRouteType(node["routeType"]?.ToString());
+            if (routeType.Equals("Local", StringComparison.OrdinalIgnoreCase))
+            {
+                var model = node["localModel"]?.ToString() ?? string.Empty;
+                var variant = node["localVariant"]?.ToString() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(model) || string.IsNullOrWhiteSpace(variant))
+                {
+                    continue;
+                }
+
+                var key = $"{model.Trim()}::{ProfileConfigVariantName(variant)}";
+                if (!localKeys.Contains(key))
+                {
+                    System.Diagnostics.Debug.WriteLine($"Quick Select slot '{node["slotId"]?.ToString()}' points at missing local profile '{key}'; resetting slot.");
+                    node["routeType"] = string.Empty;
+                    node["localModel"] = string.Empty;
+                    node["localVariant"] = string.Empty;
+                    node["validatedProfileKey"] = string.Empty;
+                    node["endpointValidatedUtc"] = string.Empty;
+                    node["validatedDefaultProfile"] = false;
+                    changed = true;
+                }
+            }
+            else if (routeType.Equals("Cloud", StringComparison.OrdinalIgnoreCase))
+            {
+                var provider = node["provider"]?.ToString() ?? string.Empty;
+                var model = node["cloudModel"]?.ToString() ?? string.Empty;
+                var variant = node["cloudVariant"]?.ToString() ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(provider) || string.IsNullOrWhiteSpace(model) || string.IsNullOrWhiteSpace(variant))
+                {
+                    continue;
+                }
+
+                var key = $"{provider.Trim()}::{model.Trim()}::{ProfileConfigVariantName(variant)}";
+                if (!cloudKeys.Contains(key))
+                {
+                    System.Diagnostics.Debug.WriteLine($"Quick Select slot '{node["slotId"]?.ToString()}' points at missing cloud profile '{key}'; resetting slot.");
+                    node["routeType"] = string.Empty;
+                    node["provider"] = string.Empty;
+                    node["cloudModel"] = string.Empty;
+                    node["cloudVariant"] = string.Empty;
+                    node["validatedProfileKey"] = string.Empty;
+                    node["endpointValidatedUtc"] = string.Empty;
+                    node["validatedDefaultProfile"] = false;
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed)
+        {
+            _configService.Save(_config);
+        }
     }
 
     private void RestoreQuickSelectSlotSelections()
@@ -16365,6 +16731,7 @@ public partial class MainViewModel : ViewModelBase
         var nativeCtx = advice.ModelMaxCtx;
         var yarnSuffix = string.Empty;
         var footprintLabel = "Estimated VRAM";
+        var kvTypeSuffix = string.Empty;
         if (LocalVariantExtendContextIntoRam && nativeCtx > 0 && configuredContextTokens > nativeCtx)
         {
             // Estimate the RAM overflow: the portion of the context above the VRAM-resident
@@ -16378,12 +16745,30 @@ public partial class MainViewModel : ViewModelBase
             // lives in RAM, not VRAM. Relabel the footprint to avoid the misleading "VRAM" claim.
             footprintLabel = "Estimated footprint (VRAM+RAM)";
             yarnSuffix = $"  |  native window {nativeCtx:N0} (YaRN extends to {configuredContextTokens:N0}, ≈{overflowGiB:0.#} GiB of KV in RAM)";
+            // Add KV cache type info for the extended context. When YaRN is on, show the
+            // wizard's current selection (what the user is actively choosing), not the
+            // profile's saved setting (which may be stale).
+            var kvType = LocalKvCacheWizardChoice;
+            if (string.IsNullOrWhiteSpace(kvType) || kvType.Equals("Auto", StringComparison.OrdinalIgnoreCase))
+            {
+                kvType = LocalVariantKvCacheTypeK;
+            }
+            if (!string.IsNullOrWhiteSpace(kvType) && kvType != "Auto")
+            {
+                kvTypeSuffix = $"  |  KV cache: {kvType}";
+            }
         }
         else if (nativeCtx > 0)
         {
             yarnSuffix = $"  |  native window {nativeCtx:N0}";
+            // Add KV cache type info
+            var kvType = LocalVariantKvCacheTypeK;
+            if (!string.IsNullOrWhiteSpace(kvType) && kvType != "Auto")
+            {
+                kvTypeSuffix = $"  |  KV cache: {kvType}";
+            }
         }
-        LocalVariantFootprintText = $"{footprintLabel}  {estimatedGiB:F1} GiB  |  weights {weightsGiB:F1} GiB  +  KV {kvGiB:F1} GiB  +  runtime {runtimeGiB:F1} GiB{(projectorGiB > 0 ? $"  +  mmproj {projectorGiB:F1} GiB" : string.Empty)}  |  {configuredContextTokens:N0} configured tokens{yarnSuffix}{measuredSuffix}";
+        LocalVariantFootprintText = $"{footprintLabel}  {estimatedGiB:F1} GiB  |  weights {weightsGiB:F1} GiB  +  KV {kvGiB:F1} GiB  +  runtime {runtimeGiB:F1} GiB{(projectorGiB > 0 ? $"  +  mmproj {projectorGiB:F1} GiB" : string.Empty)}  |  {configuredContextTokens:N0} configured tokens{yarnSuffix}{kvTypeSuffix}{measuredSuffix}";
         var liveVramSuffix = string.Empty;
         if (LocalGpuVramSample.TryRead(out _, out sampledTotalGiB, out sampledFreeGiB))
         {
@@ -17076,6 +17461,12 @@ public partial class MainViewModel : ViewModelBase
         settings["LocalMultiUserMode"] = LocalVariantMultiUserMode;
         settings["LocalUnbanTokensMode"] = LocalVariantUnbanTokensMode;
         settings["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled;
+        settings["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled;
+        settings["LocalAutoCompactMode"] = LocalAutoCompactMode;
+        settings["LocalAutoCompactTriggerPercent"] = ((int)LocalAutoCompactTriggerPercent).ToString();
+        settings["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString();
+        settings["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString();
+        settings["LocalAutoCompactPinUserChars"] = ((int)LocalAutoCompactPinUserChars).ToString();
         settings["OverrideMaxTokens"] = LocalVariantMaxTokens;
         settings["LocalBatchSize"] = LocalVariantBatchSize;
         settings["LocalUbatchSize"] = LocalVariantUbatchSize;
@@ -17672,6 +18063,11 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantUnbanTokensMode = CoerceOnOff(settings["LocalUnbanTokensMode"]?.ToString(), LocalVariantChatTemplate.Equals("qwen", StringComparison.OrdinalIgnoreCase) ? "Enabled" : "Disabled");
         LocalVariantAutoCompressEnabled = ParseBool(settings["AutoCompressEnabled"]?.ToString() ?? string.Empty, true);
         LocalAutoCompactEnabled = ParseBool(settings["LocalAutoCompactEnabled"]?.ToString() ?? string.Empty, true);
+        LocalAutoCompactMode = CoerceLocalAutoCompactMode(settings["LocalAutoCompactMode"]?.ToString());
+        SelectedLocalAutoCompactModeOption = LocalAutoCompactModeOptions.FirstOrDefault(o =>
+            string.Equals(o.Value, LocalAutoCompactMode, StringComparison.OrdinalIgnoreCase))
+            ?? LocalAutoCompactModeOptions.FirstOrDefault(o =>
+                string.Equals(o.Value, "port-rules", StringComparison.OrdinalIgnoreCase));
         LocalAutoCompactTriggerPercent = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactTriggerPercent"]?.ToString() ?? string.Empty, 80d), 60m, 95m);
         LocalAutoCompactKeepTurns = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactKeepTurns"]?.ToString() ?? string.Empty, 6d), 4m, 12m);
         LocalAutoCompactKeepToolResults = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactKeepToolResults"]?.ToString() ?? string.Empty, 8d), 4m, 16m);
@@ -19077,6 +19473,18 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantSwaFull = settings.GetValueOrDefault("LocalSwaFull", LocalVariantSwaFull);
         LocalVariantReasoning = settings.GetValueOrDefault("LocalReasoning", LocalVariantReasoning);
         LocalVariantChatParser = settings.GetValueOrDefault("LocalChatParser", LocalVariantChatParser);
+        // Sync auto-compact settings from the wizard so the detailed settings reflect the wizard's choices.
+        LocalAutoCompactMode = CoerceLocalAutoCompactMode(settings.GetValueOrDefault("LocalAutoCompactMode", LocalAutoCompactMode));
+        SelectedLocalAutoCompactModeOption = LocalAutoCompactModeOptions.FirstOrDefault(o =>
+            string.Equals(o.Value, LocalAutoCompactMode, StringComparison.OrdinalIgnoreCase))
+            ?? LocalAutoCompactModeOptions.FirstOrDefault(o =>
+                string.Equals(o.Value, "port-rules", StringComparison.OrdinalIgnoreCase));
+        LocalAutoCompactTriggerPercent = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactTriggerPercent", LocalAutoCompactTriggerPercent.ToString()), 80d), 60m, 95m);
+        LocalAutoCompactKeepTurns = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactKeepTurns", LocalAutoCompactKeepTurns.ToString()), 6d), 4m, 12m);
+        LocalAutoCompactKeepToolResults = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactKeepToolResults", LocalAutoCompactKeepToolResults.ToString()), 8d), 4m, 16m);
+        LocalAutoCompactPinUserChars = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactPinUserChars", LocalAutoCompactPinUserChars.ToString()), 2000d), 500m, 5000m);
+        // Sync the detailed settings "Compact" checkbox with the wizard's mode.
+        LocalVariantAutoCompressEnabled = !string.Equals(LocalAutoCompactMode, "none", StringComparison.OrdinalIgnoreCase);
         RefreshLocalVisionHint();
         UpdateLocalPrioritySummaryTexts();
     }
@@ -19113,9 +19521,19 @@ public partial class MainViewModel : ViewModelBase
 
     private void UpdateLocalKvCacheWizardInfo()
     {
-        var advice = CurrentLocalHardwareAdvice();
-        var extendIntoRam = LocalVariantExtendContextIntoRam;
-        var context = (int)LocalVariantContext;
+        // Re-entrancy guard: this method sets LocalKvCacheWizardChoice, which fires
+        // OnLocalKvCacheWizardChoiceChanged → UpdateLocalKvCacheWizardInfo. Without this
+        // guard the recursion is infinite and overflows the stack.
+        if (_isUpdatingLocalKvCacheWizard)
+        {
+            return;
+        }
+        _isUpdatingLocalKvCacheWizard = true;
+        try
+        {
+            var advice = CurrentLocalHardwareAdvice();
+            var extendIntoRam = LocalVariantExtendContextIntoRam;
+            var context = (int)LocalVariantContext;
 
         // Keep the wizard's hardware-bounded "how far to extend" options in sync with the
         // current profile/hardware (RAM, model native window, KV type).
@@ -19135,12 +19553,18 @@ public partial class MainViewModel : ViewModelBase
             effectiveContext = Math.Min(context, Math.Max(advice.ModelMaxCtx, Math.Min(userTarget, Math.Min(ramBounded, yarnCeiling))));
         }
 
-        // Show the choice when the effective context exceeds 256K (where KV size starts to matter).
-        ShowLocalKvCacheWizardChoice = extendIntoRam && effectiveContext > 256 * 1024;
+        // Show the choice whenever extending context into RAM. The KV cache type matters for
+        // the overflow that lives in ordinary memory even at modest sizes, so gating it on
+        // "> 256K" hid the control for many profiles (the dropdown "disappeared" when the
+        // checkbox was ticked). The info text still explains the size when the context is
+        // small, but the control is always available when extension is on.
+        ShowLocalKvCacheWizardChoice = extendIntoRam;
         if (!ShowLocalKvCacheWizardChoice)
         {
             LocalKvCacheWizardInfoText = string.Empty;
+            LocalKvCacheWizardChoice = string.Empty;
             LocalKvCacheWizardOptions.Clear();
+            SelectedKvCacheWizardOption = null;
             return;
         }
 
@@ -19185,32 +19609,47 @@ public partial class MainViewModel : ViewModelBase
             fitting.Add(type);
         }
 
-        // Rebuild the options list.
+        // Rebuild the options list. Do NOT null LocalKvCacheWizardChoice before clearing:
+        // doing so fires OnLocalKvCacheWizardChoiceChanged (via the ObservableProperty setter)
+        // while the ComboBox binding is mid-update, which can re-enter UpdateLocalKvCacheWizardInfo
+        // and crash. Instead, clear the list and re-apply the matching choice after.
         LocalKvCacheWizardOptions.Clear();
         if (fitting.Count == 0)
         {
             // Nothing is both fast enough and fits. Show the coarsest option so the user
             // can see why (won't run, or too slow) and adjust the context target.
-            LocalKvCacheWizardOptions.Add("q4_1");
+            LocalKvCacheWizardOptions.Add(new KvCacheWizardOption { Value = "q4_1", Display = "q4_1" });
             LocalKvCacheWizardChoice = "q4_1";
+            SelectedKvCacheWizardOption = LocalKvCacheWizardOptions[0];
         }
         else
         {
-            LocalKvCacheWizardOptions.Add("Auto");
+            // Determine what "Auto" resolves to (the first fitting type).
+            var autoResolved = fitting[0];
+            LocalKvCacheWizardOptions.Add(new KvCacheWizardOption
+            {
+                Value = "Auto",
+                Display = $"Auto → {autoResolved}"
+            });
             foreach (var type in fitting)
             {
                 // Prevent duplicates (case-insensitive)
-                if (!LocalKvCacheWizardOptions.Any(t => string.Equals(t, type, StringComparison.OrdinalIgnoreCase)))
+                if (!LocalKvCacheWizardOptions.Any(t => string.Equals(t.Value, type, StringComparison.OrdinalIgnoreCase)))
                 {
-                    LocalKvCacheWizardOptions.Add(type);
+                    LocalKvCacheWizardOptions.Add(new KvCacheWizardOption { Value = type, Display = type });
                 }
             }
 
             // If the current selection is no longer in the list, fall back to Auto.
-            if (!LocalKvCacheWizardOptions.Any(t => string.Equals(t, LocalKvCacheWizardChoice, StringComparison.OrdinalIgnoreCase)))
+            if (!LocalKvCacheWizardOptions.Any(t => string.Equals(t.Value, LocalKvCacheWizardChoice, StringComparison.OrdinalIgnoreCase)))
             {
                 LocalKvCacheWizardChoice = "Auto";
             }
+
+            // Sync the SelectedKvCacheWizardOption to match the current choice.
+            SelectedKvCacheWizardOption = LocalKvCacheWizardOptions.FirstOrDefault(t =>
+                string.Equals(t.Value, LocalKvCacheWizardChoice, StringComparison.OrdinalIgnoreCase))
+                ?? LocalKvCacheWizardOptions[0];
         }
 
         var choice = LocalKvCacheWizardChoice;
@@ -19218,7 +19657,7 @@ public partial class MainViewModel : ViewModelBase
         if (string.IsNullOrWhiteSpace(choice) || choice.Equals("Auto", StringComparison.OrdinalIgnoreCase))
         {
             choice = fitting.Count > 0 ? fitting[0] : "q4_1";
-            // Show which type Auto would pick
+            // Show which type Auto would pick (in the info text below the dropdown).
             autoNote = $"Auto picks {choice}. ";
         }
 
@@ -19297,6 +19736,11 @@ public partial class MainViewModel : ViewModelBase
         }
 
         LocalKvCacheWizardInfoText = autoNote + fitLine + " " + perfLine + (fidelityLine.Length > 0 ? " " + fidelityLine : "") + warning + usefulCeilingWarning;
+        }
+        finally
+        {
+            _isUpdatingLocalKvCacheWizard = false;
+        }
     }
 
     private JsonObject BuildLocalVariantSettingsObject()
@@ -19321,6 +19765,7 @@ public partial class MainViewModel : ViewModelBase
             ["LocalUnbanTokensMode"] = LocalVariantUnbanTokensMode,
             ["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled,
             ["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled,
+            ["LocalAutoCompactMode"] = LocalAutoCompactMode,
             ["LocalAutoCompactTriggerPercent"] = ((int)LocalAutoCompactTriggerPercent).ToString(),
             ["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString(),
             ["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString(),
@@ -19708,6 +20153,23 @@ public partial class MainViewModel : ViewModelBase
         }
 
         return trimmed;
+    }
+
+    private static string CoerceLocalAutoCompactMode(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "port-rules";
+        }
+
+        var trimmed = value.Trim().ToLowerInvariant();
+        return trimmed switch
+        {
+            "port-rules" or "port rules" or "portrules" => "port-rules",
+            "per-profile" or "per profile" or "perprofile" or "use settings below" => "per-profile",
+            "none" or "endpoint" or "endpoint managed" or "no compaction" => "none",
+            _ => "port-rules"
+        };
     }
 
     private static IReadOnlyList<string> BuildSettingChoices(

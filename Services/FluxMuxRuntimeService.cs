@@ -332,6 +332,25 @@ public sealed class FluxMuxRuntimeService
 
 	private bool _localSleepingFromIdle;
 
+	/// <summary>
+	/// Timestamp (UTC) of the last time the memory guard stopped llama-server for low RAM.
+	/// Used to avoid rapid stop/restart flapping: after a guard stop, the guard stays quiet
+	/// for <see cref="MemoryGuardCooldownMinutes"/> even if RAM is still low (the next chat
+	/// reload will re-test it).
+	/// </summary>
+	private DateTime _lastMemoryGuardStopUtc = DateTime.MinValue;
+
+	/// <summary>Cooldown after a memory-guard stop before the guard may fire again.</summary>
+	private const int MemoryGuardCooldownMinutes = 5;
+
+	/// <summary>
+	/// Available-RAM threshold (GiB) below which the memory guard stops llama-server to
+	/// prevent the machine from OOM-crashing. llama-server with an unbounded RAM KV cache
+	/// (--cache-ram -1) can creep up to tens of GB; when free RAM drops below this floor the
+	/// OS starts paging to SSD and Windows can crash/reboot.
+	/// </summary>
+	private const double MemoryGuardMinAvailableRamGiB = 4.0;
+
 	private ParkedLocalLaunch? _parkedLocalLaunch;
 
 	public event Action<string>? IdleTimeoutNotice;
@@ -522,6 +541,7 @@ public sealed class FluxMuxRuntimeService
 		host.HonorCloudRecommendThisProcess = () => _honorCloudRecommendThisProcess;
 		host.GenerationSpeed = _generationSpeedTracker;
 		host.EnrichState = EnrichProxyRuntimeState;
+		host.GetLocalAutoCompactSettings = GetLocalAutoCompactSettings;
 		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);
 		host.ReportPortRulesTelemetry = snap => PortRulesTelemetryNotice?.Invoke(snap);
 		host.PortRules = _portForwardingRules;
@@ -544,6 +564,43 @@ public sealed class FluxMuxRuntimeService
 		}
 
 		return state;
+	}
+
+	private (string Mode, double TriggerPercent, int KeepTurns, int KeepToolResults, int PinUserChars)? GetLocalAutoCompactSettings(string model, string variant)
+	{
+		try
+		{
+			var config = LoadJsonCached(_configPath);
+			if (config is null)
+			{
+				return null;
+			}
+
+			var localProfiles = config["LocalProfiles"] as JsonObject;
+			if (localProfiles is null)
+			{
+				return null;
+			}
+
+			var key = model + "::" + variant;
+			var profile = localProfiles[key] as JsonObject;
+			if (profile is null)
+			{
+				return null;
+			}
+
+			var mode = profile["LocalAutoCompactMode"]?.ToString() ?? "port-rules";
+			var triggerPercent = double.TryParse(profile["LocalAutoCompactTriggerPercent"]?.ToString(), out var tp) ? tp / 100.0 : 0.80;
+			var keepTurns = int.TryParse(profile["LocalAutoCompactKeepTurns"]?.ToString(), out var kt) ? kt : 6;
+			var keepToolResults = int.TryParse(profile["LocalAutoCompactKeepToolResults"]?.ToString(), out var ktr) ? ktr : 8;
+			var pinUserChars = int.TryParse(profile["LocalAutoCompactPinUserChars"]?.ToString(), out var pu) ? pu : 2000;
+
+			return (mode, triggerPercent, keepTurns, keepToolResults, pinUserChars);
+		}
+		catch
+		{
+			return null;
+		}
 	}
 
 	private void TryCaptureAndRedactExistingRuntimeState()
@@ -620,6 +677,16 @@ public sealed class FluxMuxRuntimeService
 
 	private async Task ConsiderIdleUnloadAsync(CancellationToken cancellationToken)
 	{
+		// Memory guard: independent of the idle-timeout setting, stop llama-server when free
+		// RAM drops below the floor. llama-server with an unbounded RAM KV cache (--cache-ram -1)
+		// can creep up to tens of GB and OOM the machine (Windows crash/reboot). This fires even
+		// when IdleTimeoutEnabled is false, because the leak happens while the server is idle.
+		// A cooldown prevents stop/restart flapping; the next chat reload re-tests the condition.
+		if (await ConsiderMemoryGuardStopAsync(cancellationToken).ConfigureAwait(false))
+		{
+			return;
+		}
+
 		if (!IdleTimeoutPolicy.ShouldUnloadLocal(
 			    _idleTimeoutEnabled,
 			    IsManagedLocalAlive(),
@@ -660,6 +727,94 @@ public sealed class FluxMuxRuntimeService
 		finally
 		{
 			_idleSession.EndUnload();
+		}
+	}
+
+	/// <summary>
+	/// Stops the local llama-server when available physical RAM drops below
+	/// <see cref="MemoryGuardMinAvailableRamGiB"/>, to prevent the machine from OOM-crashing.
+	/// This is independent of the idle-timeout setting: the RAM leak happens while the server
+	/// sits idle with an unbounded RAM KV cache, so the guard must fire even when
+	/// <c>IdleTimeoutEnabled</c> is false. Returns true when a stop was performed (or was
+	/// skipped due to the cooldown), false when no action was needed.
+	/// </summary>
+	private async Task<bool> ConsiderMemoryGuardStopAsync(CancellationToken cancellationToken)
+	{
+		// The guard must fire even when _localServerProcess is null (e.g. the app was restarted
+		// and llama-server was already running from a previous session, or the process handle was
+		// lost). Check for ANY running llama-server process, not just the one this instance launched.
+		bool anyLlamaServerRunning = IsManagedLocalAlive() || HasOrphanedLlamaServerProcess();
+		if (!anyLlamaServerRunning)
+		{
+			return false;
+		}
+
+		// Cooldown: after a guard stop, stay quiet for MemoryGuardCooldownMinutes so a still-low
+		// RAM reading (e.g. while the next model is loading) does not immediately stop it again.
+		if (DateTime.UtcNow - _lastMemoryGuardStopUtc < TimeSpan.FromMinutes(MemoryGuardCooldownMinutes))
+		{
+			return false;
+		}
+
+		double availableRamGiB = HostTelemetrySampler.GetAvailablePhysicalRamGiB();
+		if (availableRamGiB <= 0.0 || availableRamGiB >= MemoryGuardMinAvailableRamGiB)
+		{
+			return false;
+		}
+
+		if (!_idleSession.TryStartUnload(TimeSpan.FromMinutes(1)))
+		{
+			return false;
+		}
+
+		try
+		{
+			await _idleLifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+			try
+			{
+				// Re-check: the process may have exited while we waited.
+				if (!IsManagedLocalAlive() && !HasOrphanedLlamaServerProcess())
+				{
+					return true;
+				}
+
+				await StopLocalCoreAsync(preserveParkedForIdleWake: true).ConfigureAwait(false);
+				_localSleepingFromIdle = true;
+				_lastMemoryGuardStopUtc = DateTime.UtcNow;
+				IdleTimeoutNotice?.Invoke(
+					"Memory guard: stopped the local model because free RAM dropped to "
+					+ availableRamGiB.ToString("0.0", CultureInfo.InvariantCulture)
+					+ " GiB (below the " + MemoryGuardMinAvailableRamGiB.ToString("0", CultureInfo.InvariantCulture)
+					+ " GiB floor). This protects the PC from running out of memory. The next chat will reload it. "
+					+ "To reduce RAM use, lower the context size or set the profile's RAM cache to a fixed value instead of Unlimited.");
+				return true;
+			}
+			finally
+			{
+				_idleLifecycle.Release();
+			}
+		}
+		finally
+		{
+			_idleSession.EndUnload();
+		}
+	}
+
+	/// <summary>
+	/// Returns true when a llama-server process is running that this app instance does not
+	/// directly own (i.e. <c>_localServerProcess</c> is null or has exited, but a process
+	/// named "llama-server" still exists). This covers the case where the app was restarted
+	/// and llama-server was already running from a previous session.
+	/// </summary>
+	private static bool HasOrphanedLlamaServerProcess()
+	{
+		try
+		{
+			return System.Diagnostics.Process.GetProcessesByName("llama-server").Length > 0;
+		}
+		catch
+		{
+			return false;
 		}
 	}
 
@@ -4679,8 +4834,16 @@ public sealed class FluxMuxRuntimeService
 		try
 		{
 			using TcpClient tcpClient = new TcpClient();
-			Task task = tcpClient.ConnectAsync(host, port);
-			return task.Wait(TimeSpan.FromMilliseconds(250L));
+			// Observe the connect task via Task.WaitAny (NOT task.Wait(timeout)).
+			// The previous version did `task.Wait(250ms)`; when that timed out the
+			// connect task was left UNOBSERVED, and disposing the TcpClient aborted
+			// the in-flight connect, faulting the task with SocketException 995. The
+			// GC finalizer then rethrew it as an unobserved AggregateException
+			// (TaskScheduler.UnobservedTaskException), crashing the app. WaitAny
+			// observes the task, so a timeout or abort can no longer surface as an
+			// unobserved exception.
+			Task connectTask = tcpClient.ConnectAsync(host, port);
+			return Task.WaitAny(new[] { connectTask }, TimeSpan.FromMilliseconds(250L)) == 0;
 		}
 		catch
 		{
@@ -5121,10 +5284,17 @@ public sealed class FluxMuxRuntimeService
 		}
 		else if (cacheRam.Equals("Unlimited", StringComparison.OrdinalIgnoreCase) || cacheRam.Equals("-1", StringComparison.OrdinalIgnoreCase))
 		{
+			// "Unlimited" used to mean --cache-ram -1 (truly unbounded), which lets llama-server's
+			// RAM KV cache creep up to tens of GB and OOM the machine. Cap it instead at a safe
+			// fraction of total physical RAM so the server can still use plenty of RAM for the
+			// overflow context, but can never consume the whole machine. The cap is the larger of
+			// 16 GB (a sensible floor for small-RAM machines) and 60% of total RAM.
+			double totalRamGb = localHardwareLaunchAdvice.TotalRamGb;
+			int cappedRamGb = (int)Math.Max(16.0, totalRamGb * 0.60);
 			if (SupportsArg(helpText, "--cache-ram"))
 			{
 				list.Add("--cache-ram");
-				list.Add("-1");
+				list.Add(cappedRamGb.ToString(CultureInfo.InvariantCulture));
 			}
 		}
 		else

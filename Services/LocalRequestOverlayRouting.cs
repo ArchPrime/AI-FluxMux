@@ -277,9 +277,11 @@ public static class LocalRequestOverlayRouting
             }
 
             // Estimate the token count for just this message.
+            // DeepClone: msg already has a parent (the original messages array);
+            // adding a live node to a new JsonArray throws "The node already has a parent."
             var singleMsgPayload = new JsonObject
             {
-                ["messages"] = new JsonArray { msg }
+                ["messages"] = new JsonArray { msg.DeepClone() }
             };
             int msgTokens = EstimatePromptTokens(singleMsgPayload);
             largestUserTokens = Math.Max(largestUserTokens, msgTokens);

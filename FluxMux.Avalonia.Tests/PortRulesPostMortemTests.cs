@@ -119,10 +119,35 @@ public sealed class PortRulesPostMortemTests
         Assert.Contains("llama-server did not start a reply in time", text);
         Assert.Contains("**First-byte seconds**", text);
         Assert.Contains("the current setting is 25", text);
-        Assert.Contains(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.FirstByteSeconds), text);
         Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
         Assert.Contains("**Max think first-byte**", text);
-        Assert.Contains(PortRulesPostMortem.NarrowerChatAdvice, text);
+        Assert.Contains("Port rule changes can only apply to the next Client-app turn", text);
+        Assert.Contains(PortRulesPostMortem.RetryOrNewChatAdvice, text);
+        // First-byte no longer uses the blanket "will hit the same stop" closer.
+        Assert.DoesNotContain(PortRulesPostMortem.PortRuleStopAdvice, text);
+        Assert.DoesNotContain(PortRulesPostMortem.NarrowerChatAdvice, text);
+    }
+
+    [Fact]
+    public void Hang_first_byte_when_model_not_ready_names_both_causes_and_offers_retry()
+    {
+        var text = PortRulesPostMortem.FormatHang(
+            LocalStreamHangPolicy.FirstByteReason,
+            quietSeconds: 52,
+            waitLongerCount: 0,
+            firstByteDeadlineSeconds: 25,
+            PortForwardingRules.Defaults,
+            localModelReady: false);
+        // Names both possibilities instead of assuming a live server that was slow.
+        Assert.Contains("Either the model stopped for some reason, or llama-server did not start a reply in time", text);
+        Assert.Contains("**First-byte seconds**", text);
+        Assert.Contains("the current setting is 25", text);
+        Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
+        Assert.Contains("**Max think first-byte**", text);
+        // Offers retry / new chat instead of the "will hit the same stop" closer.
+        Assert.Contains(PortRulesPostMortem.RetryOrNewChatAdvice, text);
+        Assert.DoesNotContain(PortRulesPostMortem.PortRuleStopAdvice, text);
+        Assert.DoesNotContain(PortRulesPostMortem.NarrowerChatAdvice, text);
     }
 
     [Fact]
@@ -171,6 +196,24 @@ public sealed class PortRulesPostMortemTests
     }
 
     [Fact]
+    public void Loading_503_with_port_rules_off_does_not_blame_a_disabled_rule()
+    {
+        // Master toggle off -> ForForwarding() sets Loading503Enabled=false.
+        var rules = (PortForwardingRules.Defaults with { Enabled = false }).ForForwarding();
+        var text = PortRulesPostMortem.FormatLoading503(0, rules);
+        Assert.Contains("llama-server was still loading and did not take this turn", text);
+        Assert.Contains("Port rules are off, so AI-FluxMux did not retry the request", text);
+        Assert.Contains("Wait for the model to finish loading and try again", text);
+        Assert.Contains("**503 retries**", text);
+        Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
+        // Must NOT frame it as a Port rule that tripped, nor cite the retry count.
+        Assert.DoesNotContain("stopped the turn when", text);
+        Assert.DoesNotContain("hit 0 tries", text);
+        Assert.DoesNotContain("the current setting is", text);
+        Assert.DoesNotContain("503 delay seconds", text);
+    }
+
+    [Fact]
     public void Think_only_names_Stop_strings_and_asks_for_one_clear_outcome()
     {
         var text = PortRulesPostMortem.FormatThinkOnly(PortForwardingRules.Defaults);
@@ -189,8 +232,8 @@ public sealed class PortRulesPostMortemTests
         Assert.Contains("this turn was too large for the loaded Context", text);
         Assert.Contains("**Headroom**", text);
         Assert.Contains("**Watermark %**", text);
-        Assert.Contains("Compact cannot shorten one over-full Client-app message", text);
-        Assert.Contains(PortRulesPostMortem.NoPortRuleForOverflow, text);
+        Assert.Contains("will trigger compaction earlier on future turns", text);
+        Assert.Contains("gives compaction more room to shorten the history on the next turn", text);
         Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
         Assert.Contains(PortRulesPostMortem.RaiseContextAdvice, text);
         Assert.Contains(PortRulesPostMortem.SmallerNextStepAdvice, text);
@@ -290,5 +333,20 @@ public sealed class PortRulesPostMortemTests
         Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, FluxMuxGatewayRouting.FormatToolMillMessage(null), StringComparison.Ordinal);
         Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, FluxMuxGatewayRouting.FormatRepeatedToolMessage(null), StringComparison.Ordinal);
         Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, LocalSessionArtifactPolicy.FormatHaltMessage(null), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Context_overflow_does_not_say_will_not_fix_this_turn()
+    {
+        // The old message said "Raising Port rule Headroom or Port rule Watermark %
+        // will not fix this turn" — but that's misleading: when the overflow is due
+        // to accumulated history, raising Headroom or lowering Watermark % DOES help
+        // by triggering compaction earlier. The user confirmed this: changing the
+        // port rule to delay compaction allowed the chat to continue.
+        var text = PortRulesPostMortem.FormatContextOverflow(compactApplied: true, PortForwardingRules.Defaults);
+        Assert.DoesNotContain("will not fix this turn", text, StringComparison.Ordinal);
+        Assert.Contains("will trigger compaction earlier", text, StringComparison.Ordinal);
+        Assert.Contains("gives compaction more room", text, StringComparison.Ordinal);
+        Assert.Contains("Launch a model profile with higher **Context**", text, StringComparison.Ordinal);
     }
 }

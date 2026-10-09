@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
@@ -15,6 +16,15 @@ public sealed class LlamaServerUpdateResult
     public string? ReleaseUrl { get; init; }
     public bool NewerAvailable { get; init; }
     public string? InstalledBuildLabel { get; init; }
+    /// <summary>
+    /// When the release ships multiple CUDA-minor zips and the installed family's minor is
+    /// ambiguous, this lists the available CUDA-minor labels (e.g. "12.4", "12.6", "13.0").
+    /// The UI can show a picker; the chosen minor is remembered in config so future checks
+    /// are unambiguous.
+    /// </summary>
+    public IReadOnlyList<string> CudaMinors { get; init; } = [];
+    /// <summary>True when the CUDA minor is ambiguous and a picker is needed.</summary>
+    public bool CudaMinorAmbiguous { get; init; }
 }
 
 public static class LlamaServerUpdateCheck
@@ -72,7 +82,8 @@ public static class LlamaServerUpdateCheck
         HttpClient http,
         string? executablePath,
         string? sourceOverride = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? preferredCudaMinor = null)
     {
         var family = LlamaServerFamilyFingerprint.FromInstallDirectory(executablePath);
         if (!family.CanMatch)
@@ -103,7 +114,7 @@ public static class LlamaServerUpdateCheck
         }
 
         var releases = LlamaCppReleaseMatcher.ParseReleases(json);
-        var match = LlamaCppReleaseMatcher.FindNewerMatching(releases, family, installedBuild);
+        var match = LlamaCppReleaseMatcher.FindNewerMatching(releases, family, installedBuild, preferredCudaMinor);
         var installedLabel = installedBuild is null ? "unknown build" : "b" + installedBuild.Value;
         if (match is null)
         {
@@ -131,8 +142,10 @@ public static class LlamaServerUpdateCheck
                 NewerAvailable = true,
                 InstalledBuildLabel = installedLabel,
                 ReleaseUrl = match.ReleaseUrl,
+                CudaMinors = match.CudaMinors,
+                CudaMinorAmbiguous = true,
                 StatusText = family.Summary
-                    + " A newer nightly (b" + match.RemoteBuild + ") has more than one CUDA minor zip. Open the release and pick the same CUDA minor you extracted before. Do not use a CPU or Vulkan zip. Extract into a new folder; keep this install until Launch works."
+                    + " A newer nightly (b" + match.RemoteBuild + ") has more than one CUDA minor zip. Pick the CUDA minor that matches your install (remembered for next time). Do not use a CPU or Vulkan zip. Click Update now to back up and replace the llama-server folder automatically."
             };
         }
 
@@ -154,7 +167,7 @@ public static class LlamaServerUpdateCheck
                 + " This llama-server is " + installedLabel + "; a matching zip is on b" + match.RemoteBuild + "."
                 + zipNote
                 + cudartNote
-                + " Extract into a new folder. Point Servers at the new llama-server.exe only after Launch works. Keep the old folder."
+                + " Click Update now to back up and replace the llama-server folder automatically."
         };
     }
 }

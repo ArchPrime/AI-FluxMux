@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
@@ -90,6 +91,107 @@ public static class LocalSessionArtifactPolicy
     private static readonly Regex XmlToolPathRegex = new(
         @"<(?<tag>write_to_file|write|write_file|create_file|replace_in_file|search_replace|apply_diff|apply_patch|read_file|read)\b[\s\S]*?<(?:path|file_path|target_file|target|file)>(?<path>[^<]+)</(?:path|file_path|target_file|target|file)>",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Rough prompt-token estimate for the outgoing payload that will be sent to
+    /// llama-server. Accepts the full prompt (a JSON object with a "messages" array)
+    /// and counts the JSON text length plus the base64 payload of any image content
+    /// parts (which dominate real prompt size). Used by the gateway to decide whether
+    /// to trim the forwarded history before the request is sent, so the local model
+    /// does not OOM on a large prompt.
+    /// </summary>
+    public static int CountPromptTokens(JsonObject prompt)
+    {
+        if (prompt is null)
+            return 0;
+
+        JsonArray? messages = null;
+        if (prompt.TryGetPropertyValue("messages", out var messagesNode) &&
+            messagesNode is JsonArray messagesArray)
+        {
+            messages = messagesArray;
+        }
+
+        if (messages is null || messages.Count == 0)
+            return 0;
+
+        int total = 0;
+        foreach (var msg in messages)
+        {
+            if (msg is not JsonObject mo)
+                continue;
+
+            // Content may be a string or an array of parts.
+            if (mo.TryGetPropertyValue("content", out var contentNode))
+            {
+                if (contentNode is JsonValue sv)
+                {
+                    total += EstimateTextTokens(sv.ToString() ?? string.Empty);
+                }
+                else if (contentNode is JsonArray parts)
+                {
+                    foreach (var part in parts)
+                    {
+                        if (part is not JsonObject po)
+                            continue;
+
+                        // Image parts carry base64 data that dominates size.
+                        if (po.TryGetPropertyValue("data", out var dataNode) &&
+                            dataNode is JsonValue dv)
+                        {
+                            total += EstimateBase64Tokens(dv.ToString() ?? string.Empty);
+                        }
+
+                        // Text parts.
+                        if (po.TryGetPropertyValue("text", out var textNode) &&
+                            textNode is JsonValue tv)
+                        {
+                            total += EstimateTextTokens(tv.ToString() ?? string.Empty);
+                        }
+                    }
+                }
+            }
+
+            // Tool calls / results also contribute to prompt size.
+            if (mo.TryGetPropertyValue("tool_calls", out var tcNode))
+            {
+                total += EstimateTextTokens(tcNode.ToJsonString());
+            }
+            if (mo.TryGetPropertyValue("tool_call_id", out var tciNode))
+            {
+                total += EstimateTextTokens(tciNode.ToJsonString());
+            }
+        }
+
+        return total;
+    }
+
+    /// <summary>
+    /// Rough token estimate for plain text. Uses a 4-characters-per-token
+    /// heuristic which is close enough for GPT-2 / LLaMA-family tokenizers
+    /// on English text.
+    /// </summary>
+    private static int EstimateTextTokens(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return 0;
+        return (text.Length + 3) / 4;
+    }
+
+    /// <summary>
+    /// Rough token estimate for a base64-encoded image payload. Base64 inflates
+    /// the raw bytes by ~4/3, and a typical image tokenizes at roughly 1 token
+    /// per 4 base64 characters. We use the base64 length directly as a
+    /// conservative upper bound so the gateway trims early rather than late.
+    /// </summary>
+    private static int EstimateBase64Tokens(string base64)
+    {
+        if (string.IsNullOrEmpty(base64))
+            return 0;
+        // 1 token per 4 base64 chars is a reasonable approximation for
+        // vision-tokenizer image patches.
+        return (base64.Length + 3) / 4;
+    }
 
     public static LocalSessionArtifacts Inspect(JsonArray? messages)
     {

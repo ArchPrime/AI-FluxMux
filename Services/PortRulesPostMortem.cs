@@ -49,6 +49,10 @@ public static class PortRulesPostMortem
     public const string PortRuleStopAdvice =
         "This Client-app turn is over. Another message in this chat will hit the same stop or stall on 'reconnecting'.";
 
+    public const string RetryOrNewChatAdvice =
+        "With a running model, you can try typing 'retry' to resume the chat, but may have to wait some time. "
+        + "Typically best to start a new chat, and consider setting it a narrower task.";
+
     public const string TemperatureLabel = "Temperature";
     public const string ContextLabel = "Context";
     public const string ImagesLabel = "Images";
@@ -66,7 +70,7 @@ public static class PortRulesPostMortem
         + " on this model profile, or start a new Client-app chat with a narrower ask.";
 
     public const string RaiseContextAdvice =
-        "On this model profile, raise **Context** and Launch if this local model can hold more. "
+        "Launch a model profile with higher **Context** if this local model can hold more. "
         + NextTurnAfterLaunch;
 
     public const string EnableImagesAdvice =
@@ -268,27 +272,43 @@ public static class PortRulesPostMortem
         int quietSeconds,
         int waitLongerCount,
         int firstByteDeadlineSeconds,
-        PortForwardingRules? rules)
+        PortForwardingRules? rules,
+        bool localModelReady = true)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
         var limitName = HangLimitName(reason, waitLongerCount, firstByteDeadlineSeconds, live);
         var limitValue = HangLimitValue(limitName, firstByteDeadlineSeconds, live);
+        var isFirstByte = limitName == FirstByteSeconds;
         return ChatTurnCannotContinue
-            + HangWhatHappened(limitName)
+            + HangWhatHappened(limitName, localModelReady)
             + " "
             + StoppedWhenRuleHit(
                 limitName,
                 quietSeconds.ToString(CultureInfo.InvariantCulture) + "s quiet",
                 limitValue.ToString(CultureInfo.InvariantCulture))
             + " "
-            + HangChangeAdvice(limitName)
+            + HangChangeAdvice(limitName, localModelReady)
             + " "
-            + NarrowerChatAdvice;
+            + (isFirstByte ? RetryOrNewChatAdvice : NarrowerChatAdvice);
     }
 
     public static string? FormatLoading503(int retriesUsed, PortForwardingRules? rules)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
+        if (!live.Loading503Enabled)
+        {
+            return ChatTurnCannotContinue
+                + "llama-server was still loading and did not take this turn. "
+                + "Port rules are off, so AI-FluxMux did not retry the request. "
+                + "Wait for the model to finish loading and try again. "
+                + "To have AI-FluxMux retry automatically while a model loads, turn on "
+                + NamePortRule(LoadingRetries)
+                + " in "
+                + PortRulesLocation
+                + ". "
+                + NextTurnAfterRaise;
+        }
+
         return ChatTurnCannotContinue
             + "llama-server was still loading and did not take this turn. "
             + StoppedWhenRuleHit(
@@ -340,17 +360,18 @@ public static class PortRulesPostMortem
         return ChatTurnCannotContinue
             + "this turn was too large for the loaded Context. "
             + compactBit
-            + " Compact cannot shorten one over-full Client-app message. "
+            + " "
             + NamePortRule(Headroom)
             + " is "
             + live.CompactHeadroom.ToString(CultureInfo.InvariantCulture)
-            + ". Raising "
-            + NamePortRule(Headroom)
-            + " or "
+            + ". "
+            + "Lowering "
             + NamePortRule(WatermarkPercent)
-            + " will not fix this turn. "
-            + NoPortRuleForOverflow
-            + " Those settings are in "
+            + " will trigger compaction earlier on future turns, which may prevent this overflow from recurring. "
+            + "Raising "
+            + NamePortRule(Headroom)
+            + " gives compaction more room to shorten the history on the next turn. "
+            + "Those settings are in "
             + PortRulesLocation
             + ". "
             + RaiseContextAdvice
@@ -423,7 +444,7 @@ public static class PortRulesPostMortem
         return live.FirstByteSeconds;
     }
 
-    private static string HangWhatHappened(string limitName)
+    private static string HangWhatHappened(string limitName, bool localModelReady)
     {
         if (limitName == WaitLongerSeconds)
         {
@@ -440,10 +461,14 @@ public static class PortRulesPostMortem
             return "llama-server did not start a reply in time.";
         }
 
-        return "llama-server did not start a reply in time.";
+        // First-byte: the model may not have been running at all, so name both
+        // possibilities instead of assuming a live server that was just slow.
+        return localModelReady
+            ? "llama-server did not start a reply in time."
+            : "Either the model stopped for some reason, or llama-server did not start a reply in time.";
     }
 
-    private static string HangChangeAdvice(string limitName)
+    private static string HangChangeAdvice(string limitName, bool localModelReady)
     {
         if (limitName == WaitLongerSeconds)
         {
@@ -487,9 +512,15 @@ public static class PortRulesPostMortem
                 + NextTurnAfterRaise;
         }
 
-        return RaiseSettingAdvice(FirstByteSeconds)
-            + " If this model thinks first, raise "
+        // First-byte: keep the raise option, but frame it as a "if it thinks first"
+        // case and note that Port rule changes only apply to the next turn.
+        return "You can raise "
+            + NamePortRule(FirstByteSeconds)
+            + " in "
+            + PortRulesLocation
+            + ". If the selected model thinks first, raise "
             + NamePortRule(MaxThinkFirstByte)
-            + " instead.";
+            + " instead. "
+            + "Port rule changes can only apply to the next Client-app turn.";
     }
 }
