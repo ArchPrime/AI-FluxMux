@@ -4,6 +4,20 @@ Current version: **0.3.0 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs
 
 **Version is now single-sourced (this session):** `FluxMuxAppInfo` (`Version`, `ProductTitle`, `UserAgent`, `Copyright`) is the one place to bump the version. The window `Title` and the Diagnostics footer (version + copyright, small text, top-aligned with the "UI scale" label) bind to these constants via `x:Static upc:FluxMuxAppInfo.*` in `MainWindow.axaml`. `Help.html` and `fluxmux-updates.example.json` still carry the version as literal text (Word-authored / example feed) — update them by hand when bumping.
 
+## publish-release.bat (added 10/10)
+
+New `publish-release.bat` at the project root — one-click portable release build. **Compiled/validated (syntax + guard logic verified), NOT YET RUN** (the app is running, so step 1 correctly refuses; the user will close the app and run it).
+
+- **What it does (4 steps):**
+  1. Refuses to run if `FluxMux.Avalonia.exe` is running (prevents the locked-DLL failure; does NOT taskkill).
+  2. Builds `FluxMux.Updates` (Release) → `FluxMux.Updates.exe` (the standalone updater).
+  3. Publishes the main app (`-c Release -r win-x64 --self-contained`) → `artifacts\publish\`.
+  4. Zips `artifacts\publish\` → `AI-FluxMux-<version>-win-x64-portable.zip` (version read from `FluxMuxAppInfo.Version`).
+- **Output:** `c:\AI_Workbench\Workspace\FluxMux.Avalonia\AI-FluxMux-0.3.0-beta-win-x64-portable.zip` (self-contained, no .NET install needed).
+- **Safety:** writes `artifacts\publish\.publishing.lock` before publishing and removes it on every exit path (success + all 3 failure paths). The `artifacts\publish\` dir is git-ignored (regenerable).
+- **To run:** close the app → double-click `publish-release.bat` (or run from a terminal). The user confirms the app is closed before running.
+- **Verified:** parens balanced (19/19), all 4 steps present, lock cleanup on all 4 paths, step-1 guard correctly detects the running app.
+
 ## Project directory cleanup (10/10)
 
 Cleaned the project directory and consolidated version backups. **Git working tree is clean; `main` is in sync with `origin/main` at `1f42c78` (0.3.0 beta).**
