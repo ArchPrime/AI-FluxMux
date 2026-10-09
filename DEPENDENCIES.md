@@ -64,11 +64,11 @@ These are pulled automatically by `dotnet build` / `dotnet restore` from [nuget.
 
 ## 3. Runtime / external components (needed to run local models)
 
-These are **not** build dependencies — they're only needed at *runtime* to serve local models. The app **detects and reports** them, but **you install the first one yourself**, because the right version depends on your hardware.
+These are **not** build dependencies — they're only needed at *runtime* to serve local models. **You install the first one yourself** (the right version depends on your hardware), and **once it's installed the app generally finds and updates it to the correct version automatically.**
 
 | Component | Role | How you get it |
 |-----------|------|----------------|
-| **llama-server** (llama.cpp) | Local LLM inference server | **You identify & install the first version yourself** — pick the build that matches your hardware (CPU vs. CUDA/ROCm GPU, and the matching GPU driver/CUDA version). The app's **Environment → "Local runtime"** panel shows the *minimum required* vs. *installed* version and its status, and **Environment → "Install guides"** links the official download page. |
+| **llama-server** (llama.cpp) | Local LLM inference server | **You install the first version yourself** — pick the build that matches your hardware (CPU vs. CUDA/ROCm GPU, and the matching GPU driver/CUDA version). **After that, the app generally detects it and updates it to the correct version automatically** (via the in-app updater). The app's **Environment → "Local runtime"** panel shows the *minimum required* vs. *installed* version and its status, and **Environment → "Install guides"** links the official download page. |
 | **Model files (`.gguf`)** | LLM weights | **You supply these** (e.g. Hugging Face: https://huggingface.co/models). Choose a model that fits your RAM/VRAM. |
 | **DeepSeek Harness** | Optional cloud/local harness | Optional; managed via the in-app updater. |
 
@@ -77,7 +77,7 @@ These are **not** build dependencies — they're only needed at *runtime* to ser
 - **Environment tab → "Local runtime"** — shows llama-server (and other core components): *Minimum / Installed / Status*. Use this to confirm your llama-server version is acceptable.
 - **Environment tab → "Install guides"** — official download pages (including llama.cpp) with an "Open in browser" button.
 
-> **llama.cpp is hardware-dependent.** There is no single "right" version — it depends on your CPU/GPU, driver, and CUDA/ROCm setup. The app tells you the *minimum* it supports; you choose a version you know works on your machine. No manual install of llama.cpp is required to *build* the app — only to *run* local models.
+> **llama.cpp is hardware-dependent for the *first* install.** There is no single "right" version — it depends on your CPU/GPU, driver, and CUDA/ROCm setup, so you choose the first one you know works on your machine. **Once installed, the app generally takes it from there** — it detects the installed version and updates it to the correct one automatically. No manual install of llama.cpp is required to *build* the app — only to *run* local models.
 
 ---
 
