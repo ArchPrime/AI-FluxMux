@@ -408,6 +408,12 @@
                                                                                            ToolTip.Tip="Silently summarize older turns when the prompt gets long. No pause, no dialog. The model continues with a compressed memory of early work." />
                                                                              </StackPanel>
                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                  <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}"
+                                                                                            SelectedItem="{Binding SelectedLocalAutoCompactModeOption}"
+                                                                                            HorizontalAlignment="Stretch"
+                                                                                            ToolTip.Tip="Auto-compact settings here override the default Port rules compaction settings. Port rules default uses the global defaults from Servers - Advanced: Port rules. Profile-specific uses the per-profile settings below. None / endpoint managed disables FluxMux compaction and lets the Client app manage it." />
+                                                                              </StackPanel>
                                                                                  <TextBlock Text="Trigger:"
                                                                                             FontSize="11"
                                                                                             VerticalAlignment="Center"
