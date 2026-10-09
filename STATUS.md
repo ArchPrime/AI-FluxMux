@@ -4,6 +4,24 @@ Current version: **0.3.0 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs
 
 **Version is now single-sourced (this session):** `FluxMuxAppInfo` (`Version`, `ProductTitle`, `UserAgent`, `Copyright`) is the one place to bump the version. The window `Title` and the Diagnostics footer (version + copyright, small text, top-aligned with the "UI scale" label) bind to these constants via `x:Static upc:FluxMuxAppInfo.*` in `MainWindow.axaml`. `Help.html` and `fluxmux-updates.example.json` still carry the version as literal text (Word-authored / example feed) — update them by hand when bumping.
 
+## GitHub release v0.3.0-beta (published 10/10)
+
+**Published:** `https://github.com/ArchPrime/AI-FluxMux/releases/tag/v0.3.0-beta` — now listed as **Latest**.
+- **Asset:** `AI-FluxMux-0.3.0-beta.zip` (self-contained win-x64, from `artifacts\publish\`).
+- **Tag:** `v0.3.0-beta` → `main` @ `1f42c78` (0.3.0 beta).
+- **Notes:** version-bump release; install steps + port `http://127.0.0.1:5001` + "do not point Client app at llama-server" + "do not unzip dev config/secrets".
+- **Note:** the `publish-release.bat` zip is named `AI-FluxMux-<version>-win-x64-portable.zip`; the release asset here is `AI-FluxMux-0.3.0-beta.zip` (renamed for the release). Both are the same self-contained build.
+
+### Release-notes correction (10/10)
+
+The first draft of the release body listed **0.2-era features** (local GGUF launch, model profile editor, auto-detect llama-server, local model readiness, one Port for local and cloud, route requests, compact and omit, context budget awareness, in-app Help) under "What's new since 0.2.2" — but those were already shipped in 0.2.2, so they were not new in 0.3.
+
+**Fixed:** the release body (`C:\Users\paulk\AppData\Local\Temp\fluxmux_release_body.md`) now splits into two sections:
+- **"What's new since 0.2.2"** — only items that actually landed after the 0.2.2 tag: **Port rules (turn supervision)**, **Diagnostics footer**, and **version single-sourcing** (`FluxMuxAppInfo`).
+- **"What's in 0.2 (already shipped)"** — the 0.2-era features, listed for reference but explicitly marked as unchanged in 0.3.
+
+**Trap to remember:** when writing release notes for a version bump, only list features that landed *after the previous tag*. The 0.3.0 bump commit (`1f42c78`) was a version-bump + Diagnostics-footer change; the local-model / routing / compact features predate it. Check `git log v0.2.2..main` (or the tag range) to confirm what is genuinely new before drafting.
+
 ## publish-release.bat (added 10/10)
 
 New `publish-release.bat` at the project root — one-click portable release build. **Compiled/validated (syntax + guard logic verified), NOT YET RUN** (the app is running, so step 1 correctly refuses; the user will close the app and run it).
