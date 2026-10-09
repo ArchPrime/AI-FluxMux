@@ -1,6 +1,8 @@
 # AI-FluxMux — STATUS
 
-Current version: **0.2.2 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs` → `FluxMuxAppInfo`).
+Current version: **0.3.0 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs` → `FluxMuxAppInfo`).
+
+**Version is now single-sourced (this session):** `FluxMuxAppInfo` (`Version`, `ProductTitle`, `UserAgent`, `Copyright`) is the one place to bump the version. The window `Title` and the Diagnostics footer (version + copyright, small text, top-aligned with the "UI scale" label) bind to these constants via `x:Static upc:FluxMuxAppInfo.*` in `MainWindow.axaml`. `Help.html` and `fluxmux-updates.example.json` still carry the version as literal text (Word-authored / example feed) — update them by hand when bumping.
 
 ## Refactor proposal: split monolithic files (this session, 9/10)
 
