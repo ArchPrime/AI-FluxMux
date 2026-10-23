@@ -40,6 +40,8 @@ public partial class MainWindow : Window
     private string? _loadedHelpPath;
     private DateTime _loadedHelpUtc;
     private Timer? _helpReloadTimer;
+    private DispatcherTimer? _stressBarPulseTimer;
+    private double _stressBarPulsePhase;
 
     static MainWindow()
     {
@@ -187,7 +189,15 @@ public partial class MainWindow : Window
         {
             ApplySavedGeometry(vm);
             SyncInterventionPopup();
+            ApplyGraphTerminalDefaultSplit();
+            _ = vm.AutoLoadSelectedProfileOnStartupAsync();
         }
+        _stressBarPulseTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(50)
+        };
+        _stressBarPulseTimer.Tick += OnStressBarPulseTick;
+        _stressBarPulseTimer.Start();
     }
 
     private void ApplySavedGeometry(MainViewModel vm)
@@ -208,6 +218,344 @@ public partial class MainWindow : Window
         {
             Position = new PixelPoint(x, y);
         }
+    }
+
+    private void OnStressBarPulseTick(object? sender, EventArgs e)
+    {
+        _stressBarPulsePhase += 0.05;
+        if (_stressBarPulsePhase > Math.PI * 2.0)
+        {
+            _stressBarPulsePhase -= Math.PI * 2.0;
+        }
+        var opacity = 0.3 + 0.15 * Math.Sin(_stressBarPulsePhase);
+        var path = this.FindControl<global::Avalonia.Controls.Shapes.Path>("TtftTestingBarPath");
+        if (path is { IsVisible: true })
+        {
+            path.Opacity = opacity;
+        }
+        var path2 = this.FindControl<global::Avalonia.Controls.Shapes.Path>("ThroughputTestingBarPath");
+        if (path2 is { IsVisible: true })
+        {
+            path2.Opacity = opacity;
+        }
+        PositionXAxisLabels();
+        PositionYAxisLabels();
+        PositionBarValueLabels();
+    }
+
+    private void PositionYAxisLabels()
+    {
+        if (DataContext is not MainViewModel vm)
+        {
+            return;
+        }
+
+        PositionYAxisLabelSet(
+            this.FindControl<Canvas>("TtftYAxisLabelCanvas"),
+            this.FindControl<global::Avalonia.Controls.Border>("TtftPlotBorder"),
+            new[]
+            {
+                this.FindControl<TextBlock>("TtftYLabelMax"),
+                this.FindControl<TextBlock>("TtftYLabel75"),
+                this.FindControl<TextBlock>("TtftYLabel50"),
+                this.FindControl<TextBlock>("TtftYLabel25"),
+                this.FindControl<TextBlock>("TtftYLabelMin"),
+            },
+            new[] { vm.TelemetryGraph.YAxisMax, vm.TelemetryGraph.YAxis75, vm.TelemetryGraph.YAxis50, vm.TelemetryGraph.YAxis25, vm.TelemetryGraph.YAxisMin },
+            new[]
+            {
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("TtftYTick0"),
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("TtftYTick1"),
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("TtftYTick2"),
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("TtftYTick3"),
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("TtftYTick4"),
+            },
+            vm.TelemetryGraph.IsPlotVisible);
+
+        PositionYAxisLabelSet(
+            this.FindControl<Canvas>("ThroughputYAxisLabelCanvas"),
+            this.FindControl<global::Avalonia.Controls.Border>("ThroughputPlotBorder"),
+            new[]
+            {
+                this.FindControl<TextBlock>("ThroughputYLabelMax"),
+                this.FindControl<TextBlock>("ThroughputYLabel75"),
+                this.FindControl<TextBlock>("ThroughputYLabel50"),
+                this.FindControl<TextBlock>("ThroughputYLabel25"),
+                this.FindControl<TextBlock>("ThroughputYLabelMin"),
+            },
+            new[] { vm.TelemetryGraphThroughput.YAxisMax, vm.TelemetryGraphThroughput.YAxis75, vm.TelemetryGraphThroughput.YAxis50, vm.TelemetryGraphThroughput.YAxis25, vm.TelemetryGraphThroughput.YAxisMin },
+            new[]
+            {
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("ThroughputYTick0"),
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("ThroughputYTick1"),
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("ThroughputYTick2"),
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("ThroughputYTick3"),
+                this.FindControl<global::Avalonia.Controls.Shapes.Rectangle>("ThroughputYTick4"),
+            },
+            vm.TelemetryGraphThroughput.IsPlotVisible);
+    }
+
+    private static void PositionYAxisLabelSet(
+        Canvas? canvas,
+        global::Avalonia.Controls.Border? plotBorder,
+        TextBlock[] labels,
+        string[] texts,
+        global::Avalonia.Controls.Shapes.Rectangle[] ticks,
+        bool isActive)
+    {
+        if (canvas is null || plotBorder is null || labels.Length != 5)
+        {
+            return;
+        }
+
+        var cw = canvas.Bounds.Width;
+        var plotBounds = plotBorder.Bounds;
+        var borderThickness = plotBorder.BorderThickness;
+        var innerTop = borderThickness.Top;
+        var innerHeight = plotBounds.Height - borderThickness.Top - borderThickness.Bottom;
+        if (innerHeight <= 0 || cw <= 0)
+        {
+            return;
+        }
+
+        var fractions = new[] { 0.0, 0.25, 0.50, 0.75, 1.0 };
+        const double gap = 2.0;
+
+        for (int i = 0; i < 5; i++)
+        {
+            if (labels[i] is not { } label) continue;
+
+            label.IsVisible = isActive;
+            if (!isActive) continue;
+
+            label.Text = texts[i];
+            var centerY = innerTop + fractions[i] * innerHeight;
+            var labelHeight = label.DesiredSize.Height;
+            var top = centerY - labelHeight / 2.0;
+            if (top < 0) top = 0;
+            if (top + labelHeight > canvas.Bounds.Height) top = canvas.Bounds.Height - labelHeight;
+            var labelWidth = label.DesiredSize.Width;
+            var left = cw - gap - labelWidth;
+            if (left < 0) left = 0;
+            Canvas.SetTop(label, top);
+            Canvas.SetLeft(label, left);
+
+            if (ticks[i] is { } tick)
+            {
+                tick.IsVisible = isActive;
+                var tickY = innerTop + fractions[i] * innerHeight - 0.5;
+                if (tickY < 0) tickY = 0;
+                if (tickY + 1 > canvas.Bounds.Height) tickY = canvas.Bounds.Height - 1;
+                Canvas.SetTop(tick, tickY);
+                var tickWidth = tick.DesiredSize.Width > 0 ? tick.DesiredSize.Width : 4.0;
+                Canvas.SetLeft(tick, cw - tickWidth);
+            }
+        }
+    }
+
+    private void PositionXAxisLabels()
+    {
+        if (DataContext is not MainViewModel vm)
+        {
+            return;
+        }
+
+        PositionAxisLabelSet(
+            this.FindControl<Canvas>("TtftXAxisLabelCanvas"),
+            new[]
+            {
+                this.FindControl<TextBlock>("TtftXLabel1"),
+                this.FindControl<TextBlock>("TtftXLabel2"),
+                this.FindControl<TextBlock>("TtftXLabel3"),
+                this.FindControl<TextBlock>("TtftXLabel4"),
+                this.FindControl<TextBlock>("TtftXLabel5"),
+                this.FindControl<TextBlock>("TtftXLabel6"),
+                this.FindControl<TextBlock>("TtftXLabel7"),
+                this.FindControl<TextBlock>("TtftXLabel8"),
+                this.FindControl<TextBlock>("TtftXLabel9"),
+                this.FindControl<TextBlock>("TtftXLabel10"),
+                this.FindControl<TextBlock>("TtftXLabel11"),
+                this.FindControl<TextBlock>("TtftXLabel12"),
+                this.FindControl<TextBlock>("TtftXLabel13"),
+                this.FindControl<TextBlock>("TtftXLabel14"),
+                this.FindControl<TextBlock>("TtftXLabel15"),
+                this.FindControl<TextBlock>("TtftXLabel16"),
+            },
+            vm.TelemetryGraph.XAxisLabels);
+
+        PositionAxisLabelSet(
+            this.FindControl<Canvas>("ThroughputXAxisLabelCanvas"),
+            new[]
+            {
+                this.FindControl<TextBlock>("ThroughputXLabel1"),
+                this.FindControl<TextBlock>("ThroughputXLabel2"),
+                this.FindControl<TextBlock>("ThroughputXLabel3"),
+                this.FindControl<TextBlock>("ThroughputXLabel4"),
+                this.FindControl<TextBlock>("ThroughputXLabel5"),
+                this.FindControl<TextBlock>("ThroughputXLabel6"),
+                this.FindControl<TextBlock>("ThroughputXLabel7"),
+                this.FindControl<TextBlock>("ThroughputXLabel8"),
+                this.FindControl<TextBlock>("ThroughputXLabel9"),
+                this.FindControl<TextBlock>("ThroughputXLabel10"),
+                this.FindControl<TextBlock>("ThroughputXLabel11"),
+                this.FindControl<TextBlock>("ThroughputXLabel12"),
+                this.FindControl<TextBlock>("ThroughputXLabel13"),
+                this.FindControl<TextBlock>("ThroughputXLabel14"),
+                this.FindControl<TextBlock>("ThroughputXLabel15"),
+                this.FindControl<TextBlock>("ThroughputXLabel16"),
+            },
+            vm.TelemetryGraphThroughput.XAxisLabels);
+    }
+
+    private static void PositionAxisLabelSet(
+        Canvas? canvas,
+        TextBlock[] labels,
+        System.Collections.ObjectModel.ObservableCollection<TelemetryGraphViewModel.XAxisLabelItem> axisLabels)
+    {
+        if (canvas is null || axisLabels is null)
+        {
+            return;
+        }
+
+        var cw = canvas.Bounds.Width;
+        if (cw <= 0)
+        {
+            return;
+        }
+
+        for (int i = 0; i < labels.Length; i++)
+        {
+            if (labels[i] is not { } label) continue;
+
+            if (i >= axisLabels.Count)
+            {
+                label.IsVisible = false;
+                continue;
+            }
+
+            var item = axisLabels[i];
+            if (string.IsNullOrEmpty(item.Text))
+            {
+                label.IsVisible = false;
+                continue;
+            }
+
+            label.Text = item.Text;
+            label.IsVisible = true;
+            var x = item.Position / 100.0 * cw;
+            var labelWidth = label.DesiredSize.Width;
+            var left = x - labelWidth / 2.0;
+            if (left < 0) left = 0;
+            if (left + labelWidth > cw) left = cw - labelWidth;
+            Canvas.SetLeft(label, left);
+        }
+    }
+
+    private void PositionBarValueLabels()
+    {
+        if (DataContext is not MainViewModel vm)
+        {
+            return;
+        }
+
+        PositionBarValueLabelSet(
+            this.FindControl<Canvas>("TtftBarValueLabelCanvas"),
+            new[]
+            {
+                this.FindControl<TextBlock>("TtftBarValue1"),
+                this.FindControl<TextBlock>("TtftBarValue2"),
+                this.FindControl<TextBlock>("TtftBarValue3"),
+                this.FindControl<TextBlock>("TtftBarValue4"),
+                this.FindControl<TextBlock>("TtftBarValue5"),
+                this.FindControl<TextBlock>("TtftBarValue6"),
+            },
+            vm.TelemetryGraph);
+
+        PositionBarValueLabelSet(
+            this.FindControl<Canvas>("ThroughputBarValueLabelCanvas"),
+            new[]
+            {
+                this.FindControl<TextBlock>("ThroughputBarValue1"),
+                this.FindControl<TextBlock>("ThroughputBarValue2"),
+                this.FindControl<TextBlock>("ThroughputBarValue3"),
+                this.FindControl<TextBlock>("ThroughputBarValue4"),
+                this.FindControl<TextBlock>("ThroughputBarValue5"),
+                this.FindControl<TextBlock>("ThroughputBarValue6"),
+            },
+            vm.TelemetryGraphThroughput);
+    }
+
+    private static void PositionBarValueLabelSet(
+        Canvas? canvas,
+        TextBlock[] labels,
+        TelemetryGraphViewModel graph)
+    {
+        if (canvas is null || labels.Length != 6)
+        {
+            return;
+        }
+
+        var cw = canvas.Bounds.Width;
+        var ch = canvas.Bounds.Height;
+        if (cw <= 0 || ch <= 0)
+        {
+            return;
+        }
+
+        var xPositions = new[] { graph.XAxisPos1, graph.XAxisPos2, graph.XAxisPos3, graph.XAxisPos4, graph.XAxisPos5, graph.XAxisPos6 };
+        var yPositions = new[] { graph.BarValueY1, graph.BarValueY2, graph.BarValueY3, graph.BarValueY4, graph.BarValueY5, graph.BarValueY6 };
+        var texts = new[] { graph.BarValueText1, graph.BarValueText2, graph.BarValueText3, graph.BarValueText4, graph.BarValueText5, graph.BarValueText6 };
+
+        for (int i = 0; i < 6; i++)
+        {
+            if (labels[i] is not { } label) continue;
+
+            if (string.IsNullOrEmpty(texts[i]))
+            {
+                label.IsVisible = false;
+                continue;
+            }
+
+            label.IsVisible = true;
+            var x = xPositions[i] / 100.0 * cw;
+            var y = yPositions[i] / 100.0 * ch;
+            var labelWidth = label.DesiredSize.Width;
+            var labelHeight = label.DesiredSize.Height;
+            var left = x - labelWidth / 2.0;
+            var top = y - labelHeight - 2.0;
+            if (left < 0) left = 0;
+            if (left + labelWidth > cw) left = cw - labelWidth;
+            if (top < 0) top = 0;
+            Canvas.SetLeft(label, left);
+            Canvas.SetTop(label, top);
+        }
+    }
+
+    private void ApplyGraphTerminalDefaultSplit()
+    {
+        var grid = this.FindControl<Grid>("GraphTerminalGrid");
+        if (grid is null)
+        {
+            return;
+        }
+
+        var applied = false;
+        void OnLayoutUpdated(object? s, EventArgs args)
+        {
+            if (!applied && grid.Bounds.Width > 0)
+            {
+                applied = true;
+                grid.LayoutUpdated -= OnLayoutUpdated;
+                var value = grid.Bounds.Width * 0.33;
+                grid.ColumnDefinitions[0].Width = new GridLength(value, GridUnitType.Pixel);
+                grid.ColumnDefinitions[2].Width = new GridLength(1.0, GridUnitType.Star);
+            }
+        }
+        grid.LayoutUpdated += OnLayoutUpdated;
+    }
+
+    private void OnStressTestButtonClick(object? sender, RoutedEventArgs e)
+    {
     }
 
     private void OnVmPropertyChanged(object? sender, PropertyChangedEventArgs e)

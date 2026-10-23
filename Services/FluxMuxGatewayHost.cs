@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -47,6 +48,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private string _lastPortRulesDiagnostic = string.Empty;
     private DateTime _lastHangTallyUtc;
     private int _portRuleSendAnywayGrace;
+    private bool _currentTurnIsLongLoad;
 
     public FluxMuxGatewayHost(
         string statePath,
@@ -87,10 +89,31 @@ public sealed class FluxMuxGatewayHost : IDisposable
     public Func<JsonObject, JsonObject>? EnrichState { get; set; }
 
     public Func<string, string, (string Mode, double TriggerPercent, int KeepTurns, int KeepToolResults, int PinUserChars)? >? GetLocalAutoCompactSettings { get; set; }
+    public Func<string, string, int?>? GetLocalMaxForwardedImages { get; set; }
+    public Func<string, string, (int Context, string Offload)>? GetLocalProfileContextAndOffload { get; set; }
 
     public Action<string>? ReportPortRulesPostMortem { get; set; }
 
     public Action<PortRulesTelemetry>? ReportPortRulesTelemetry { get; set; }
+
+    /// <summary>
+    /// Reports the measured prompt-token count + context limit for the live "Context" gauge.
+    /// Called by the gateway each turn after the real token count is measured.
+    /// </summary>
+    public Action<int, int, string>? ReportContextUsage { get; set; }
+
+    /// <summary>
+    /// Raised when a turn 400s on context overflow and the non-destructive Hail Mary prune
+    /// pipeline (stages 1-4) already ran but the turn still can't fit. The UI shows the
+    /// Hail Mary banner with a button to run the destructive stage-5 middle-cut.
+    /// </summary>
+    public Action<string>? ReportHailMaryOffer { get; set; }
+
+    /// <summary>
+    /// Returns and clears the pending Hail Mary middle-cut request. When true, the next
+    /// local forward applies the stage-5 middle-cut to the payload before sending.
+    /// </summary>
+    public Func<bool>? ConsumeHailMaryMiddleCut { get; set; }
 
     public GenerationSpeedTracker? GenerationSpeed
     {
@@ -410,6 +433,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         var forceRoute = context.Request.Headers[CloudEndpointValidationProbe.ForceRouteHeader];
+        var isProbeRequest = context.Request.Headers[CloudEndpointValidationProbe.ProbeRequestHeader]?.Any() ?? false;
         var requestId = Guid.NewGuid().ToString("N")[..8];
         string? overlayVariant = null;
         var artifacts = LocalSessionArtifactPolicy.Apply(payload);
@@ -437,15 +461,19 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 + " older tool result(s); llama-server still sees the calls. The Client app still has the full output.");
         }
 
+        var preferredModel = Str(state, "local_preferred_model");
+        var variant = Str(state, "local_variant");
+        var perProfileMaxImages = GetLocalMaxForwardedImages?.Invoke(preferredModel, variant);
+        var maxImages = perProfileMaxImages ?? portRules.MaxForwardedImages;
         var droppedPictures = portRules.MaxPicturesEnabled
-            ? LocalChatPayloadSignals.KeepMostRecentImages(payload, portRules.MaxForwardedImages)
+            ? LocalChatPayloadSignals.KeepMostRecentImages(payload, maxImages)
             : 0;
         if (droppedPictures > 0)
         {
             Log("local chat: dropped "
                 + droppedPictures.ToString(CultureInfo.InvariantCulture)
                 + " older picture(s); llama-server only gets the "
-                + portRules.MaxForwardedImages.ToString(CultureInfo.InvariantCulture)
+                + maxImages.ToString(CultureInfo.InvariantCulture)
                 + " most recent. The Client app still has the full album.");
         }
 
@@ -494,9 +522,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
             RepeatedCommandThisTurn = repeatedThisTurn
         });
         var compactOn = ParseBool(Str(LoadLocalReload(), "forward_compact"));
-        var compactApplied = TryApplyForwardCompact(payload, state, compactOn);
-        OfferSpillCompactIfNeeded(state, payload, compactApplied);
-        OfferDocumentContextDialogIfNeeded(state, payload, compactApplied);
+        // Probe/stress-test requests must reach the model at their INTENDED fill level. If the
+        // gateway auto-compacted them, the model would see a shrunken prompt and the test's
+        // TTFT/tok/s readings would be meaningless (and the context gauge would disagree with
+        // the test's fill %). So skip forward-compaction for probes; the ShouldBlockLocalForward
+        // safety check below still runs so the test can observe the real "context too small"
+        // behavior at high fill.
+        var compactApplied = isProbeRequest ? false : TryApplyForwardCompact(payload, state, compactOn);
+        OfferDocumentContextDialogIfNeeded(state, payload, compactApplied, isProbeRequest);
         var reloadOffered = false;
         var decision = FluxMuxGatewayRouting.DecideRoute(state, payload, forceRoute);
         var promptChars = 0;
@@ -578,44 +611,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         var cloudRecommendStatus = Str(LoadRecommend(), "status");
-        if (FluxMuxGatewayRouting.ShouldBlockLocalForward(
-                routeKind,
-                state,
-                payload,
-                cloudRecommendStatus,
-                forceRoute))
-        {
-            OfferLocalReloadIfNeeded(state, payload);
-            reloadOffered = IsLocalReloadOfferPending();
-            var hotContext = ParseInt(Str(state, "local_context"), 0);
-            var lastServed = ReadLastServedIdentity();
-            var fillingDetails = FluxMuxGatewayRouting.LoadedLocalCannotTakeTurn(state, payload)
-                ? null
-                : PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules);
-            await SendOpenAiErrorAsync(
-                context.Response,
-                FluxMuxGatewayRouting.FormatBlockedLocalTurnMessage(
-                    state,
-                    payload,
-                    promptChars,
-                    lastServed.Kind,
-                    lastServed.Label,
-                    fillingDetails),
-                400,
-                FluxMuxGatewayRouting.LocalFillingBlockedType).ConfigureAwait(false);
-            Log("local_context_filling: blocked llama-server on a filling turn n_ctx="
-                + hotContext.ToString(CultureInfo.InvariantCulture)
-                + " n_prompt=" + EstimateNeededContext(payload).ToString(CultureInfo.InvariantCulture)
-                + " route=" + routeKind);
-            EmitContextEvent(
-                "local_context_filling",
-                "provider=Local model=" + FirstNonEmpty(Str(state, "local_preferred_model"), Str(payload, "model"))
-                + " n_ctx=" + hotContext.ToString(CultureInfo.InvariantCulture)
-                + " n_prompt=" + EstimateNeededContext(payload).ToString(CultureInfo.InvariantCulture)
-                + " status=400");
-            ReportPortRulesFinding(fillingDetails);
-            return;
-        }
+        // The local "context filling" block is checked after the local payload is finalized
+        // (PrepareLocalChatPayloadAsync + overlay + compaction) so it can measure the real
+        // prompt token count from llama-server. See the block below in the routeKind == "local"
+        // branch.
 
         var (boundKind, upstreamUrl, upstreamMode, provider, preferred) = BindRoute(state, routeKind);
         routeKind = boundKind;
@@ -656,9 +655,174 @@ public sealed class FluxMuxGatewayHost : IDisposable
             }
 
             var hotContext = ParseInt(Str(state, "local_context"), 0);
-            if (!compactApplied)
+            // Diagnostic: log the live local_context + variant the gateway is using for blocking,
+            // so we can see if it's stale (a previous profile's value) at the moment of a block.
+            Log("[ContextDiag] blocking-check local_context=" + hotContext
+                + " variant=" + Str(state, "local_variant")
+                + " model=" + Str(state, "local_preferred_model")
+                + " phase=" + Str(state, "local_phase"));
+            // so the blocking/compaction decisions use the true count instead of the chars/4
+            // estimate, which over-counts for dense tokenizers and causes false "context full"
+            // blocks. Falls back to the estimate when the count is unavailable.
+            //
+            // The count is NOT hard-wired: it is read live from the currently-loaded model's own
+            // tokenizer. `local_port` is the port of the launched model and `local_preferred_model`
+            // is the active model/variant, both of which change per profile. Switching profiles
+            // therefore yields a different, correct count automatically.
+            var localPort = ParseInt(Str(state, "local_port"), 0);
+            int? measuredPromptTokens = null;
+            if (localPort > 0 && hotContext > 0)
             {
-                compactApplied = TryApplyForwardCompact(payload, state, compactOn);
+                measuredPromptTokens = await LocalPromptTokenCounter.CountAsync(
+                    localPort,
+                    payload,
+                    Str(state, "local_preferred_model")).ConfigureAwait(false);
+                if (measuredPromptTokens is not null)
+                {
+                    Log("local prompt tokens (measured): "
+                        + measuredPromptTokens.Value.ToString(CultureInfo.InvariantCulture)
+                        + " (estimate "
+                        + LocalRequestOverlayRouting.EstimatePromptTokens(payload).ToString(CultureInfo.InvariantCulture)
+                        + ")");
+                    // Report the live context usage for the UI's "Context" gauge.
+                    ReportContextUsage?.Invoke(
+                        measuredPromptTokens.Value,
+                        hotContext,
+                        Str(state, "local_preferred_model"));
+                }
+            }
+
+            if (!compactApplied && !isProbeRequest)
+            {
+                compactApplied = TryApplyForwardCompact(payload, state, compactOn, measuredPromptTokens);
+            }
+
+            // Offer the YaRN spill-compact dialog using the measured token count (not the
+            // chars/4 estimate, which over-counts for dense tokenizers like Qwen and would
+            // falsely trigger "approaching VRAM limit" at low context fill).
+            OfferSpillCompactIfNeeded(state, payload, compactApplied, isProbeRequest, measuredPromptTokens);
+
+            // Hail Mary stage-5 middle-cut: if the user clicked the Hail Mary button after a
+            // context-overflow 400, apply the destructive middle-cut to this payload before
+            // sending. This is the one-shot retry that gives the turn a chance to fit.
+            if (!isProbeRequest && ConsumeHailMaryMiddleCut?.Invoke() == true)
+            {
+                var hotContextForHailMary = ParseInt(Str(state, "local_context"), 0);
+                if (hotContextForHailMary > 0)
+                {
+                    var hailMary = HailMaryCompaction.Salvage(payload, hotContextForHailMary, allowMiddleCut: true);
+                    if (hailMary.MiddleCutDropped > 0)
+                    {
+                        Log("hail-mary (button): " + hailMary.DiagnosticsLine);
+                        var hailInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
+                        if (hailInserted > 0)
+                        {
+                            Log("local chat: inserted a user turn so the Qwen template has a query");
+                        }
+                    }
+                    else
+                    {
+                        Log("hail-mary (button): middle-cut could not drop any turns (too few turns or tool-pair-locked)");
+                    }
+                }
+            }
+
+            // Local "context filling" block, now that the payload is finalized and we have the
+            // model's real prompt token count. This is the safety check that stops a turn whose
+            // prompt already fills the loaded window before it is sent to llama-server.
+            //
+            // Probe/stress-test requests are EXEMPT from this block: the test deliberately probes
+            // near and past the context limit to measure TTFT/tok/s and observe the real
+            // "context too small" behavior. Blocking the test's own requests would (a) prevent the
+            // test from reaching its intended fill levels, and (b) surface false "Context is too
+            // small" warnings in the UI when the gauge shows plenty of room (the test's "Clear"
+            // prompt or a concurrent Cline request hitting a stale context state). The genuine
+            // overflow is still caught: llama-server reports a real exceed_context_size_error,
+            // which the test observes as the expected 400 at the limit.
+            if (!isProbeRequest &&
+                FluxMuxGatewayRouting.ShouldBlockLocalForward(
+                    routeKind,
+                    state,
+                    payload,
+                    cloudRecommendStatus,
+                    forceRoute,
+                    measuredPromptTokens))
+            {
+                // Update the context gauge with the CURRENT prompt's measured token count
+                // before showing the block dialog. The gauge may be stale (from a previous
+                // turn), so the user would see a misleading value. This ensures the gauge
+                // matches the current context when the dialog appears.
+                if (measuredPromptTokens is not null && hotContext > 0)
+                {
+                    ReportContextUsage?.Invoke(
+                        measuredPromptTokens.Value,
+                        hotContext,
+                        Str(state, "local_preferred_model"));
+                }
+
+                // The turn is blocked for context reasons. Pass blockedForContext: true so the
+                // reload offer always includes a "Compact and retry" escape, even if no reload
+                // candidate is available. This is the graceful-escape fix: a blocked turn must
+                // never strand the user with no recovery path.
+                OfferLocalReloadIfNeeded(state, payload, measuredPromptTokens, blockedForContext: true);
+                reloadOffered = IsLocalReloadOfferPending();
+                var lastServed = ReadLastServedIdentity();
+                // The overflow message must only reference Port rules when the profile's
+                // compaction mode actually uses them. The profile's LocalAutoCompactMode is the
+                // source of truth: "port-rules" → Port rules apply; "per-profile" → the
+                // profile's own settings apply; "none" → no FluxMux compaction. Passing the
+                // GLOBAL portRules.CompactEnabled here would misattribute the overflow to a
+                // Port rule when the profile uses per-profile or none mode (even if global
+                // Port rules are enabled). Resolve the profile's mode and gate on it.
+                var overflowModel = Str(state, "local_preferred_model");
+                var overflowVariant = Str(state, "local_variant");
+                var overflowProfile = GetLocalAutoCompactSettings?.Invoke(overflowModel, overflowVariant);
+                var overflowMode = overflowProfile.HasValue ? overflowProfile.Value.Mode : "port-rules";
+                var portRulesActiveForProfile = portRules.CompactEnabled
+                    && !overflowMode.Equals("per-profile", StringComparison.OrdinalIgnoreCase)
+                    && !overflowMode.Equals("none", StringComparison.OrdinalIgnoreCase);
+                var fillingDetails = FluxMuxGatewayRouting.LoadedLocalCannotTakeTurn(state, payload)
+                    ? null
+                    : PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules, portRulesActiveForProfile);
+                await SendOpenAiErrorAsync(
+                    context.Response,
+                    FluxMuxGatewayRouting.FormatBlockedLocalTurnMessage(
+                        state,
+                        payload,
+                        promptChars,
+                        lastServed.Kind,
+                        lastServed.Label,
+                        fillingDetails),
+                    400,
+                    FluxMuxGatewayRouting.LocalFillingBlockedType).ConfigureAwait(false);
+                Log("local_context_filling: blocked llama-server on a filling turn n_ctx="
+                    + hotContext.ToString(CultureInfo.InvariantCulture)
+                    + " n_prompt=" + (measuredPromptTokens ?? EstimateNeededContext(payload)).ToString(CultureInfo.InvariantCulture)
+                    + " route=" + routeKind);
+                // Suppress the user-visible context event for probe requests (the context-fill
+                // stress test deliberately drives prompts past the limit to observe the real
+                // failure). The 400 response above is still returned so the test can observe
+                // the genuine "context too small" behavior; we only skip the context *event*
+                // that would otherwise surface as a spurious warning in the telemetry/UI.
+                if (!isProbeRequest)
+                {
+                    EmitContextEvent(
+                        "local_context_filling",
+                        "provider=Local model=" + FirstNonEmpty(Str(state, "local_preferred_model"), Str(payload, "model"))
+                        + " n_ctx=" + hotContext.ToString(CultureInfo.InvariantCulture)
+                        + " n_prompt=" + (measuredPromptTokens ?? EstimateNeededContext(payload)).ToString(CultureInfo.InvariantCulture)
+                        + " status=400");
+                }
+                // Suppress the user-visible post-mortem for probe requests (the context-fill
+                // stress test deliberately drives prompts past the limit to observe the real
+                // failure). The 400 response above is still returned so the test can observe
+                // the genuine "context too small" behavior; we only skip the diagnostic log
+                // entry that would otherwise surface as a spurious "PORT" warning in the UI.
+                if (!isProbeRequest)
+                {
+                    ReportPortRulesFinding(fillingDetails);
+                }
+                return;
             }
 
             var beforeClamp = ParseInt(payload["max_tokens"]?.ToString() ?? string.Empty, requestedMax);
@@ -678,7 +842,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
             if (FluxMuxGatewayRouting.AllowsOperatorRouting(forceRoute))
             {
-                OfferLocalReloadIfNeeded(state, payload);
+                OfferLocalReloadIfNeeded(state, payload, measuredPromptTokens);
             }
 
             reloadOffered = IsLocalReloadOfferPending();
@@ -741,7 +905,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             }
 
             if (routeKind == "local"
-                && LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext))
+                && LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, measuredPromptTokens: measuredPromptTokens))
             {
                 var overflow = FluxMuxGatewayRouting.DecideOverflowFallback(state, payload);
                 if (overflow.Kind == FluxMuxGatewayRouting.CloudConsent
@@ -782,7 +946,27 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 {
                     var overflowTokens = EstimateNeededContext(payload);
                     var lastServed = ReadLastServedIdentity();
-                    var overflowDetails = PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules);
+                    // Update the context gauge with the CURRENT prompt's measured token count
+                    // before showing the overflow dialog. The gauge may be stale (from a previous
+                    // turn), so the user would see a misleading value.
+                    if (measuredPromptTokens is not null && hotContext > 0)
+                    {
+                        ReportContextUsage?.Invoke(
+                            measuredPromptTokens.Value,
+                            hotContext,
+                            Str(state, "local_preferred_model"));
+                    }
+                    // Use the profile-aware compaction mode (same pattern as the filling-block
+                    // path above) so the overflow message only references Port rules when the
+                    // profile's compaction mode actually uses them.
+                    var overflowModel2 = Str(state, "local_preferred_model");
+                    var overflowVariant2 = Str(state, "local_variant");
+                    var overflowProfile2 = GetLocalAutoCompactSettings?.Invoke(overflowModel2, overflowVariant2);
+                    var overflowMode2 = overflowProfile2.HasValue ? overflowProfile2.Value.Mode : "port-rules";
+                    var portRulesActiveForProfile2 = portRules.CompactEnabled
+                        && !overflowMode2.Equals("per-profile", StringComparison.OrdinalIgnoreCase)
+                        && !overflowMode2.Equals("none", StringComparison.OrdinalIgnoreCase);
+                    var overflowDetails = PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules, portRulesActiveForProfile2);
                     await SendOpenAiErrorAsync(
                         context.Response,
                         FluxMuxGatewayRouting.FormatLocalContextOverflowMessage(
@@ -800,7 +984,17 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         + " n_ctx=" + hotContext.ToString(CultureInfo.InvariantCulture)
                         + " n_prompt=" + overflowTokens.ToString(CultureInfo.InvariantCulture)
                         + " status=400");
-                    ReportPortRulesFinding(overflowDetails);
+                    if (!isProbeRequest)
+                    {
+                        ReportPortRulesFinding(overflowDetails);
+                        // Offer the Hail Mary banner: the non-destructive prune pipeline
+                        // (stages 1-4) already ran in TryApplyForwardCompact. If the turn
+                        // still can't fit, the user can click the button to run the
+                        // destructive stage-5 middle-cut and re-send.
+                        ReportHailMaryOffer?.Invoke(
+                            "hail-mary: this turn is too large for the loaded Context even after pruning. "
+                            + "Click 'Hail Mary: shrink this turn' to cut the middle of the history and re-send.");
+                    }
                     return;
                 }
             }
@@ -1047,10 +1241,45 @@ public sealed class FluxMuxGatewayHost : IDisposable
         LocalStreamHangClock? hangClock = null;
         try
         {
+            // Detect long-load profile (YaRN / extended-context / GPU+CPU) BEFORE computing
+            // the copy timeout, so RequestTimeoutForPayload can apply the ThinkingFirstByteSeconds
+            // extension. Previously this detection ran AFTER the timeout was computed, so the
+            // extension was never applied and the copy timeout was too short for cold YaRN loads.
+            _currentTurnIsLongLoad = false;
+            if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+            {
+                var localCtxForTimeout = ParseInt(Str(state, "local_context"), 0);
+                var offloadForTimeout = Str(state, "local_gpu_offload");
+                if (LocalLoadingRetryPolicy.IsLongLoadProfile(localCtxForTimeout, offloadForTimeout))
+                {
+                    _currentTurnIsLongLoad = true;
+                }
+                Log("long-load detect: ctx=" + localCtxForTimeout
+                    + " offload=" + (string.IsNullOrWhiteSpace(offloadForTimeout) ? "(empty)" : offloadForTimeout)
+                    + " isLongLoad=" + _currentTurnIsLongLoad
+                    + " local_phase=" + Str(state, "local_phase")
+                    + " local_preferred_model=" + Str(state, "local_preferred_model"));
+            }
             var timeoutSec = RequestTimeoutForPayload(
                 requestPayload as JsonObject ?? payload,
                 localStream: routeKind.Equals("local", StringComparison.OrdinalIgnoreCase),
-                portRules);
+                portRules,
+                longLoadProfile: _currentTurnIsLongLoad);
+            // For long-load profiles (YaRN / extended-context / GPU+CPU), the 503-retry
+            // loop can run for minutes while llama-server loads from cold. The copy
+            // timeout above is sized for the "loaded but slow first byte" phase and is
+            // shorter than that, so it would cancel the retry loop early. Extend the
+            // timeout to cover the long-load retry window so the loop can ride out the
+            // cold load instead of being cut off and misreported as a failure.
+            if (_currentTurnIsLongLoad)
+            {
+                var localCtxForTimeout = ParseInt(Str(state, "local_context"), 0);
+                var offloadForTimeout = Str(state, "local_gpu_offload");
+                var longLoadWindowSec = LocalLoadingRetryPolicy.EffectiveMaxTotalWaitSeconds(localCtxForTimeout, offloadForTimeout)
+                    + portRules.LoadingRetryDelaySeconds
+                    + 30; // margin for the final probe + overhead
+                timeoutSec = Math.Max(timeoutSec, longLoadWindowSec);
+            }
             using var timeoutCts = new CancellationTokenSource();
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
             HttpResponseMessage? response = null;
@@ -1063,11 +1292,22 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 using var request = CreateUpstreamRequest();
                 response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
                 status = (int)response.StatusCode;
+                Log("upstream request: status=" + status
+                    + " route=" + routeKind
+                    + " loadingRetries=" + loadingRetries
+                    + " timeoutSec=" + timeoutSec);
                 if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
                     && !response.IsSuccessStatusCode)
                 {
                     loadingDetail = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
-                    if (LocalLoadingRetryPolicy.ShouldRetry(status, loadingDetail, loadingRetries, portRules))
+                    // Pass the active profile's context + offload mode so the retry
+                    // budget adapts: YaRN / extended-context / GPU+CPU profiles load
+                    // slowly from cold and need a much longer 503-retry window than
+                    // the default, otherwise the gateway gives up and converts the
+                    // "still loading" into a non-transient error that fails the launch.
+                    var localCtxForRetry = ParseInt(Str(state, "local_context"), 0);
+                    var offloadForRetry = Str(state, "local_gpu_offload");
+                    if (LocalLoadingRetryPolicy.ShouldRetry(status, loadingDetail, loadingRetries, portRules, localCtxForRetry, offloadForRetry))
                     {
                         loadingRetries++;
                         PatchPortRulesTelemetry(prev => prev with
@@ -1120,11 +1360,20 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     else
                     {
                         var lastServed = ReadLastServedIdentity();
+                        // Use the profile-aware compaction mode so the overflow message only
+                        // references Port rules when the profile's compaction mode actually uses them.
+                        var overflowModel3 = Str(state, "local_preferred_model");
+                        var overflowVariant3 = Str(state, "local_variant");
+                        var overflowProfile3 = GetLocalAutoCompactSettings?.Invoke(overflowModel3, overflowVariant3);
+                        var overflowMode3 = overflowProfile3.HasValue ? overflowProfile3.Value.Mode : "port-rules";
+                        var portRulesActiveForProfile3 = portRules.CompactEnabled
+                            && !overflowMode3.Equals("per-profile", StringComparison.OrdinalIgnoreCase)
+                            && !overflowMode3.Equals("none", StringComparison.OrdinalIgnoreCase);
                         message = FluxMuxGatewayRouting.FormatLocalContextOverflowMessage(
                             state,
                             lastServed.Kind,
                             lastServed.Label,
-                            PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules));
+                            PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules, portRulesActiveForProfile3));
                     }
                 }
                 else if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
@@ -1141,7 +1390,21 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
                     && errorType == "exceed_context_size_error")
                 {
-                    ReportPortRulesFinding(PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules));
+                    if (!isProbeRequest)
+                    {
+                        var overflowModel4 = Str(state, "local_preferred_model");
+                        var overflowVariant4 = Str(state, "local_variant");
+                        var overflowProfile4 = GetLocalAutoCompactSettings?.Invoke(overflowModel4, overflowVariant4);
+                        var overflowMode4 = overflowProfile4.HasValue ? overflowProfile4.Value.Mode : "port-rules";
+                        var portRulesActiveForProfile4 = portRules.CompactEnabled
+                            && !overflowMode4.Equals("per-profile", StringComparison.OrdinalIgnoreCase)
+                            && !overflowMode4.Equals("none", StringComparison.OrdinalIgnoreCase);
+                        ReportPortRulesFinding(PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules, portRulesActiveForProfile4));
+                        // Offer the Hail Mary banner (upstream 400 path).
+                        ReportHailMaryOffer?.Invoke(
+                            "hail-mary: this turn is too large for the loaded Context even after pruning. "
+                            + "Click 'Hail Mary: shrink this turn' to cut the middle of the history and re-send.");
+                    }
                 }
                 else if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
                     && portRules.Loading503Enabled
@@ -1198,9 +1461,29 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 hangClock = new LocalStreamHangClock(portRules);
                 if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
                 {
-                    hangClock.FirstByteDeadline = LocalStreamHangPolicy.FirstByteDeadlineForThinkBudget(
+                    var baseDeadline = LocalStreamHangPolicy.FirstByteDeadlineForThinkBudget(
                         ReadThinkingBudget(payload),
                         portRules);
+                    // For long-load profiles (YaRN / extended-context / GPU+CPU), the
+                    // first-byte deadline must be much longer than the normal 25s/120s
+                    // because the model can take minutes to finish loading from cold.
+                    // Use the ThinkingFirstByteSeconds port rule (default 600s) so the
+                    // hang policy doesn't kill the turn while the model is still loading.
+                    if (_currentTurnIsLongLoad)
+                    {
+                        var thinkingDeadline = TimeSpan.FromSeconds(portRules.ThinkingFirstByteSeconds);
+                        hangClock.FirstByteDeadline = thinkingDeadline > baseDeadline ? thinkingDeadline : baseDeadline;
+                        Log("hang clock: long-load profile, FirstByteDeadline="
+                            + (int)hangClock.FirstByteDeadline.TotalSeconds
+                            + "s (ThinkingFirstByteSeconds=" + portRules.ThinkingFirstByteSeconds
+                            + ", baseDeadline=" + (int)baseDeadline.TotalSeconds + "s)");
+                    }
+                    else
+                    {
+                        hangClock.FirstByteDeadline = baseDeadline;
+                        Log("hang clock: normal profile, FirstByteDeadline="
+                            + (int)hangClock.FirstByteDeadline.TotalSeconds + "s");
+                    }
                 }
 
                 var hangWatch = routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
@@ -1213,6 +1496,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     : Task.CompletedTask;
                 var responseSanitized = false;
                 var replyBudget = ParseInt(payload["max_tokens"]?.ToString() ?? string.Empty, 0);
+                // Time-to-first-byte telemetry: record when the request started copying and
+                // when the first upstream byte arrived. This is the number that's >600s on a
+                // cold YaRN launch — it tells us whether the slowness is in the launch (model
+                // load + KV cache allocation) or in the first request (lazy KV allocation).
+                var ttfbStopwatch = Stopwatch.StartNew();
+                var firstByteLogged = false;
                 try
                 {
                     var copy = await OpenAiStreamTelemetryProxy.CopyAsync(
@@ -1223,13 +1512,25 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         hangCts.Token,
                         _ =>
                         {
-                            gotUpstreamBytes = true;
+                            if (!gotUpstreamBytes)
+                            {
+                                gotUpstreamBytes = true;
+                                if (!firstByteLogged)
+                                {
+                                    firstByteLogged = true;
+                                    Log($"ttfb: first byte after {ttfbStopwatch.ElapsedMilliseconds} ms (model={model})");
+                                }
+                            }
                             hangClock.NoteByte();
                         },
                         localDeclaredTools,
                         localAllowParallel,
                         sessionArtifacts,
                         replyBudget).ConfigureAwait(false);
+                    if (firstByteLogged)
+                    {
+                        Log($"ttfb: stream complete after {ttfbStopwatch.ElapsedMilliseconds} ms total (model={model})");
+                    }
                     responseSanitized = copy.Sanitized;
                     if (copy.ThinkCutOff)
                     {
@@ -1369,7 +1670,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         hangClock.WaitLongerCount,
                         (int)hangClock.FirstByteDeadline.TotalSeconds,
                         portRules,
-                        localModelReady: LocalTargetReady(LoadState()));
+                        localModelReady: LocalTargetReady(LoadState()),
+                        portRulesActive: portRules.Enabled);
                     ReportPortRulesFinding(hangDetails);
                 }
 
@@ -1566,7 +1868,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         return route.Kind;
     }
 
-    private void OfferLocalReloadIfNeeded(JsonObject state, JsonObject payload)
+    private void OfferLocalReloadIfNeeded(JsonObject state, JsonObject payload, int? measuredPromptTokens = null, bool blockedForContext = false)
     {
         if (!LocalTargetReady(state))
         {
@@ -1579,9 +1881,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
         var hotReasoning = Str(state, "local_reasoning", "Off");
         var hotContext = ParseInt(Str(state, "local_context"), 0);
         var (needVision, needThinking) = LocalReloadRouting.EvaluateCapabilityNeeds(payload, hotVision, hotReasoning);
-        var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        var promptTokens = measuredPromptTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
         var turnTokens = promptTokens;
-        var promptExceeds = LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);
+        var promptExceeds = LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, measuredPromptTokens: measuredPromptTokens);
         var thisTurnHasImage = LocalChatPayloadSignals.LatestUserTurnHasImage(payload);
 
         var existing = LoadLocalReload();
@@ -1602,7 +1904,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
             compactAlreadyOn,
             hotModel,
             hotVariant,
-            thisTurnHasImage);
+            thisTurnHasImage,
+            blockedForContext);
         if (offer is null)
         {
             if (LocalReloadRouting.LocalCannotCoverTurn(null, needVision, promptExceeds))
@@ -1851,7 +2154,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         return null;
     }
 
-    private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn)
+    private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn, int? measuredPromptTokens = null)
     {
         var rules = CurrentRules();
 
@@ -1862,29 +2165,36 @@ public sealed class FluxMuxGatewayHost : IDisposable
         bool fullFidelityActive = docMode.Equals("full_this_turn", StringComparison.OrdinalIgnoreCase)
             || docMode.Equals("full_n_turns", StringComparison.OrdinalIgnoreCase);
 
+        // Look up per-profile auto-compact settings (independent of local_context).
+        var model = Str(state, "local_preferred_model");
+        var variant = Str(state, "local_variant");
+        var perProfile = GetLocalAutoCompactSettings?.Invoke(model, variant);
+        string? perProfileMode = null;
+        if (perProfile.HasValue)
+        {
+            perProfileMode = perProfile.Value.Mode;
+        }
+
+        // "None / endpoint managed": the user explicitly opted out of gateway
+        // compaction. Skip both the wizard path and the Port-rules fallback so the
+        // endpoint (llama.cpp / the model itself) manages context. This check is
+        // outside the autoContext > 0 gate so it works even when local_context is 0.
+        //
+        // A null result means the per-profile settings could not be resolved (no
+        // config, no LocalProfiles, or the model::variant key is missing). In that
+        // case we must NOT fall back to the Port-rules compaction below — doing so
+        // would defeat the user's explicit "None / endpoint managed" opt-out. Treat
+        // an unresolvable profile as "none" so the opt-out is honoured.
+        if (!perProfile.HasValue || perProfileMode == "none")
+        {
+            return false;
+        }
+
         // Wizard-controlled auto-compaction: independent of Port rules.
         // Fires when the prompt exceeds the trigger threshold (default 80% of native context).
         // Per-profile settings override Port rules defaults.
         if (!fullFidelityActive)
         {
-            // Look up per-profile auto-compact settings (independent of local_context).
-            var model = Str(state, "local_preferred_model");
-            var variant = Str(state, "local_variant");
-            var perProfile = GetLocalAutoCompactSettings?.Invoke(model, variant);
-
-            // "None / endpoint managed": the user explicitly opted out of gateway
-            // compaction. Skip both the wizard path and the Port-rules fallback so the
-            // endpoint (llama.cpp / the model itself) manages context. This check is
-            // outside the autoContext > 0 gate so it works even when local_context is 0.
-            if (perProfile is not null)
-            {
-                var (mode, _, _, _, _) = perProfile.Value;
-                if (mode == "none")
-                {
-                    return false;
-                }
-            }
-
             var autoContext = ParseInt(Str(state, "local_context"), 0);
             if (autoContext > 0)
             {
@@ -1895,7 +2205,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 int keepToolResults;
                 int pinUserChars;
 
-                if (perProfile is not null)
+                if (perProfile.HasValue)
                 {
                     var (mode, trigger, keepT, keepTool, pinUser) = perProfile.Value;
                     autoCompactEnabled = mode == "per-profile";
@@ -1916,7 +2226,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
                 if (autoCompactEnabled)
                 {
-                    var autoPromptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+                    // Prefer the model's real token count over the chars/4 estimate for the
+                    // trigger, so dense-tokenizer prompts are not compacted on an over-count.
+                    var autoPromptTokens = measuredPromptTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
                     var triggerThreshold = (int)(autoContext * triggerPercent);
                     if (autoPromptTokens >= triggerThreshold)
                     {
@@ -1948,16 +2260,18 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         // Port-rules compaction: the original path, gated by CompactEnabled.
-        // Skipped when full fidelity is active for a document.
-        if (!rules.CompactEnabled || fullFidelityActive)
+        // Skipped when full fidelity is active for a document, OR when the per-profile
+        // autocompact mode is "per-profile" (the user opted into profile-specific compaction,
+        // so port rules should not fire).
+        if (!rules.CompactEnabled || fullFidelityActive || perProfileMode == "per-profile")
         {
             return false;
         }
 
         var hotContext = ParseInt(Str(state, "local_context"), 0);
-        var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
-        var promptExceeds = LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, rules.CompactHeadroom);
-        var filling = FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload);
+        var promptTokens = measuredPromptTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        var promptExceeds = LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, rules.CompactHeadroom, measuredPromptTokens);
+        var filling = FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload, measuredPromptTokens);
         if (!LocalHistoryCompaction.ShouldForwardCompact(
                 compactOn,
                 promptTokens,
@@ -1971,6 +2285,24 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
         if (!LocalHistoryCompaction.TryCompactPayload(payload, rules, force: true))
         {
+            // Forward-compaction bailed out: "too few turns, or one over-full turn".
+            // The over-full-turn case is exactly what Hail Mary's non-destructive prune
+            // pipeline (stages 1-4: dedupe, loop-collapse, result-truncate, image-strip)
+            // fixes without a model round-trip. Run it automatically as a last resort.
+            // Stage 5 (the blunt middle-cut) stays behind the operator's button.
+            var hailMary = HailMaryCompaction.Salvage(payload, hotContext, rules.CompactHeadroom, allowMiddleCut: false);
+            if (hailMary.TokensSaved > 0)
+            {
+                Log("hail-mary: " + hailMary.DiagnosticsLine);
+                var hailInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
+                if (hailInserted > 0)
+                {
+                    Log("local chat: inserted a user turn so the Qwen template has a query");
+                }
+
+                return true;
+            }
+
             Log("local history compact: Context is filling but older turns could not be shortened (too few turns, or one over-full turn)");
             return false;
         }
@@ -1991,8 +2323,13 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// "compact in place" mode so the user can pull the working set back onto the graphics
     /// card. Manual only: it never auto-compacts; it just offers.
     /// </summary>
-    private void OfferSpillCompactIfNeeded(JsonObject state, JsonObject payload, bool compactAlreadyApplied)
+    private void OfferSpillCompactIfNeeded(JsonObject state, JsonObject payload, bool compactAlreadyApplied, bool isProbeRequest = false, int? measuredPromptTokens = null)
     {
+        if (isProbeRequest)
+        {
+            return; // internal probe (e.g. context-fill stress test): never steer it
+        }
+
         if (compactAlreadyApplied)
         {
             return; // already compacted this turn
@@ -2023,7 +2360,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return; // not actually extended, or no VRAM boundary to talk about
         }
 
-        var promptTokens = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        // Use the model's real token count when available. The chars/4 estimate over-counts
+        // for dense tokenizers (Qwen, ~3-4 chars/token), so a prompt well under the VRAM
+        // window can read as "approaching the limit" and falsely trigger the spill-compact
+        // dialog (which sets nearLimit=true and produces a bogus "Context is too small"
+        // warning). When the measured count is unavailable, fall back to the estimate —
+        // the spill-compact offer is non-blocking (it just suggests compacting), so a
+        // slightly over-counted estimate is acceptable here.
+        var promptTokens = measuredPromptTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
 
         // Compute the overflow (how much of the prompt is in slow RAM) and the urgency level.
         //   Urgency 0: prompt is at 85%+ of the VRAM window but not yet spilling — compact to
@@ -2082,23 +2426,19 @@ public sealed class FluxMuxGatewayHost : IDisposable
         string reason;
         if (nearSsdEdge)
         {
-            reason = "Your computer is running low on memory (less than " + ramSafetyFloorGiB.ToString("0", CultureInfo.InvariantCulture) + " GB free), so the next overflow may spill to the SSD, which is very slow."
-                + " Compact older turns now to free up memory and keep the conversation fast? This shortens older messages; the full chat is kept in this Client app.";
+            reason = "Context warning: RAM low — compact before context and/or system spill to SSD? (catastrophic system slowdown &/or crashing likely)";
         }
         else if (urgency == 2)
         {
-            reason = "This conversation is much longer than the graphics-card context, so most of it is running in ordinary memory (much slower than the card)."
-                + " Compact older turns now to pull the working set back onto the graphics card? This shortens older messages; the full chat is kept in this Client app.";
+            reason = "Context warning: heavy RAM usage (very slow) — compact now?";
         }
         else if (urgency == 1)
         {
-            reason = "This conversation is longer than the graphics-card context, so the overflow is running in ordinary memory (slower than the card)."
-                + " Compact older turns now to pull the working set back onto the graphics card? This shortens older messages; the full chat is kept in this Client app.";
+            reason = "Context warning: spilling into RAM (slower) — compact now to pull back onto VRAM?";
         }
         else
         {
-            reason = "This conversation is approaching the graphics-card context limit. Compact older turns now to keep the working set on the fast card?"
-                + " This shortens older messages; the full chat is kept in this Client app.";
+            reason = "Context warning: now approaching VRAM limit — compact to stay fast?";
         }
 
         SaveLocalReload(new JsonObject
@@ -2131,8 +2471,13 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// message that exceeds the VRAM window. The user chooses how to handle context:
     /// full fidelity for this turn, full fidelity for N turns, summarize, or cancel.
     /// </summary>
-    private void OfferDocumentContextDialogIfNeeded(JsonObject state, JsonObject payload, bool compactAlreadyApplied)
+    private void OfferDocumentContextDialogIfNeeded(JsonObject state, JsonObject payload, bool compactAlreadyApplied, bool isProbeRequest = false)
     {
+        if (isProbeRequest)
+        {
+            return; // internal probe (e.g. context-fill stress test): never steer it
+        }
+
         if (compactAlreadyApplied)
         {
             return; // already compacted this turn
@@ -2739,7 +3084,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private static int RequestTimeoutForPayload(
         JsonObject payload,
         bool localStream,
-        PortForwardingRules rules)
+        PortForwardingRules rules,
+        bool longLoadProfile = false)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
         try
@@ -2751,7 +3097,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
             var seconds = (int)Math.Ceiling(estimated);
             if (localStream)
             {
-                return LocalStreamHangPolicy.ClampCopyTimeoutSeconds(seconds, ReadThinkingBudget(payload), live);
+                var clamped = LocalStreamHangPolicy.ClampCopyTimeoutSeconds(seconds, ReadThinkingBudget(payload), live);
+                // For long-load profiles, the copy timeout must cover the thinking
+                // first-byte deadline so the request isn't cancelled while the model
+                // is still loading from cold.
+                if (longLoadProfile)
+                {
+                    var thinkingSec = live.ThinkingFirstByteSeconds + live.DecisionSeconds + live.WaitLongerSeconds + live.DecisionSeconds;
+                    return Math.Max(clamped, Math.Min(LocalStreamHangPolicy.MaxCopyTimeoutSeconds, thinkingSec));
+                }
+                return clamped;
             }
 
             return Math.Max(MinUpstreamTimeoutSec, Math.Min(MaxUpstreamTimeoutSec, seconds));
@@ -2940,6 +3295,48 @@ public sealed class FluxMuxGatewayHost : IDisposable
         SaveLastServed(routeKind, provider, model);
         SaveLastRouteExplanation(routeKind, overlayVariant, compactApplied, reloadOffered, cloudConsentOffered, requestId, provider, model);
         NoteCloudBreakerSuccess(routeKind, provider, model);
+        // A successful local turn means the "Context is too small" / reload offer is stale —
+        // the model answered fine, so dismiss the banner. Without this, a bogus offer
+        // (e.g. from a stale local_context or an over-counting estimate) stays up and
+        // misleads the user into thinking the turn was blocked when it actually succeeded.
+        if (routeKind.Equals(FluxMuxGatewayRouting.Local, StringComparison.OrdinalIgnoreCase))
+        {
+            ClearStaleLocalReloadOffer();
+        }
+    }
+
+    /// <summary>
+    /// Clears a pending local-reload offer after a successful local turn. The offer was
+    /// raised before the turn was sent (based on the prompt token count), but the model
+    /// answered fine — so the "Context is too small" banner is stale and should go away.
+    /// Only clears when the offer is a context/near-limit one (not a vision or thinking
+    /// miss, which may still be relevant on the next turn).
+    /// </summary>
+    private void ClearStaleLocalReloadOffer()
+    {
+        try
+        {
+            var existing = LoadLocalReload();
+            if (!Str(existing, "status").Equals("pending", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            // Do not clear a vision or thinking miss — those are capability gaps that
+            // persist across turns until the profile is changed.
+            if (ParseBool(Str(existing, "needVision")) || ParseBool(Str(existing, "needThinking")))
+            {
+                return;
+            }
+
+            existing["status"] = "idle";
+            existing["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+            SaveLocalReload(existing);
+            Log("local reload offer cleared: turn succeeded, context warning was stale");
+        }
+        catch
+        {
+        }
     }
 
     private void SaveLastRouteExplanation(
@@ -3074,55 +3471,60 @@ public sealed class FluxMuxGatewayHost : IDisposable
             prompt = finding;
         }
 
+        // fail_on_timeout is false: the turn HALTS and waits for the user's steering choice.
+        // The banner is already showing the options (Send this turn anyway / End this turn /
+        // Let me steer / Switch to ...). There is no benefit to bypassing the user's steer,
+        // so the turn must not fail on a timer — it waits until the user explicitly chooses.
         SaveRecommend(new JsonObject
         {
             ["status"] = "pending",
             ["reason"] = prompt,
             ["source"] = RouteRecoveryPolicy.PortRulePauseSource,
-            ["fail_on_timeout"] = true,
+            ["fail_on_timeout"] = false,
             ["allow_until"] = 0,
             ["suppress_until"] = 0,
             ["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
         });
         Log("port rule pause pending: " + prompt);
 
+        // Wait indefinitely (in DecisionSeconds increments) until the user explicitly chooses.
+        // The banner stays up the whole time; no re-prompt is needed because the first prompt
+        // is already displaying. The only way out is a user choice (yes/no/wait/steer).
         var wait = Math.Clamp(rules.DecisionSeconds, 10, 120);
-        var deadline = DateTime.UtcNow.AddSeconds(wait);
-        while (DateTime.UtcNow < deadline)
+        while (true)
         {
-            var rec = LoadRecommend();
-            var status = Str(rec, "status");
-            if (status == "yes")
+            var deadline = DateTime.UtcNow.AddSeconds(wait);
+            while (DateTime.UtcNow < deadline)
             {
-                return FluxMuxGatewayRouting.Cloud;
+                var rec = LoadRecommend();
+                var status = Str(rec, "status");
+                if (status == "yes")
+                {
+                    return FluxMuxGatewayRouting.Cloud;
+                }
+
+                if (status == "no")
+                {
+                    return "local";
+                }
+
+                if (RouteRecoveryPolicy.IsWaitStatus(status))
+                {
+                    return RouteRecoveryPolicy.WaitStatus;
+                }
+
+                if (RouteRecoveryPolicy.IsSteerStatus(status))
+                {
+                    return RouteRecoveryPolicy.SteerStatus;
+                }
+
+                await Task.Delay(250).ConfigureAwait(false);
             }
 
-            if (status == "no")
-            {
-                return "local";
-            }
-
-            if (RouteRecoveryPolicy.IsWaitStatus(status))
-            {
-                return RouteRecoveryPolicy.WaitStatus;
-            }
-
-            if (RouteRecoveryPolicy.IsSteerStatus(status))
-            {
-                return RouteRecoveryPolicy.SteerStatus;
-            }
-
-            await Task.Delay(250).ConfigureAwait(false);
+            // No choice yet after this window. The turn stays halted; the banner remains
+            // visible. Log and keep waiting — do NOT fail the turn.
+            Log("port rule pause: still waiting for user steering choice (turn halted, banner showing)");
         }
-
-        var timedOut = LoadRecommend();
-        timedOut["status"] = "timeout";
-        timedOut["reason"] = FirstNonEmpty(Str(timedOut, "reason"), prompt);
-        timedOut["fail_on_timeout"] = true;
-        timedOut["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
-        SaveRecommend(timedOut);
-        Log("port rule pause timed out; ending this turn so the Client app can stop waiting");
-        return FluxMuxGatewayRouting.ConsentTimeout;
     }
 
     private static async Task SendAssistantNoticeAsync(HttpListenerResponse response, string message)
@@ -3320,12 +3722,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
         CancellationToken cancellationToken)
     {
         var waitMessage = LocalStreamHangPolicy.FormatHangWaitMessage(Str(LoadState(), "endpoint_app"));
+        // fail_on_timeout is false: a hang is a situation the chat can self-manage (llama-server
+        // may still be working). On timeout, default to the safe "wait longer" option rather
+        // than failing the turn. The user can still explicitly choose "End this turn" or
+        // "Switch to cloud" if they want to stop waiting.
         SaveRecommend(new JsonObject
         {
             ["status"] = "pending",
             ["reason"] = waitMessage,
             ["source"] = RouteRecoveryPolicy.LocalHangSource,
-            ["fail_on_timeout"] = true,
+            ["fail_on_timeout"] = false,
             ["allow_until"] = 0,
             ["suppress_until"] = 0,
             ["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
@@ -3373,14 +3779,13 @@ public sealed class FluxMuxGatewayHost : IDisposable
             throw;
         }
 
-        var timedOut = LoadRecommend();
-        timedOut["status"] = "timeout";
-        timedOut["reason"] = FirstNonEmpty(Str(timedOut, "reason"), waitMessage);
-        timedOut["fail_on_timeout"] = true;
-        timedOut["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
-        SaveRecommend(timedOut);
-        Log("cloud recommend timed out; ending this turn so the Client app can stop waiting");
-        return FluxMuxGatewayRouting.ConsentTimeout;
+        // No explicit choice within the decision window. Default to the safe "wait longer"
+        // option: the chat can self-manage (llama-server may still be producing), so keep the
+        // turn alive rather than failing it. The banner is dismissed; the next hang will
+        // re-prompt if the stream is still quiet.
+        DismissHangWaitIfPending();
+        Log("local stream hang: no choice within decision window; defaulting to wait longer (safe default)");
+        return RouteRecoveryPolicy.WaitStatus;
     }
 
     private void DismissHangWaitIfPending()

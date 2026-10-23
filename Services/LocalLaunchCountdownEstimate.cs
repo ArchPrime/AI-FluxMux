@@ -38,6 +38,15 @@ public static class LocalLaunchCountdownEstimate
             return Math.Max(0, persistedSlowestMs);
         }
 
+        // The countdown follows the *slowest* observed load, not the median. The median tracks
+        // the typical warm load (~20s), which is consistently wrong for cold loads (~120s).
+        //
+        // While the window is still filling up (fewer than SampleLimit samples), we keep the
+        // persisted historical slowest if it is higher, because the window does not yet have
+        // enough data to be trusted. Once the window is full, we trust the window's slowest:
+        // a cold outlier from earlier has been pushed out, so the estimate naturally drops to
+        // reflect the recent (warm) load times. This prevents the countdown from being stuck
+        // at a historical worst-case value forever.
         if (persistedSlowestMs > window.SlowestMs && window.Count < SampleLimit)
         {
             return persistedSlowestMs;

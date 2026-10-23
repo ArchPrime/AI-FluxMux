@@ -13,6 +13,7 @@ using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Styling;
 using FluxMux.Avalonia.Services;
+using FluxMux.Updates.Core;
 
 namespace FluxMux.Avalonia.Views;
 
@@ -724,7 +725,18 @@ public static class HelpHtmlViewBuilder
         };
         var inlines = textBlock.Inlines
             ?? throw new InvalidOperationException("Help text inlines were not created.");
-        if (TrySplitProductTitle(title, out var name, out var version))
+
+        // Use the single source of truth (FluxMuxAppInfo.ProductTitle) for the product name +
+        // version so the Help tab always matches the window title / about footer / update
+        // checks. The Help.html <title> may carry a descriptive suffix after the version
+        // (e.g. "AI-FluxMux v0.3.0 beta — local and cloud models, one Endpoint address");
+        // preserve that suffix but replace the stale name+version with the live one.
+        var suffix = ExtractTitleSuffixAfterProduct(title);
+        var liveTitle = string.IsNullOrWhiteSpace(suffix)
+            ? FluxMuxAppInfo.ProductTitle
+            : FluxMuxAppInfo.ProductTitle + " — " + suffix;
+
+        if (TrySplitProductTitle(liveTitle, out var name, out var version))
         {
             inlines.Add(new Run(name) { FontWeight = FontWeight.SemiBold });
             if (version.Length > 0)
@@ -737,8 +749,31 @@ public static class HelpHtmlViewBuilder
         }
 
         textBlock.FontWeight = FontWeight.Bold;
-        textBlock.Text = title;
+        textBlock.Text = liveTitle;
         return textBlock;
+    }
+
+    /// <summary>
+    /// Returns the descriptive text that follows the "AI-FluxMux vX.Y.Z …" product prefix in a
+    /// Help.html title (the part after the first " — " em-dash separator), or empty when there
+    /// is none. Used so the Help tab can keep the HTML's descriptive tagline while sourcing the
+    /// actual version from <see cref="FluxMuxAppInfo.ProductTitle"/>.
+    /// </summary>
+    private static string ExtractTitleSuffixAfterProduct(string? title)
+    {
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            return string.Empty;
+        }
+
+        const string separator = " — ";
+        var index = title.IndexOf(separator, StringComparison.Ordinal);
+        if (index < 0)
+        {
+            return string.Empty;
+        }
+
+        return title[(index + separator.Length)..].Trim();
     }
 
     /// <summary>

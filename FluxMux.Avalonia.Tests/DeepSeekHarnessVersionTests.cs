@@ -53,4 +53,50 @@ public sealed class DeepSeekHarnessVersionTests
         Assert.Contains("AI-FluxMux can update DeepSeek Harness", text);
         Assert.Contains(".dsh", text);
     }
+
+    [Fact]
+    public void Latest_release_version_picks_rc_over_alpha_with_same_numeric_triple()
+    {
+        // Simulates the GitHub releases list (newest-first) that broke the harness update.
+        // The comparator must pick 0.2.1-rc.2 (the newest under semver), not 0.2.1-alpha.5.
+        var releasesJson = """
+            [
+              {"tag_name":"dsh-v0.2.1-rc.2"},
+              {"tag_name":"dsh-v0.2.1-rc.1"},
+              {"tag_name":"dsh-v0.2.1-alpha.5"},
+              {"tag_name":"dsh-v0.2.1-alpha.4"},
+              {"tag_name":"dsh-v0.2.0-rc.2"},
+              {"tag_name":"dsh-v0.1.7-rc.2"}
+            ]
+            """;
+        Assert.Equal("0.2.1-rc.2", DeepSeekHarnessUpdateCheck.LatestReleaseVersion(releasesJson));
+    }
+
+    [Fact]
+    public void Latest_release_version_picks_stable_over_prerelease()
+    {
+        // A stable release beats any prerelease with the same numeric triple.
+        var releasesJson = """
+            [
+              {"tag_name":"dsh-v0.2.1"},
+              {"tag_name":"dsh-v0.2.1-rc.3"},
+              {"tag_name":"dsh-v0.2.1-alpha.5"}
+            ]
+            """;
+        Assert.Equal("0.2.1", DeepSeekHarnessUpdateCheck.LatestReleaseVersion(releasesJson));
+    }
+
+    [Fact]
+    public void Latest_release_version_picks_highest_rc_when_no_stable()
+    {
+        // When no stable exists, the highest rc wins over lower rc and any alpha.
+        var releasesJson = """
+            [
+              {"tag_name":"dsh-v0.2.1-rc.3"},
+              {"tag_name":"dsh-v0.2.1-rc.2"},
+              {"tag_name":"dsh-v0.2.1-alpha.5"}
+            ]
+            """;
+        Assert.Equal("0.2.1-rc.3", DeepSeekHarnessUpdateCheck.LatestReleaseVersion(releasesJson));
+    }
 }

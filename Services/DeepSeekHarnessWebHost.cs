@@ -63,12 +63,16 @@ public sealed class DeepSeekHarnessWebHost : IDisposable
 
         if (recordedPid <= 0)
         {
-            // Phantom PID 0 must not trigger netstat here; ReconcilePidRecordForPort upgrades it.
-            if (!IsPortListening(webPort))
+            // PID-0 record: AI-FluxMux started this harness (launch log confirmed) but the
+            // listener PID was not resolved (netstat timing/race). If the port is listening,
+            // the harness is running — return true so the Stop button is enabled. If the port
+            // is not listening, the record is stale — clear it.
+            if (IsPortListening(webPort))
             {
-                ClearPidRecord();
+                return true;
             }
 
+            ClearPidRecord();
             return false;
         }
 
@@ -158,12 +162,17 @@ public sealed class DeepSeekHarnessWebHost : IDisposable
             return false;
         }
 
-        if (!TryFindPortListenerPid(webPort, out var listenerPid))
+        if (TryFindPortListenerPid(webPort, out var listenerPid))
         {
-            return false;
+            WritePidRecord(listenerPid, webPort);
+            return true;
         }
 
-        WritePidRecord(listenerPid, webPort);
+        // The launch log confirms AI-FluxMux started this harness, but netstat could not
+        // resolve the listener PID (timing/race). Write a PID-0 record so IsManagedRunning
+        // falls back to the port-listening check and the UI does not show a bogus
+        // "from outside AI-FluxMux" hint. ReconcilePidRecordForPort upgrades the PID later.
+        WritePidRecord(0, webPort);
         return true;
     }
 

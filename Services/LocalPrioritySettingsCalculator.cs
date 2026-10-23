@@ -189,12 +189,11 @@ public static class LocalPrioritySettingsCalculator
             : gpuMode.Equals("CPU only", StringComparison.OrdinalIgnoreCase)
                 ? "0"
                 : "Auto";
-        var kv = ClampKvCacheTypeAtOrAboveMinimum(
-            kvCacheChoice is not null
-                ? kvCacheChoice
-                : fidelity == 0 && advice.PreferFitEnabled == false
-                    ? "f16"
-                    : MinimumKvCacheType);
+        var kv = kvCacheChoice is not null
+            ? ClampKvCacheTypeAtOrAboveMinimum(kvCacheChoice)
+            : fidelity == 0 && advice.PreferFitEnabled == false
+                ? "f16"
+                : PickKvTypeForYarnFit(advice, int.TryParse(ctx, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ctxInt) ? ctxInt : 0, extendContextIntoRam, effectiveKvBytesPerToken);
         var temp = fidelity == 0 || stability == 0 ? "0.2" : speed == 0 ? "0.4" : "0.3";
         var spec = fidelity == 0 ? "Disabled" : stability == 0 ? "ngram-simple" : specType;
         var reasoning = thinking == 0 ? "On" : "Off";
@@ -484,7 +483,9 @@ public static class LocalPrioritySettingsCalculator
     {
         static double Resolve(string type) => type.ToLowerInvariant() switch
         {
+            "q4_0" => 48 * 1024d,
             "q4_1" => 64 * 1024d,
+            "q5_0" => 72 * 1024d,
             "q5_1" => 80 * 1024d,
             "q6_k" => 96 * 1024d,
             "q8_0" => 128 * 1024d,
@@ -549,6 +550,75 @@ public static class LocalPrioritySettingsCalculator
     public static string ClampKvCacheTypeAtOrAboveMinimum(string? kvType)
         => IsBelowMinimumKvCacheType(kvType) ? MinimumKvCacheType : kvType!.Trim();
 
+    /// <summary>
+    /// Picks the best KV cache type for a YaRN-extended context. When the context target
+    /// exceeds what fits in VRAM with q8_0, a lower quantization (q6_k, q5_0, q4_0) is chosen
+    /// so that more of the KV cache stays in VRAM, avoiding the 10-20x slowdown of RAM spill.
+    /// Returns q8_0 when the context fits in VRAM with q8_0 (no spill, no need to degrade).
+    /// </summary>
+    public static string PickKvTypeForYarnFit(
+        FluxMuxRuntimeService.LocalHardwareLaunchAdvice advice,
+        int contextTokens,
+        bool extendContextIntoRam,
+        long? effectiveKvBytesPerToken = null)
+    {
+        if (!extendContextIntoRam || contextTokens <= 0 || advice.GpuTotalGb <= 0.0)
+        {
+            return MinimumKvCacheType;
+        }
+
+        // Estimate how much VRAM is available for the KV cache.
+        double overheadGb = Math.Max(0.7, 0.45 + advice.GpuTotalGb * 0.035 + Math.Max(0.0, advice.ModelFileGb) * 0.02);
+        double kvVramGb = Math.Max(0.0, advice.GpuTotalGb - advice.ModelFileGb - overheadGb);
+
+        // Use the effective (hybrid-aware, Flash-Attention-aware) bytes-per-token when
+        // provided. This is critical: for hybrid-KV models (e.g. Qwen3.8) the effective
+        // bytes/token is ~38% of the raw value, and Flash Attention reduces it further.
+        // Without this adjustment, q8_0 appears to "fit" in VRAM when it actually doesn't,
+        // and the auto-pick never degrades to q4_0/q5_0.
+        double effectiveScale = 1.0;
+        if (effectiveKvBytesPerToken is > 0)
+        {
+            double rawQ8 = KvBytesPerTokenForType("q8_0");
+            effectiveScale = (double)effectiveKvBytesPerToken.Value / rawQ8;
+        }
+
+        // Try q8_0 first (best fidelity). If the KV cache fits in VRAM, use it.
+        double q8BytesPerToken = KvBytesPerTokenForType("q8_0") * effectiveScale;
+        double q8KvGb = contextTokens * q8BytesPerToken / 1073741824.0;
+        if (q8KvGb <= kvVramGb)
+        {
+            return "q8_0";
+        }
+
+        // q8_0 doesn't fit. Try q6_k.
+        double q6BytesPerToken = KvBytesPerTokenForType("q6_k") * effectiveScale;
+        double q6KvGb = contextTokens * q6BytesPerToken / 1073741824.0;
+        if (q6KvGb <= kvVramGb)
+        {
+            return "q6_k";
+        }
+
+        // q6_k doesn't fit. Try q5_0.
+        double q5BytesPerToken = KvBytesPerTokenForType("q5_0") * effectiveScale;
+        double q5KvGb = contextTokens * q5BytesPerToken / 1073741824.0;
+        if (q5KvGb <= kvVramGb)
+        {
+            return "q5_0";
+        }
+
+        // q5_0 doesn't fit. Try q4_0.
+        double q4BytesPerToken = KvBytesPerTokenForType("q4_0") * effectiveScale;
+        double q4KvGb = contextTokens * q4BytesPerToken / 1073741824.0;
+        if (q4KvGb <= kvVramGb)
+        {
+            return "q4_0";
+        }
+
+        // Nothing fits fully in VRAM. Use q4_0 (smallest) to minimize the RAM spill.
+        return "q4_0";
+    }
+
     public static string KeepHigherInteger(int wizardValue, string? currentValue)
     {
         if (int.TryParse(currentValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var current)
@@ -568,7 +638,7 @@ public static class LocalPrioritySettingsCalculator
     /// and not a text-only window after Images was turned on.
     /// <paramref name="adviceCeiling"/> is Context-first when Images are on; 0 means no Images cap.
     /// </summary>
-    public static string KeepHandTunedContext(int wizardValue, string? currentValue, int adviceCeiling = 0)
+    public static string KeepHandTunedContext(int wizardValue, string? currentValue, int adviceCeiling = 0, int maxContextWindow = 0)
     {
         if (!int.TryParse(currentValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var current)
             || current <= 0)
@@ -576,7 +646,8 @@ public static class LocalPrioritySettingsCalculator
             return wizardValue.ToString(CultureInfo.InvariantCulture);
         }
 
-        if (current >= DeepSeekHarnessSetup.MaxLocalContextWindow)
+        var cap = maxContextWindow > 0 ? maxContextWindow : DeepSeekHarnessSetup.MaxLocalContextWindow;
+        if (current >= cap)
         {
             return wizardValue.ToString(CultureInfo.InvariantCulture);
         }

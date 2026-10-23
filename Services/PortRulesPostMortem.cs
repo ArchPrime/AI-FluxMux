@@ -273,12 +273,42 @@ public static class PortRulesPostMortem
         int waitLongerCount,
         int firstByteDeadlineSeconds,
         PortForwardingRules? rules,
-        bool localModelReady = true)
+        bool localModelReady = true,
+        bool portRulesActive = true)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
         var limitName = HangLimitName(reason, waitLongerCount, firstByteDeadlineSeconds, live);
         var limitValue = HangLimitValue(limitName, firstByteDeadlineSeconds, live);
         var isFirstByte = limitName == FirstByteSeconds;
+
+        // When Port rules are off, the hang detection is a safety check that runs
+        // regardless of Port rules. Do not name "Port rule" settings — just state
+        // the cause and the levers.
+        if (!portRulesActive)
+        {
+            var whatHappened = HangWhatHappened(limitName, localModelReady);
+            var limitLabel = MarkRule(limitName);
+            return ChatTurnCannotContinue
+                + whatHappened
+                + " "
+                + "AI-FluxMux stopped the turn when "
+                + limitLabel
+                + " hit "
+                + quietSeconds.ToString(CultureInfo.InvariantCulture) + "s quiet"
+                + " (the limit is "
+                + limitValue.ToString(CultureInfo.InvariantCulture)
+                + "). "
+                + "This is a safety check that runs even when Port rules are off. "
+                + "If this model thinks before it writes, you can raise "
+                + limitLabel
+                + " in "
+                + PortRulesLocation
+                + " and turn on Port rules. "
+                + NextTurnAfterRaise
+                + " "
+                + (isFirstByte ? RetryOrNewChatAdvice : NarrowerChatAdvice);
+        }
+
         return ChatTurnCannotContinue
             + HangWhatHappened(limitName, localModelReady)
             + " "
@@ -351,20 +381,40 @@ public static class PortRulesPostMortem
             + NarrowerChatAdvice;
     }
 
-    public static string? FormatContextOverflow(bool compactApplied, PortForwardingRules? rules)
+    public static string? FormatContextOverflow(bool compactApplied, PortForwardingRules? rules, bool portRulesActive = true)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
+
+        // When Port rules are off (or the profile's compaction mode is "None / endpoint
+        // managed"), the overflow was NOT caused by a Port rule — it was a safety check that
+        // runs regardless of Port rules. Naming "Port rule Headroom / Watermark %" and
+        // "Servers → Advanced: Port rules" here would misattribute the cause to a setting the
+        // user explicitly disabled. In that case, state the cause plainly and point at the
+        // levers that actually apply (launch a higher-Context profile, or start a smaller chat).
+        if (!portRulesActive)
+        {
+            return ChatTurnCannotContinue
+                + "this turn was too large for the loaded Context — the prompt already fills the window. "
+                + RaiseContextAdvice
+                + " "
+                + SmallerNextStepAdvice;
+        }
+
         var compactBit = compactApplied
             ? "Compact already ran (" + NamePortRule(WatermarkPercent) + " is " + live.CompactWatermarkPercent.ToString(CultureInfo.InvariantCulture) + ")."
             : "Compact did not shorten this turn.";
+        // The cause of the overflow is that the prompt already fills the loaded Context, NOT the
+        // Headroom value. Headroom is only a small reserved buffer for the reply, so naming its
+        // number right after "too large for the loaded Context" reads as if it were the cause.
+        // State the cause plainly, then describe Headroom as what it actually is.
         return ChatTurnCannotContinue
-            + "this turn was too large for the loaded Context. "
+            + "this turn was too large for the loaded Context — the prompt already fills the window. "
             + compactBit
             + " "
             + NamePortRule(Headroom)
-            + " is "
+            + " (currently "
             + live.CompactHeadroom.ToString(CultureInfo.InvariantCulture)
-            + ". "
+            + " tokens) is just the small buffer reserved for the reply; it is not what filled the Context. "
             + "Lowering "
             + NamePortRule(WatermarkPercent)
             + " will trigger compaction earlier on future turns, which may prevent this overflow from recurring. "

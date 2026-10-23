@@ -26,10 +26,12 @@ public readonly record struct DeepSeekHarnessSetupOptions(
         int maxTokens = 4096,
         bool imagesOn = false,
         bool reasoningOn = false,
-        string? modelDisplayName = null)
+        string? modelDisplayName = null,
+        int maxContextWindow = 0)
     {
         var port = Math.Clamp(fluxMuxPort, 1, 65535);
-        var context = Math.Clamp(contextWindow, 1024, DeepSeekHarnessSetup.MaxLocalContextWindow);
+        var cap = maxContextWindow > 0 ? maxContextWindow : DeepSeekHarnessSetup.MaxLocalContextWindow;
+        var context = Math.Clamp(contextWindow, 1024, cap);
         var max = Math.Clamp(maxTokens, 256, 131072);
         var name = string.IsNullOrWhiteSpace(modelDisplayName) ? "local" : modelDisplayName.Trim();
         return new DeepSeekHarnessSetupOptions(port, context, max, imagesOn, reasoningOn, name);
@@ -46,6 +48,8 @@ public readonly record struct DeepSeekHarnessSettingsMergeResult(
 public static class DeepSeekHarnessSetup
 {
     public const int MaxLocalContextWindow = 262144;
+    /// <summary>Maximum context when YaRN extension into RAM is enabled.</summary>
+    public const int MaxLocalContextWindowWithYarn = 1048576;
     public const int DefaultWebPort = 3080;
     public const string ProviderId = "ai-fluxmux";
     public const string ApiKeyEnvVar = "AI_FLUXMUX_API_KEY";

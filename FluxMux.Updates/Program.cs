@@ -434,6 +434,22 @@ internal static class Program
                 targetVersion = check.LatestVersion;
                 Console.WriteLine($"  latest GitHub release: {check.LatestVersion} (newer than installed {check.InstalledVersion})");
             }
+            else if (string.IsNullOrWhiteSpace(check.InstalledVersion))
+            {
+                // Nothing is installed yet: the GitHub check reports no "newer" version
+                // because there is no installed version to compare against. We still want
+                // to install the latest, so target the newest GitHub release explicitly
+                // (falling back to npm's @latest inside the update service if it is absent).
+                if (!string.IsNullOrWhiteSpace(check.LatestVersion))
+                {
+                    targetVersion = check.LatestVersion;
+                    Console.WriteLine($"  DeepSeek Harness is not installed; will install the latest release {check.LatestVersion}.");
+                }
+                else
+                {
+                    Console.WriteLine("  DeepSeek Harness is not installed; will install npm's @latest.");
+                }
+            }
             else
             {
                 Console.WriteLine($"  GitHub's latest release is {(string.IsNullOrWhiteSpace(check.LatestVersion) ? "unknown" : check.LatestVersion)}; no newer version than the installed one.");

@@ -13,6 +13,7 @@ public static class LocalStreamHangPolicy
     public const int FirstByteSeconds = 25;
     public const int ThinkTokensPerSecond = 20;
     public const int MaxThinkFirstByteSeconds = 180;
+    public const int ThinkingFirstByteSeconds = 600;
     public const int StallSeconds = 45;
     public const int WaitLongerSeconds = 90;
     public const int DecisionSeconds = 45;

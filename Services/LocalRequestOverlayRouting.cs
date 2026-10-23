@@ -236,14 +236,20 @@ public static class LocalRequestOverlayRouting
         => text.StartsWith("data:image", StringComparison.OrdinalIgnoreCase)
            || text.StartsWith("data:application/octet-stream;base64,", StringComparison.OrdinalIgnoreCase);
 
-    public static bool PromptExceedsContext(JsonObject payload, int hotContext, int headroom = LocalHistoryCompaction.Headroom)
+    public static bool PromptExceedsContext(JsonObject payload, int hotContext, int headroom = LocalHistoryCompaction.Headroom, int? measuredPromptTokens = null)
     {
         if (hotContext <= 0)
         {
             return false;
         }
 
-        return EstimatePromptTokens(payload) + 1 + Math.Max(0, headroom) > hotContext;
+        // Prefer the model's real token count (from llama-server's input_tokens endpoint) over
+        // the chars/4 estimate. The estimate over-counts for dense tokenizers (Qwen, ~3-4
+        // chars/token), so a prompt well under the window can read as "prompt + headroom >
+        // window" and get hard-blocked even though the bar shows it half full. When we have the
+        // real count, use it; otherwise fall back to the estimate.
+        var promptTokens = measuredPromptTokens ?? EstimatePromptTokens(payload);
+        return promptTokens + 1 + Math.Max(0, headroom) > hotContext;
     }
 
     /// <summary>

@@ -53,7 +53,8 @@ public sealed record LocalReloadRecommendSnapshot(
     bool SpillCompact = false,
     bool DocumentContext = false,
     int DocumentContextTokens = 0,
-    int DocumentContextTotal = 0);
+    int DocumentContextTotal = 0,
+    int SpillUrgency = 0);
 
 public sealed class FluxMuxRuntimeService
 {
@@ -269,6 +270,7 @@ public sealed class FluxMuxRuntimeService
 	private readonly string _proxyLocalReloadRecommendPath;
 
 	private readonly string _localRuntimeStatePath;
+	private readonly string _localContextUsagePath;
 
 	private readonly object _proxyStateLock = new object();
 
@@ -302,6 +304,14 @@ public sealed class FluxMuxRuntimeService
 	private DateTime _nvidiaGpuInventoryCacheUtc;
 
 	private Process? _localServerProcess;
+
+	// Tracks the in-progress local launch so a second launch can immediately supersede it.
+	// When the user initiates a new launch while one is still in progress (between
+	// RememberParkedLocalLaunch and process.Start()), _localServerProcess is still null,
+	// so the stop-previous logic can't see the first launch's work. This CTS lets the
+	// second launch cancel the first immediately, so the user's revised intent wins.
+	private readonly object _localLaunchLock = new object();
+	private CancellationTokenSource? _inProgressLocalLaunchCts;
 
 	// RAM-overflow watchdog: monitors the llama-server process's working set and auto-kills it
 	// if it exceeds a threshold for a sustained period. This is the "belt" in the belt-and-
@@ -358,6 +368,20 @@ public sealed class FluxMuxRuntimeService
 	public event Action<string>? PortRulesPostMortemNotice;
 
 	public event Action<PortRulesTelemetry>? PortRulesTelemetryNotice;
+
+	/// <summary>
+	/// Raised when a turn 400s on context overflow and the non-destructive Hail Mary prune
+	/// pipeline (stages 1-4) already ran but the turn still can't fit. The UI shows the
+	/// Hail Mary banner with a button to run the destructive stage-5 middle-cut.
+	/// </summary>
+	public event Action<string>? HailMaryOffered;
+
+	/// <summary>
+	/// When true, the next local forward applies the Hail Mary stage-5 middle-cut to the
+	/// payload before sending. Set by <see cref="RequestHailMaryMiddleCut"/>, cleared after
+	/// one use.
+	/// </summary>
+	private volatile bool _hailMaryMiddleCutRequested;
 
 	private sealed record ParkedLocalLaunch(
 		string Model,
@@ -477,6 +501,7 @@ public sealed class FluxMuxRuntimeService
 		_proxyCloudBreakerPath = Path.Combine(_logDirectory, "Proxy_Cloud_Breaker.json");
 		_proxyLocalReloadRecommendPath = Path.Combine(_logDirectory, "Proxy_Local_Reload_Recommend.json");
 		_localRuntimeStatePath = Path.Combine(_logDirectory, "Local_Runtime_State.json");
+		_localContextUsagePath = Path.Combine(_logDirectory, "Local_Context_Usage.json");
 		_proxyCloudHandshakeLogPath = Path.Combine(_logDirectory, "Proxy_Cloud_Handshake.log");
 		_proxyContextEventsPath = Path.Combine(_logDirectory, "Proxy_Context_Events.jsonl");
 		_proxyStdOutPath = Path.Combine(_logDirectory, "proxy_python_stdout.log");
@@ -505,6 +530,54 @@ public sealed class FluxMuxRuntimeService
 		if (stoppedLocalRuntimes > 0)
 		{
 			_startupRuntimeNotice = (string.IsNullOrWhiteSpace(_startupRuntimeNotice) ? $"Startup cleanup: stopped {stoppedLocalRuntimes} stale managed local runtime process(es)." : (_startupRuntimeNotice + $" Also stopped {stoppedLocalRuntimes} stale managed local runtime process(es)."));
+		}
+
+		// Clear the stale local_context that persisted in the proxy runtime state from the
+		// previous session. Until a launch completes, _managedLocalContext is 0, so the
+		// AttachLocalReloadPool "correct if different" guard cannot overwrite this value. If
+		// left in place, the gateway's pre-flight blocking check would use the PREVIOUS
+		// session's context on the very first turn after startup (e.g. blocking a 194k-token
+		// prompt against a stale 163840 window when the auto-loaded profile is actually
+		// 262144), firing a false "context overflow" warning before the user can do anything.
+		// Clearing it here means the gateway sees local_context=0 (no blocking) until the
+		// launch stamps the correct value via WriteProxyRuntimeStateForLocal.
+		ClearStaleLocalContextForStartup();
+	}
+
+	/// <summary>
+	/// Removes the stale <c>local_context</c> (and <c>local_vram_context</c>) from the proxy
+	/// runtime state and deletes the stale <c>Local_Context_Usage.json</c> gauge file at
+	/// startup, so neither the gateway's blocking check nor the UI gauge can act on a value
+	/// that belongs to a previous session's profile. The launching profile's real context is
+	/// written when the launch completes.
+	/// </summary>
+	private void ClearStaleLocalContextForStartup()
+	{
+		try
+		{
+			lock (_proxyStateLock)
+			{
+				if (File.Exists(_proxyRuntimeStatePath))
+				{
+					JsonObject state = LoadJson(_proxyRuntimeStatePath);
+					if (state["local_context"] is not null
+						|| state["local_vram_context"] is not null)
+					{
+						state["local_context"] = string.Empty;
+						state["local_vram_context"] = 0;
+						SaveProxyRuntimeState(state);
+					}
+				}
+			}
+
+			if (File.Exists(_localContextUsagePath))
+			{
+				File.Delete(_localContextUsagePath);
+			}
+		}
+		catch
+		{
+			// Best-effort: a startup cleanup failure must not block app startup.
 		}
 	}
 
@@ -544,6 +617,9 @@ public sealed class FluxMuxRuntimeService
 		host.GetLocalAutoCompactSettings = GetLocalAutoCompactSettings;
 		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);
 		host.ReportPortRulesTelemetry = snap => PortRulesTelemetryNotice?.Invoke(snap);
+		host.ReportContextUsage = WriteLocalContextUsage;
+		host.ReportHailMaryOffer = line => OfferHailMary(line);
+		host.ConsumeHailMaryMiddleCut = ConsumeHailMaryMiddleCutRequest;
 		host.PortRules = _portForwardingRules;
 		TryCaptureAndRedactExistingRuntimeState();
 		return host;
@@ -915,6 +991,54 @@ public sealed class FluxMuxRuntimeService
 	public (string Model, string Variant) GetManagedLocalIdentity()
 	{
 		return (Model: _managedLocalModel, Variant: _managedLocalVariant);
+	}
+
+	/// <summary>
+	/// Returns the most recently successfully LAUNCHED local profile (model + variant + UTC time),
+	/// recorded at launch time (see <see cref="RecordLastLaunchedLocal"/>). This is the source of
+	/// truth for auto-load on startup: the user expects the profile they were actually using to
+	/// come back, which is the most recent launch — NOT the UI selection and NOT the first Quick
+	/// Select slot. Recording at launch (rather than on close) is deliberate because the app does
+	/// not always exit gracefully (crash / kill / power loss), so a write-on-close record is
+	/// unreliable. Returns empty model when no launch has been recorded yet.
+	/// </summary>
+	/// <summary>
+	/// Path of the separate file that stores the most-recently-launched local profile.
+	/// Kept OUT of the main fluxmux_config.json on purpose: FluxMuxConfigService.Save()
+	/// (driven by MainViewModel UI settings) rewrites the ENTIRE main config from its own
+	/// in-memory copy, which would clobber a LastLaunchedLocal field written by the runtime
+	/// service. A separate file avoids that write-collision entirely.
+	/// </summary>
+	private string LastLaunchedLocalPath
+		=> Path.Combine(Path.GetDirectoryName(_configPath) ?? AppContext.BaseDirectory, "last_launched_local.json");
+
+	public (string Model, string Variant, DateTime Utc) GetLastLaunchedLocal()
+	{
+		try
+		{
+			string path = LastLaunchedLocalPath;
+			if (File.Exists(path))
+			{
+				JsonObject entry = JsonNode.Parse(File.ReadAllText(path)) as JsonObject;
+				if (entry is not null)
+				{
+					string model = entry["model"]?.ToString() ?? string.Empty;
+					string variant = entry["variant"]?.ToString() ?? string.Empty;
+					if (DateTime.TryParse(entry["utc"]?.ToString() ?? string.Empty,
+							CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+							out DateTime utc))
+					{
+						return (Model: model, Variant: variant, Utc: utc);
+					}
+					return (Model: model, Variant: variant, Utc: DateTime.MinValue);
+				}
+			}
+		}
+		catch
+		{
+			// Best-effort read; fall through to "no record".
+		}
+		return (Model: string.Empty, Variant: string.Empty, Utc: DateTime.MinValue);
 	}
 
 	public string GetManagedLocalLaunchFingerprint()
@@ -1321,7 +1445,8 @@ public sealed class FluxMuxRuntimeService
 				ParseBool(GetString(root, "spillCompact"), false),
 				GetString(root, "documentContextMode").Equals("pending", StringComparison.OrdinalIgnoreCase),
 				ParseInt(GetString(root, "documentContextTokens"), 0),
-				ParseInt(GetString(root, "documentContextTotal"), 0));
+				ParseInt(GetString(root, "documentContextTotal"), 0),
+				ParseInt(GetString(root, "spillUrgency"), 0));
 		}
 		catch
 		{
@@ -1510,6 +1635,55 @@ public sealed class FluxMuxRuntimeService
 			{
 				WriteIndented = true
 			}));
+		}
+	}
+
+	/// <summary>
+	/// Requests that the next local forward apply the Hail Mary stage-5 middle-cut to the
+	/// payload before sending. Called by the UI when the user clicks the Hail Mary button.
+	/// The flag is consumed by the gateway on the next forward and cleared.
+	/// </summary>
+	public void RequestHailMaryMiddleCut()
+	{
+		_hailMaryMiddleCutRequested = true;
+	}
+
+	/// <summary>
+	/// Returns and clears the pending Hail Mary middle-cut request. Called by the gateway
+	/// before forwarding a local payload.
+	/// </summary>
+	public bool ConsumeHailMaryMiddleCutRequest()
+	{
+		if (_hailMaryMiddleCutRequested)
+		{
+			_hailMaryMiddleCutRequested = false;
+			return true;
+		}
+
+		return false;
+	}
+
+	/// <summary>
+	/// Dismisses the Hail Mary banner without running the middle-cut. The user chose to
+	/// start a fresh chat or take another action instead.
+	/// </summary>
+	public void DismissHailMaryBanner()
+	{
+		// No state to clear — the banner visibility is owned by the ViewModel.
+	}
+
+	/// <summary>
+	/// Raises the Hail Mary offer event to the UI. Called by the gateway when a turn 400s
+	/// on context overflow and the non-destructive prune pipeline already ran.
+	/// </summary>
+	public void OfferHailMary(string diagnosticsLine)
+	{
+		try
+		{
+			HailMaryOffered?.Invoke(diagnosticsLine);
+		}
+		catch
+		{
 		}
 	}
 
@@ -3097,7 +3271,78 @@ public sealed class FluxMuxRuntimeService
 		}
 	}
 
-	public async Task<RuntimeActionResult> LaunchLocalAsync(string selectedLocalModel, string selectedVariant, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, CancellationToken cancellationToken = default(CancellationToken), Action<string>? progressReporter = null)
+	/// <summary>
+	/// Cancels any in-progress local launch immediately and returns a new CTS linked to the
+	/// caller's cancellationToken. The new launch's token is used throughout LaunchLocalAsync
+	/// so that if a newer launch supersedes this one, this launch aborts at the next
+	/// cancellation check. This ensures the user's revised intent (the second launch) wins
+	/// instead of both launches running concurrently.
+	/// </summary>
+	private CancellationTokenSource SupersedeInProgressLocalLaunch(CancellationToken callerToken)
+	{
+		lock (_localLaunchLock)
+		{
+			// Cancel the previous in-progress launch immediately.
+			if (_inProgressLocalLaunchCts is { } previous)
+			{
+				try
+				{
+					previous.Cancel();
+				}
+				catch
+				{
+				}
+			}
+
+			// Create a new CTS linked to the caller's token. If the caller cancels OR a
+			// newer launch supersedes this one, the launch aborts.
+			var newCts = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+			_inProgressLocalLaunchCts = newCts;
+			return newCts;
+		}
+	}
+
+	/// <summary>
+	/// Clears the in-progress launch tracking when a launch completes (success or failure).
+	/// Only clears if the CTS still points to the given instance, so a newer launch that
+	/// has already superseded this one is not affected.
+	/// </summary>
+	private void ClearInProgressLocalLaunch(CancellationTokenSource launchCts)
+	{
+		lock (_localLaunchLock)
+		{
+			if (ReferenceEquals(_inProgressLocalLaunchCts, launchCts))
+			{
+				_inProgressLocalLaunchCts = null;
+			}
+		}
+	}
+
+	/// <summary>
+	/// Cancels any in-progress local launch. This is called by the "Stop model" button so
+	/// that a launch that is still in progress (model not yet alive) is aborted. Without
+	/// this, the Stop button does nothing when the model is still launching because
+	/// IsManagedLocalAlive() returns false and the method returns early.
+	/// </summary>
+	public void CancelInProgressLocalLaunch()
+	{
+		lock (_localLaunchLock)
+		{
+			if (_inProgressLocalLaunchCts is { } cts)
+			{
+				try
+				{
+					cts.Cancel();
+				}
+				catch
+				{
+				}
+				_inProgressLocalLaunchCts = null;
+			}
+		}
+	}
+
+	public async Task<RuntimeActionResult> LaunchLocalAsync(string selectedLocalModel, string selectedVariant, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, CancellationToken cancellationToken = default(CancellationToken), Action<string>? progressReporter = null, bool recordLastLaunched = true)
 	{
 		JsonObject root = LoadJsonCached(_configPath);
 		int localBackendPort = port + 1;
@@ -3110,6 +3355,15 @@ public sealed class FluxMuxRuntimeService
 				Details = $"Port {port} cannot reserve its daemon port (private listen port for llama-server, usually Port+1)."
 			};
 		}
+
+		// Clear the stale local_context from the previous profile before this launch proceeds.
+		// Until _managedLocalContext is set (L3378) and WriteProxyRuntimeStateForLocal stamps the
+		// new value, the gateway's pre-flight blocking check would use the PREVIOUS profile's
+		// context on any turn that arrives during the launch window, firing a false "context
+		// overflow" warning. Clearing it here means the gateway sees local_context=0 (no block)
+		// until the launch completes and stamps the correct value.
+		ClearStaleLocalContextForStartup();
+
 		int launchBudgetMs = GetLocalLaunchWarmupBudgetMs(selectedLocalModel, selectedVariant);
 		int estimatedLaunchMs = GetLocalLaunchEstimateMs(selectedLocalModel, selectedVariant);
 		string serverPath = ResolveLlamaServerPath();
@@ -3142,90 +3396,125 @@ public sealed class FluxMuxRuntimeService
 			};
 		}
 		RememberParkedLocalLaunch(selectedLocalModel, selectedVariant, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge);
+		// If another local launch is in progress, immediately cancel it so this launch
+		// (the user's revised intent) cleanly takes over instead of both running concurrently.
+		// The returned token is linked to the caller's cancellationToken, so the launch
+		// aborts if either the caller cancels OR a newer launch supersedes this one.
+		using var launchCts = SupersedeInProgressLocalLaunch(cancellationToken);
+		var launchToken = launchCts.Token;
+		try
+		{
 		progressReporter?.Invoke("AI-FluxMux is preparing the public endpoint");
-		RuntimeActionResult gateway = await EnsureGatewayRunningAsync(port, cancellationToken);
-		if (!gateway.IsSuccess)
+		// Run the launch-prep phase OFF the UI thread. It makes several blocking external
+		// calls (nvidia-smi x3-4, llama-server --help, where, netstat, and Process.Kill +
+		// WaitForExit on the previous llama-server) that together can take 10-20s. Running
+		// them inline on the UI thread froze the whole app for that duration. Task.Run moves
+		// them to the thread pool; the UI stays responsive and the countdown monitor keeps
+		// ticking. All state touched here is already guarded by the existing locks.
+		// The lambda returns an early-exit result (already-running / port-in-use / switch
+		// blocked) or null to continue with the normal launch.
+		bool stoppedPrevious = false;
+		double reclaimableVramGiB = 0;
+		RuntimeActionResult? prepResult = await Task.Run(async () =>
 		{
-			WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "failed", gateway.Details, GetGatewayPid());
-			return gateway;
-		}
-		progressReporter?.Invoke("AI-FluxMux is checking the previous llama-server");
-		int stoppedLeftover = StopStaleManagedLocalFromRuntimeState(clearStateIfStopped: true);
-		bool stoppedPrevious = stoppedLeftover > 0;
-		Process localServerProcess = null;
-		bool alreadyRunningThisProfile = false;
-		if (await IsLlamaEndpointReadyAsync(localBackendPort, cancellationToken))
-		{
-			localServerProcess = _localServerProcess;
-			if (localServerProcess != null && !localServerProcess.HasExited && _managedLocalPort == localBackendPort && _managedLocalModel.Equals(selectedLocalModel, StringComparison.OrdinalIgnoreCase))
+			RuntimeActionResult gateway = await EnsureGatewayRunningAsync(port, launchToken);
+			if (!gateway.IsSuccess)
 			{
-				alreadyRunningThisProfile = FirstNonEmpty(_managedLocalVariant, "(defaults)").Equals(FirstNonEmpty(selectedVariant, "(defaults)"), StringComparison.OrdinalIgnoreCase);
+				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "failed", gateway.Details, GetGatewayPid());
+				return gateway;
 			}
-		}
-		if (alreadyRunningThisProfile)
-		{
-			WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "ready", "Local public endpoint is already running this profile.", GetGatewayPid());
-			progressReporter?.Invoke("AI-FluxMux public endpoint is already running");
-			LocalGenerationTimingResult reuseProbe = await ProbePublicEndpointWithShortRetriesAsync(port, selectedLocalModel, cancellationToken);
-			if (reuseProbe.IsSuccess)
+			progressReporter?.Invoke("AI-FluxMux is checking the previous llama-server");
+			int stoppedLeftover = StopStaleManagedLocalFromRuntimeState(clearStateIfStopped: true);
+			stoppedPrevious = stoppedLeftover > 0;
+			Process localServerProcess = null;
+			bool alreadyRunningThisProfile = false;
+			if (await IsLlamaEndpointReadyAsync(localBackendPort, launchToken))
 			{
-				progressReporter?.Invoke("AI-FluxMux and llama-server are ready");
+				localServerProcess = _localServerProcess;
+				if (localServerProcess != null && !localServerProcess.HasExited && _managedLocalPort == localBackendPort && _managedLocalModel.Equals(selectedLocalModel, StringComparison.OrdinalIgnoreCase))
+				{
+					alreadyRunningThisProfile = FirstNonEmpty(_managedLocalVariant, "(defaults)").Equals(FirstNonEmpty(selectedVariant, "(defaults)"), StringComparison.OrdinalIgnoreCase);
+				}
+			}
+			if (alreadyRunningThisProfile)
+			{
+				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "ready", "Local public endpoint is already running this profile.", GetGatewayPid());
+				progressReporter?.Invoke("AI-FluxMux public endpoint is already running");
+				// Seed the context gauge so it shows the correct context limit even when the
+				// model was already running (e.g. re-launching the same profile mid-chat).
+				int reuseContextLimit = ManagedLocalContext;
+				if (reuseContextLimit <= 0)
+				{
+					reuseContextLimit = GetLocalProfileContextLimit(selectedLocalModel, selectedVariant);
+				}
+				SeedContextGaugeAtLaunch(selectedLocalModel, reuseContextLimit);
+				LocalGenerationTimingResult reuseProbe = await ProbePublicEndpointWithShortRetriesAsync(port, selectedLocalModel, launchToken);
+				if (reuseProbe.IsSuccess)
+				{
+					progressReporter?.Invoke("AI-FluxMux and llama-server are ready");
+					return new RuntimeActionResult
+					{
+						IsSuccess = true,
+						Status = "Local route ready",
+						Details = $"llama-server is already running {selectedLocalModel} / {FirstNonEmpty(selectedVariant, "(defaults)")}. The AI-FluxMux public endpoint replied in {reuseProbe.LatencyMs} ms."
+					};
+				}
 				return new RuntimeActionResult
 				{
 					IsSuccess = true,
-					Status = "Local route ready",
-					Details = $"llama-server is already running {selectedLocalModel} / {FirstNonEmpty(selectedVariant, "(defaults)")}. The AI-FluxMux public endpoint replied in {reuseProbe.LatencyMs} ms."
+					Status = LocalLaunchStatus.BackendReady,
+					Details = "llama-server is already running, but a short check on Port (the public AI-FluxMux address) did not succeed. " + FirstNonEmpty(reuseProbe.Details, "Port check failed.")
 				};
 			}
-			return new RuntimeActionResult
+			WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "transitioning", "Preparing llama-server on the daemon port.", GetGatewayPid());
+			if (await IsLlamaEndpointReadyAsync(localBackendPort, launchToken))
 			{
-				IsSuccess = true,
-				Status = LocalLaunchStatus.BackendReady,
-				Details = "llama-server is already running, but a short check on Port (the public AI-FluxMux address) did not succeed. " + FirstNonEmpty(reuseProbe.Details, "Port check failed.")
-			};
-		}
-		WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "transitioning", "Preparing llama-server on the daemon port.", GetGatewayPid());
-		if (await IsLlamaEndpointReadyAsync(localBackendPort, cancellationToken))
-		{
+				localServerProcess = _localServerProcess;
+				if (localServerProcess == null || localServerProcess.HasExited)
+				{
+					string ownerText = (TryGetLocalEndpointOwnerByPort(localBackendPort, out int ownerPid, out string ownerName) ? $"{ownerName} (PID {ownerPid})" : "another process");
+					return new RuntimeActionResult
+					{
+						IsSuccess = false,
+						Status = "Local port already in use",
+						Details = $"A compatible listener owned by {ownerText} is already responding on daemon port {localBackendPort} (private listen port for llama-server, usually Port+1). Close that process before AI-FluxMux replaces the managed llama-server."
+					};
+				}
+			}
 			localServerProcess = _localServerProcess;
-			if (localServerProcess == null || localServerProcess.HasExited)
+			if (localServerProcess != null && !localServerProcess.HasExited)
 			{
-				string ownerText = (TryGetLocalEndpointOwnerByPort(localBackendPort, out int ownerPid, out string ownerName) ? $"{ownerName} (PID {ownerPid})" : "another process");
-				return new RuntimeActionResult
+				reclaimableVramGiB = EstimateManagedLocalReclaimableVramGiB(modelDirectory);
+				progressReporter?.Invoke("AI-FluxMux is stopping the previous llama-server");
+				try
 				{
-					IsSuccess = false,
-					Status = "Local port already in use",
-					Details = $"A compatible listener owned by {ownerText} is already responding on daemon port {localBackendPort} (private listen port for llama-server, usually Port+1). Close that process before AI-FluxMux replaces the managed llama-server."
-				};
+					_localServerProcess.Kill(entireProcessTree: true);
+					await _localServerProcess.WaitForExitAsync(launchToken);
+				}
+				catch
+				{
+				}
+				stoppedPrevious = true;
+				await WaitForPortToCloseAsync(localBackendPort, launchToken, 15000);
+				if (IsTcpPortOpen("127.0.0.1", localBackendPort))
+				{
+					string detail = $"Previous llama-server did not release daemon port {localBackendPort} (private listen port for llama-server, usually Port+1).";
+					WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "failed", detail, GetGatewayPid());
+					return new RuntimeActionResult
+					{
+						IsSuccess = false,
+						Status = "Local switch blocked",
+						Details = detail
+					};
+				}
 			}
-		}
-		localServerProcess = _localServerProcess;
-		double reclaimableVramGiB = 0;
-		if (localServerProcess != null && !localServerProcess.HasExited)
+			return null;
+		});
+		// If the launch-prep phase produced an early-exit result (already running, port in
+		// use, or switch blocked), return it now. Otherwise continue with the normal launch.
+		if (prepResult is not null)
 		{
-			reclaimableVramGiB = EstimateManagedLocalReclaimableVramGiB(modelDirectory);
-			progressReporter?.Invoke("AI-FluxMux is stopping the previous llama-server");
-			try
-			{
-				_localServerProcess.Kill(entireProcessTree: true);
-				await _localServerProcess.WaitForExitAsync(cancellationToken);
-			}
-			catch
-			{
-			}
-			stoppedPrevious = true;
-			await WaitForPortToCloseAsync(localBackendPort, cancellationToken, 15000);
-			if (IsTcpPortOpen("127.0.0.1", localBackendPort))
-			{
-				string detail = $"Previous llama-server did not release daemon port {localBackendPort} (private listen port for llama-server, usually Port+1).";
-				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "failed", detail, GetGatewayPid());
-				return new RuntimeActionResult
-				{
-					IsSuccess = false,
-					Status = "Local switch blocked",
-					Details = detail
-				};
-			}
+			return prepResult;
 		}
 		string helpText = GetLlamaHelpText(serverPath);
 		_lastLocalStderrTail = string.Empty;
@@ -3243,6 +3532,10 @@ public sealed class FluxMuxRuntimeService
 		(bool Enabled, string ProjectorPath, int MaxImageEdge) vision = ResolveProfileVision(profile, modelPath);
 		_managedLocalVisionEnabled = vision.Enabled;
 		_managedLocalContext = GetProfileInt(profile, "OverrideContext", 0);
+		// Diagnostic: log the OverrideContext value so we can see if it's set too low (which would
+		// cause the gateway to report a smaller context window to Cline, triggering false
+		// "prompt already fills the window" blocks).
+		System.Diagnostics.Debug.WriteLine($"[ContextDiag] OverrideContext={_managedLocalContext} (profile={GetString(profile, "ProfileId") ?? "unknown"})");
 		_managedLocalExtendContextIntoRam = ParseBool(GetString(profile, "LocalExtendContextIntoRam"), fallback: false);
 		_managedLocalVramContext = 0;
 		if (_managedLocalExtendContextIntoRam && _managedLocalContext > 0)
@@ -3347,7 +3640,7 @@ public sealed class FluxMuxRuntimeService
 		if (stoppedPrevious || vramBusyBeforeStart)
 		{
 			progressReporter?.Invoke("AI-FluxMux is waiting for the GPU after the previous llama-server");
-			await SettleAfterFailedLocalStartupAsync(localBackendPort, cancellationToken);
+			await SettleAfterFailedLocalStartupAsync(localBackendPort, launchToken);
 		}
 		Process process = null;
 		RuntimeActionResult? started = null;
@@ -3372,9 +3665,11 @@ public sealed class FluxMuxRuntimeService
 		DateTime deadline = DateTime.UtcNow.AddMilliseconds(launchBudgetMs);
 		bool modelLoadWaitActive = false;
 		bool retryStartup = false;
+		int publicProbeFailCount = 0;
+		DateTime publicProbeFirstFailUtc = DateTime.MinValue;
 		while (DateTime.UtcNow < deadline)
 		{
-			cancellationToken.ThrowIfCancellationRequested();
+			launchToken.ThrowIfCancellationRequested();
 			if (process == null || process.HasExited)
 			{
 				if (LocalLaunchStartupRetry.ShouldRetry(_lastLocalStderrTail, startupAttempt))
@@ -3387,7 +3682,7 @@ public sealed class FluxMuxRuntimeService
 						"llama-server exited during startup; AI-FluxMux is waiting for the GPU, then trying once more.",
 						GetGatewayPid());
 					progressReporter?.Invoke("AI-FluxMux is waiting for the GPU after llama-server stopped");
-					await SettleAfterFailedLocalStartupAsync(localBackendPort, cancellationToken);
+					await SettleAfterFailedLocalStartupAsync(localBackendPort, launchToken);
 					_lastLocalStderrTail = string.Empty;
 					try
 					{
@@ -3409,19 +3704,41 @@ public sealed class FluxMuxRuntimeService
 					Details = "llama-server exited during startup." + (string.IsNullOrWhiteSpace(_lastLocalStderrTail) ? string.Empty : (" Last llama-server output: " + _lastLocalStderrTail))
 				};
 			}
-			if (await IsLlamaEndpointReadyAsync(localBackendPort, cancellationToken))
+			if (await IsLlamaEndpointReadyAsync(localBackendPort, launchToken))
 			{
 				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "ready", "llama-server is responding on the daemon port; checking Port.", GetGatewayPid());
 				if (!modelLoadWaitActive)
 				{
 					progressReporter?.Invoke("AI-FluxMux is testing the public endpoint");
 				}
-				LocalGenerationTimingResult publicProbe = await ProbePublicEndpointWithShortRetriesAsync(port, selectedLocalModel, cancellationToken);
+				LocalGenerationTimingResult publicProbe = await ProbePublicEndpointWithShortRetriesAsync(port, selectedLocalModel, launchToken);
 				if (!(publicProbe?.IsSuccess ?? false))
 				{
 					string probeDetails = FirstNonEmpty(publicProbe?.Details ?? string.Empty, "Public endpoint check failed.");
 					if (IsTransientWarmupProbeFailure(probeDetails))
 					{
+						// Track how long the public endpoint has been failing. If it's been failing
+						// for >30 seconds, the model is likely ready on the daemon port but the
+						// gateway's public endpoint is stuck. Return a clearer status instead of
+						// continuing to loop until the deadline.
+						if (publicProbeFirstFailUtc == DateTime.MinValue)
+						{
+							publicProbeFirstFailUtc = DateTime.UtcNow;
+						}
+						publicProbeFailCount++;
+						var elapsedSinceFirstFail = (DateTime.UtcNow - publicProbeFirstFailUtc).TotalSeconds;
+						if (elapsedSinceFirstFail > 30)
+						{
+							WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "warming", "llama-server is responding on the daemon port; the public endpoint has been failing for over 30 seconds.");
+							WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "warming", probeDetails, GetGatewayPid());
+							return new RuntimeActionResult
+							{
+								IsSuccess = true,
+								Status = LocalLaunchStatus.BackendReady,
+								Details = "llama-server is running on the daemon port, but the public endpoint has been failing for over 30 seconds. The model may be ready, but the gateway's public endpoint is not responding. Try using Check Connection Health to verify, or restart the gateway."
+							};
+						}
+
 						WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "warming", "llama-server is responding on the daemon port; the local model is still loading.");
 						WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "warming", probeDetails, GetGatewayPid());
 						if (!modelLoadWaitActive)
@@ -3429,7 +3746,7 @@ public sealed class FluxMuxRuntimeService
 							modelLoadWaitActive = true;
 							progressReporter?.Invoke("Loading model");
 						}
-						await Task.Delay(2000, cancellationToken);
+						await Task.Delay(2000, launchToken);
 						continue;
 					}
 
@@ -3444,18 +3761,56 @@ public sealed class FluxMuxRuntimeService
 						Details = "llama-server is running on the daemon port, but a short reply through Port (the public AI-FluxMux address) did not succeed. " + probeDetails
 					};
 				}
+				// Reset the public probe fail counter on success.
+				publicProbeFailCount = 0;
+				publicProbeFirstFailUtc = DateTime.MinValue;
 				int readyMs = (int)Math.Min(2147483647L, launchStopwatch.ElapsedMilliseconds);
 				WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "ready", "llama-server on the daemon port and Port are both responding.");
 				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "ready", "Port is ready.", GetGatewayPid());
 				SeedForwardCompactFromProfile(selectedLocalModel, selectedVariant);
+				// Seed the context gauge immediately so it shows the correct context limit from
+				// the moment of first launch (especially important when launching mid-chat).
+				// The prompt token count starts at 0 (empty context at launch); the first
+				// gateway turn measures the real prompt count and updates the gauge.
+				int launchContextLimit = ManagedLocalContext;
+				if (launchContextLimit <= 0)
+				{
+					launchContextLimit = GetLocalProfileContextLimit(selectedLocalModel, selectedVariant);
+				}
+				SeedContextGaugeAtLaunch(selectedLocalModel, launchContextLimit);
 				RecordLocalLaunchTelemetry(selectedLocalModel, selectedVariant, readyMs, "ready");
+				// Record the most-recently-launched profile so auto-load on the next startup
+				// restores the profile the user was actually using (recorded at launch time,
+				// not on close, because the app does not always exit gracefully).
+				//
+				// IMPORTANT: only record when recordLastLaunched is true. Auto-load on startup
+				// passes recordLastLaunched=false so that its (possibly fallback) launch does NOT
+				// overwrite the last-launched record with a profile the user did not explicitly
+				// choose. Only explicit user launches update the record.
+				if (recordLastLaunched)
+				{
+					RecordLastLaunchedLocal(selectedLocalModel, selectedVariant);
+				}
 				double launchVramAfterGiB = 0;
 				bool launchVramAfterSampled = launchVramSampled && LocalGpuVramSample.TryRead(out launchVramAfterGiB, out _, out _);
 				if (launchVramAfterSampled)
 				{
 					RecordLocalMeasuredVram(selectedLocalModel, selectedVariant, launchVramBaselineGiB, launchVramAfterGiB, vision.Enabled);
 				}
-				string readyDetails = $"Port is available on http://127.0.0.1:{port}; llama-server is ready on daemon port {localBackendPort} (private listen port for llama-server, usually Port+1) with local model {Path.GetFileName(modelPath)} (model profile variant {FirstNonEmpty(selectedVariant, "Variant 1")}, vision {(vision.Enabled ? "on" : "off")}, max-edge {vision.MaxImageEdge}, offload {effectiveOffload}, guardrail {gpuGuardrail.ShortLabel}). Port replied in {publicProbe.LatencyMs} ms. Launch to endpoint took {readyMs} ms.";
+				// Context limit for the launch details: the managed context is the YaRN-extended
+			// window when extension is on (OverrideContext already carries the extended value),
+			// so label it to make the YaRN extension visible in the terminal output.
+			int launchCtxForDetails = ManagedLocalContext;
+			if (launchCtxForDetails <= 0)
+			{
+				launchCtxForDetails = GetLocalProfileContextLimit(selectedLocalModel, selectedVariant);
+			}
+			string ctxLabel = launchCtxForDetails > 0
+				? (ManagedLocalVramContext > 0 && ManagedLocalVramContext < launchCtxForDetails
+					? $"context {launchCtxForDetails:N0} (YaRN, {ManagedLocalVramContext:N0} on VRAM)"
+					: $"context {launchCtxForDetails:N0}")
+				: string.Empty;
+			string readyDetails = $"Port is available on http://127.0.0.1:{port}; llama-server is ready on daemon port {localBackendPort} (private listen port for llama-server, usually Port+1) with local model {Path.GetFileName(modelPath)} (model profile variant {FirstNonEmpty(selectedVariant, "Variant 1")}, vision {(vision.Enabled ? "on" : "off")}, max-edge {vision.MaxImageEdge}, offload {effectiveOffload}, guardrail {gpuGuardrail.ShortLabel}{(ctxLabel.Length > 0 ? ", " + ctxLabel : string.Empty)}). Port replied in {publicProbe.LatencyMs} ms. Launch to endpoint took {readyMs} ms.";
 				if (launchVramWarning.ShowWarning)
 				{
 					readyDetails += " " + launchVramWarning.Message;
@@ -3476,7 +3831,7 @@ public sealed class FluxMuxRuntimeService
 					Details = readyDetails
 				};
 			}
-			await Task.Delay(500, cancellationToken);
+			await Task.Delay(500, launchToken);
 		}
 		if (retryStartup)
 		{
@@ -3515,6 +3870,12 @@ public sealed class FluxMuxRuntimeService
 			Status = "Local launch failed",
 			Details = "llama-server exited during startup." + (string.IsNullOrWhiteSpace(_lastLocalStderrTail) ? string.Empty : (" Last llama-server output: " + _lastLocalStderrTail))
 		};
+		}
+		finally
+		{
+			// Clear the in-progress launch tracking when this launch completes.
+			ClearInProgressLocalLaunch(launchCts);
+		}
 	}
 
 	public async Task<RuntimeActionResult> RestartLocalAsync(string selectedLocalModel, string selectedVariant, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, CancellationToken cancellationToken = default(CancellationToken), Action<string>? progressReporter = null)
@@ -6764,7 +7125,15 @@ public sealed class FluxMuxRuntimeService
 	private static string CanonicalLaunchTelemetryVariant(string? variant)
 	{
 		string trimmed = (variant ?? string.Empty).Trim();
-		if (string.IsNullOrWhiteSpace(trimmed) || trimmed.Equals("(defaults)", StringComparison.OrdinalIgnoreCase) || trimmed.Equals("Variant 1", StringComparison.OrdinalIgnoreCase) || trimmed.Equals("Base (read-only)", StringComparison.OrdinalIgnoreCase))
+		// IMPORTANT: "Variant 1" is a REAL variant name (the first user-created variant of a
+		// model), NOT a synonym for the base profile. The LocalProfiles config keys use the raw
+		// variant name (e.g. "model.gguf::Variant 1"), and RecordLocalLaunchTelemetry writes
+		// under that same raw name. If we mapped "Variant 1" → "(defaults)" here, the read key
+		// would be "model.gguf::(defaults)" while the write key was "model.gguf::Variant 1",
+		// so GetLocalLaunchEstimateMs would never find the recorded samples and the countdown
+		// would always fall back to the 200-second default (or show no estimate at all).
+		// Only the true base-profile display names map to "(defaults)".
+		if (string.IsNullOrWhiteSpace(trimmed) || trimmed.Equals("(defaults)", StringComparison.OrdinalIgnoreCase) || trimmed.Equals("Base (read-only)", StringComparison.OrdinalIgnoreCase))
 		{
 			return "(defaults)";
 		}
@@ -6795,14 +7164,47 @@ public sealed class FluxMuxRuntimeService
 		JsonObject jsonObject = LoadJsonCached(_configPath);
 		if (!(jsonObject["FluxMuxMeta"] is JsonObject jsonObject2))
 		{
+			System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] GetLocalLaunchTelemetryEntry: no FluxMuxMeta in config");
 			return null;
 		}
 		if (!(jsonObject2["LocalLaunchTelemetry"] is JsonObject jsonObject3))
 		{
+			System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] GetLocalLaunchTelemetryEntry: no LocalLaunchTelemetry in FluxMuxMeta");
 			return null;
 		}
 		string propertyName = BuildLocalLaunchTelemetryKey(model, variant);
-		return jsonObject3[propertyName] as JsonObject;
+		System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] GetLocalLaunchTelemetryEntry: looking for key='{propertyName}'");
+		var entry = jsonObject3[propertyName] as JsonObject;
+		if (entry != null)
+		{
+			System.Diagnostics.Debug.WriteLine("[LaunchTelemetry] GetLocalLaunchTelemetryEntry: found (exact match)");
+			return entry;
+		}
+
+		// Fallback: handle pre-existing telemetry recorded under the OLD key format, where
+		// "Variant 1" was mapped to "(defaults)" (or vice versa). This ensures previously
+		// recorded launch history is still found after the key-normalization fix.
+		string modelToken = NormalizeTelemetryToken(model);
+		string variantToken = CanonicalLaunchTelemetryVariant(variant);
+		string alternateVariant = variantToken.Equals("(defaults)", StringComparison.OrdinalIgnoreCase)
+			? "Variant_1"
+			: variantToken.Equals("Variant_1", StringComparison.OrdinalIgnoreCase)
+				? "(defaults)"
+				: string.Empty;
+		if (!string.IsNullOrEmpty(alternateVariant))
+		{
+			string alternateKey = modelToken + "::" + alternateVariant;
+			System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] GetLocalLaunchTelemetryEntry: trying alternate key='{alternateKey}'");
+			entry = jsonObject3[alternateKey] as JsonObject;
+			if (entry != null)
+			{
+				System.Diagnostics.Debug.WriteLine("[LaunchTelemetry] GetLocalLaunchTelemetryEntry: found (alternate key)");
+				return entry;
+			}
+		}
+
+		System.Diagnostics.Debug.WriteLine("[LaunchTelemetry] GetLocalLaunchTelemetryEntry: not found");
+		return null;
 	}
 
 	public int GetLocalLaunchWarmupBudgetMs(string model, string variant)
@@ -6813,12 +7215,21 @@ public sealed class FluxMuxRuntimeService
 			int slowestMs = ParseInt(localLaunchTelemetryEntry?["slowest_ms"]?.ToString() ?? string.Empty, 0);
 			int medianMs = ParseInt(localLaunchTelemetryEntry?["median_ms"]?.ToString() ?? string.Empty, 0);
 			int fastestMs = ParseInt(localLaunchTelemetryEntry?["fastest_ms"]?.ToString() ?? string.Empty, 0);
-			int recordedMs = slowestMs > 0 ? slowestMs : (medianMs > 0 ? medianMs : fastestMs);
+			// Use the MEDIAN as the base for the warmup budget, not the slowest. The slowest is
+			// an outlier (e.g., a one-time system hiccup, a cold load after a reboot, or a launch
+			// the user waited on before aborting) that inflates the budget for every future launch.
+			// The median tracks the typical launch time (~13-20s for this model), so the budget is
+			// generous enough for a normal cold load but not stuck at a historical worst-case value.
+			//
+			// The headroom is 60s (not 30s) to account for cold loads that are slower than the
+			// median (e.g., after a reboot, when the page cache is cold, or when the GPU is busy).
+			// The readiness monitor (180s deadline) will keep polling if the model takes longer.
+			int recordedMs = medianMs > 0 ? medianMs : (slowestMs > 0 ? slowestMs : fastestMs);
 			if (recordedMs <= 0)
 			{
 				return 90000;
 			}
-			return Math.Clamp(recordedMs + 30000, 60000, 180000);
+			return Math.Clamp(recordedMs + 60000, 60000, 180000);
 		}
 		catch
 		{
@@ -6843,9 +7254,26 @@ public sealed class FluxMuxRuntimeService
 		try
 		{
 			JsonObject localLaunchTelemetryEntry = GetLocalLaunchTelemetryEntry(model, variant);
+			int lastMs = ParseInt(localLaunchTelemetryEntry?["last_ms"]?.ToString() ?? string.Empty, 0);
 			int slowest = ParseInt(localLaunchTelemetryEntry?["slowest_ms"]?.ToString() ?? string.Empty, 0);
 			int median = ParseInt(localLaunchTelemetryEntry?["median_ms"]?.ToString() ?? string.Empty, 0);
 			int fastest = ParseInt(localLaunchTelemetryEntry?["fastest_ms"]?.ToString() ?? string.Empty, 0);
+			System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] GetLocalLaunchEstimateMs: model={model}, variant={variant}, last={lastMs}, slowest={slowest}, median={median}, fastest={fastest}, entry={(localLaunchTelemetryEntry != null ? "found" : "null")}");
+			// Use the MEDIAN for the countdown estimate, not the last launch time. The last launch
+			// time (last_ms) can be an outlier (e.g., a one-time system hiccup, a cold load after
+			// a reboot, or a launch the user waited on before aborting). The median tracks the
+			// typical launch time (~13-20s for this model), so the "estimated time left" is
+			// realistic and not stuck at a historical worst-case value.
+			//
+			// Fall back to slowest/median/fastest if the median is not available.
+			if (median > 0)
+			{
+				return median;
+			}
+			if (lastMs > 0)
+			{
+				return lastMs;
+			}
 			if (slowest > 0)
 			{
 				return slowest;
@@ -6948,6 +7376,7 @@ public sealed class FluxMuxRuntimeService
 	{
 		try
 		{
+			System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] Recording: model={model}, variant={variant}, elapsedMs={elapsedMs}, status={status}");
 			JsonObject jsonObject = LoadJsonCached(_configPath);
 			JsonObject orCreateFluxMuxMeta = GetOrCreateFluxMuxMeta(jsonObject);
 			JsonObject jsonObject2 = orCreateFluxMuxMeta["LocalLaunchTelemetry"] as JsonObject;
@@ -7002,6 +7431,46 @@ public sealed class FluxMuxRuntimeService
 		}
 		catch
 		{
+		}
+	}
+
+	/// <summary>
+	/// Records the most recently successfully LAUNCHED local profile (model + variant + UTC time)
+	/// in the SEPARATE file at <see cref="LastLaunchedLocalPath"/> (<c>last_launched_local.json</c>).
+	/// Called on the launch-success path so that auto-load on the next startup can restore the
+	/// profile the user was actually using. Recording at launch time (rather than on close) is
+	/// deliberate: the app does not always exit gracefully, so a write-on-close record would be lost
+	/// on crash/kill/power-loss.
+	///
+	/// IMPORTANT: this MUST write to the separate file, not the main fluxmux_config.json.
+	/// <see cref="GetLastLaunchedLocal"/> reads from the separate file. Writing to the main config
+	/// would be clobbered by FluxMuxConfigService.Save() (which rewrites the whole main config from
+	/// its in-memory copy), so the record would never persist and auto-load would always fall back
+	/// to the UI selection.
+	/// </summary>
+	public void RecordLastLaunchedLocal(string model, string variant)
+	{
+		if (string.IsNullOrWhiteSpace(model))
+		{
+			return;
+		}
+		try
+		{
+			string path = LastLaunchedLocalPath;
+			JsonObject entry = new()
+			{
+				["model"] = model,
+				["variant"] = variant ?? string.Empty,
+				["utc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+			};
+			File.WriteAllText(path, entry.ToJsonString(new JsonSerializerOptions
+			{
+				WriteIndented = true
+			}));
+		}
+		catch
+		{
+			// Best-effort record; never block the launch.
 		}
 	}
 
@@ -7246,6 +7715,8 @@ public sealed class FluxMuxRuntimeService
 				jsonObject["last_local_variant"] = FirstNonEmpty(_managedLocalVariant, "(defaults)");
 				jsonObject["local_vision"] = _managedLocalVisionEnabled ? "Enabled" : "Disabled";
 				jsonObject["local_context"] = _managedLocalContext;
+				// Diagnostic: log the local_context value being reported to Cline.
+				System.Diagnostics.Debug.WriteLine($"[ContextDiag] local_context={_managedLocalContext} (reported to Cline)");
 				jsonObject["local_max_tokens"] = _managedLocalMaxTokens;
 				// YaRN spill-compact support: stamp whether this profile opted into context
 				// extension and the VRAM-resident context, so the gateway host can offer a
@@ -7537,7 +8008,12 @@ public sealed class FluxMuxRuntimeService
 			{
 				state["local_vision"] = _managedLocalVisionEnabled ? "Enabled" : "Disabled";
 			}
-			if (ParseInt(GetString(state, "local_context"), 0) <= 0 && _managedLocalContext > 0)
+			// Update local_context whenever the managed context differs from the stored one,
+			// not just when it's 0. This prevents a stale local_context from persisting after a
+			// profile switch (e.g. VRAM-only 213056 -> YaRN 393216), which made the gateway's
+			// pre-flight blocking check misclassify the prompt as "context overflow" and Cline's
+			// context bar show the wrong (smaller) context.
+			if (_managedLocalContext > 0 && ParseInt(GetString(state, "local_context"), 0) != _managedLocalContext)
 			{
 				state["local_context"] = _managedLocalContext;
 			}
@@ -8933,4 +9409,180 @@ public sealed class FluxMuxRuntimeService
 		}
 		return value.Substring(value.Length - max);
 	}
+
+	/// <summary>
+	/// Reads the live context-usage state written by the gateway. Returns (promptTokens,
+	/// contextLimit, model) or (0, 0, "") when unavailable.
+	/// </summary>
+	public (int PromptTokens, int ContextLimit, string Model) ReadLocalContextUsage()
+	{
+		try
+		{
+			if (!File.Exists(_localContextUsagePath))
+			{
+				return (0, 0, string.Empty);
+			}
+			JsonObject root = LoadJson(_localContextUsagePath);
+			int promptTokens = ParseInt(root["prompt_tokens"]?.ToString() ?? string.Empty, 0);
+			int contextLimit = ParseInt(root["context_limit"]?.ToString() ?? string.Empty, 0);
+			string model = root["model"]?.ToString() ?? string.Empty;
+			return (promptTokens, contextLimit, model);
+		}
+		catch
+		{
+			return (0, 0, string.Empty);
+		}
+	}
+
+	/// <summary>
+	/// Writes the live context-usage state that the UI's "Context" gauge reads. Invoked by the
+	/// gateway (via <c>ReportContextUsage</c>) each turn after the model's real prompt-token
+	/// count is measured. The <paramref name="contextLimit"/> is the gateway's live
+	/// <c>local_context</c> for the currently-loaded profile, so the gauge denominator tracks
+	/// profile switches instead of staying frozen at a stale value.
+	/// </summary>
+	private void WriteLocalContextUsage(int promptTokens, int contextLimit, string model)
+	{
+		try
+		{
+			JsonObject root = new()
+			{
+				["prompt_tokens"] = promptTokens,
+				["context_limit"] = contextLimit,
+				["model"] = model ?? string.Empty,
+				["updated_utc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+			};
+			File.WriteAllText(_localContextUsagePath, root.ToJsonString(new JsonSerializerOptions
+			{
+				WriteIndented = true
+			}));
+		}
+		catch
+		{
+			// Best-effort: a gauge-write failure must not break the gateway turn.
+		}
+	}
+
+	/// <summary>
+	/// Proactively seeds the context gauge at model launch so the gauge is accurate from the
+	/// moment of first launch, not waiting for the next gateway turn. This is especially
+	/// important when a model is launched mid-chat: the gauge would otherwise show
+	/// "Waiting for a turn…" (or a stale value from the previous model) until the next
+	/// request flows through the gateway. We write the correct context limit and a prompt
+	/// token count of 0 (the model's context is empty at launch), so the gauge denominator
+	/// is immediately correct and the first gateway turn fills in the real prompt count.
+	/// Best-effort: a gauge-write failure must not break the launch.
+	/// </summary>
+	public void SeedContextGaugeAtLaunch(string model, int contextLimit)
+	{
+		if (contextLimit <= 0)
+		{
+			return;
+		}
+		WriteLocalContextUsage(0, contextLimit, model);
+	}
+
+	/// <summary>
+	/// Updates the context gauge with the current prompt-token count and context limit.
+	/// Called by the context-fill stress test after each level so the gauge reflects the
+	/// test's current fill level (the test bypasses the gateway, so the gauge would
+	/// otherwise show a stale value from the last real chat). Best-effort: a gauge-write
+	/// failure must not break the stress test.
+	/// </summary>
+	public void UpdateContextGauge(int promptTokens, int contextLimit, string model)
+	{
+		WriteLocalContextUsage(promptTokens, contextLimit, model);
+	}
+
+	/// <summary>
+	/// Pre-warms the OS page cache for the model file in the background so the next launch
+	/// is a warm RAM read, not a cold NVMe read.
+	/// </summary>
+	public void PreWarmModelPageCache(string modelPath)
+	{
+		if (string.IsNullOrWhiteSpace(modelPath) || !File.Exists(modelPath))
+		{
+			return;
+		}
+		_ = Task.Run(async () =>
+		{
+			try
+			{
+				using var stream = File.OpenRead(modelPath);
+				var buffer = new byte[8 * 1024 * 1024];
+				while (await stream.ReadAsync(buffer.AsMemory()) > 0)
+				{
+				}
+			}
+			catch
+			{
+			}
+		});
+	}
+
+	/// <summary>
+	/// Returns the context limit for the given local profile/variant, or 0 when unknown.
+	/// </summary>
+	public int GetLocalProfileContextLimit(string model, string variant)
+	{
+		try
+		{
+			JsonObject root = LoadJsonCached(_configPath);
+			JsonObject profile = ResolveLocalProfile(root, model, variant);
+			if (profile is null)
+			{
+				return 0;
+			}
+			return GetProfileInt(profile, "OverrideContext", 0);
+		}
+		catch
+		{
+			return 0;
+		}
+	}
+
+	/// <summary>
+	/// The context limit the gateway is currently using for the managed local model. This is the
+	/// actual launched context (which may differ from the profile's OverrideContext due to VRAM
+	/// constraints, YaRN spill, or a manual -c override). The context-fill stress test uses this
+	/// value (not OverrideContext) so its fill levels match what the gateway will actually allow.
+	/// Returns 0 when no local model is currently managed.
+	/// </summary>
+	public int ManagedLocalContext => _managedLocalContext;
+
+	/// <summary>
+	/// The VRAM-resident context window (the portion that fits on the GPU without YaRN spill).
+	/// Used to compute stress-test step sizes: the step is derived from this value so that
+	/// VRAM-only profiles get ~4 steps and YaRN-extended profiles get more steps of the same size.
+	/// Returns 0 when YaRN extension is not enabled or no local model is currently managed.
+	/// </summary>
+	public int ManagedLocalVramContext => _managedLocalVramContext;
+
+	/// <summary>
+	/// The log directory where runtime logs are written.
+	/// </summary>
+	public string LogDirectory => _logDirectory;
+
+	/// <summary>
+	/// True when a pending local-reload offer is stale: the context the offer was raised for
+	/// (<paramref name="neededContext"/>) is now comfortably below the loaded window
+	/// (<paramref name="hotContext"/>), so the chat has shrunk and the offer no longer applies.
+	/// Stale offers are dropped so the user is not nagged to reload for a turn that now fits.
+	///
+	/// The rule is "strictly less than 70% of the window": a needed context at or above 70% of
+	/// the window is still near the limit and the offer must be kept. When either number is
+	/// missing (0 — older offer files may not carry neededContext / hotContext), the offer is
+	/// kept (not stale) so a missing number never silently hides a genuine offer.
+	/// </summary>
+	public static bool IsLocalReloadOfferStale(int neededContext, int hotContext)
+	{
+		if (neededContext <= 0 || hotContext <= 0)
+		{
+			return false;
+		}
+
+		// Stale when the needed context is strictly less than 70% of the window.
+		return neededContext * 10 < hotContext * 7;
+	}
+
 }

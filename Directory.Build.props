@@ -12,6 +12,7 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**</DefaultItemExcludes>
     <!-- UTF-8 source without a BOM; otherwise Windows ANSI turns middle-dots into Â/Ä. -->
     <CodePage>65001</CodePage>
+
   </PropertyGroup>
   <PropertyGroup Condition="$([System.String]::Copy('$(_FluxMuxOutputHint)').ToLowerInvariant().Contains('artifacts'))">
     <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)artifacts\obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>

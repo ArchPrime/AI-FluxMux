@@ -28,7 +28,11 @@ public sealed class LocalHistoryCompactionTests
             compactEnabled: true, promptTokens: 20000, contextTokens: 16384, promptExceeds: true));
         Assert.False(LocalHistoryCompaction.ShouldForwardCompact(
             compactEnabled: false, promptTokens: 14000, contextTokens: 16384, promptExceeds: true));
-        Assert.True(LocalHistoryCompaction.ShouldForwardCompact(
+        // The 2-chars/token filling estimate is gated: it only fires once the
+        // standard 4-chars/token estimate is already in the filling zone
+        // (>= 60% of the window). 124000/213056 = 58% -> below the zone, so the
+        // filling estimate must NOT trip compaction on its own.
+        Assert.False(LocalHistoryCompaction.ShouldForwardCompact(
             compactEnabled: true,
             promptTokens: 124000,
             contextTokens: 213056,
@@ -40,6 +44,15 @@ public sealed class LocalHistoryCompactionTests
             contextTokens: 213056,
             promptExceeds: false,
             fillingEstimate: false));
+        // 140000/213056 = 66% -> inside the filling zone, so the filling
+        // estimate now trips compaction (early-compact protection for tight
+        // windows is preserved).
+        Assert.True(LocalHistoryCompaction.ShouldForwardCompact(
+            compactEnabled: true,
+            promptTokens: 140000,
+            contextTokens: 213056,
+            promptExceeds: false,
+            fillingEstimate: true));
     }
 
     [Fact]
@@ -66,18 +79,22 @@ public sealed class LocalHistoryCompactionTests
         var payload = new JsonObject { ["messages"] = messages };
         var state = new JsonObject { ["local_context"] = 32768, ["local_vision"] = "Disabled" };
         var promptStd = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        // 70400 chars: 2-char est = 35200 > 32768, 4-char est = 17600
+        // (54% of the window). The filling estimate is gated to the filling
+        // zone (>= 60% of the window on the 4-char estimate), so at 54% it must
+        // NOT trip compaction on its own -- the window is not actually filling.
         Assert.False(LocalHistoryCompaction.IsNearLimit(promptStd, 32768));
-        // 70400 chars: 2-char est = 35200 > 32768 (trips compact), 4-char est
-        // = 17600 < 32768 (fits, so not a blocking condition). The compact
-        // trigger uses the pessimistic 2-char estimate.
         Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        // The raw 2-char estimate still reports "filling" (it is the pessimistic
+        // signal), but the compact trigger gates it, so it does not fire here.
         Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
-        Assert.True(LocalHistoryCompaction.ShouldForwardCompact(
+        Assert.False(LocalHistoryCompaction.ShouldForwardCompact(
             compactEnabled: true,
             promptTokens: promptStd,
             contextTokens: 32768,
             promptExceeds: false,
             fillingEstimate: true));
+        // Force-compaction still works when explicitly requested.
         Assert.True(LocalHistoryCompaction.TryCompactPayload(payload, force: true));
         Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
     }

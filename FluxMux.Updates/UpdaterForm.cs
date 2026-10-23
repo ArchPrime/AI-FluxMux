@@ -116,12 +116,19 @@ public sealed class UpdaterForm : Form
         // Stack content top-to-bottom. A FlowLayoutPanel (TopDown) sizes itself to
         // its widest child and stacks the rest, which avoids the width-collapse
         // problems a Dock=Fill TableLayoutPanel has inside a GrowAndShrink form.
+        // Dock it to Top so it stops above the button panel (Dock.Bottom) and never
+        // overlaps the detail text with the action button.
+        // Use GrowOnly so the panel never shrinks below its initial measured width
+        // (which is driven by the progress bar). GrowAndShrink would collapse the
+        // panel to the narrowest child ("Starting...") on the first layout pass,
+        // making the whole dialog ~half the intended width.
         var content = new FlowLayoutPanel
         {
             FlowDirection = FlowDirection.TopDown,
             WrapContents = false,
             AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            AutoSizeMode = AutoSizeMode.GrowOnly,
+            Dock = DockStyle.Top,
             Padding = new Padding(sidePad, topPad, sidePad, gap)
         };
         content.Controls.Add(_titleLabel);
@@ -130,23 +137,40 @@ public sealed class UpdaterForm : Form
         content.Controls.Add(_progressLabel);
         content.Controls.Add(_detailLabel);
 
+        // Center the action button horizontally in the button panel instead of
+        // right-aligning it. The button is repositioned on layout so it stays
+        // centered as the form width changes.
+        // Use GrowOnly so the button panel never shrinks below its initial width.
         var buttonPanel = new Panel
         {
             Dock = DockStyle.Bottom,
             AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            AutoSizeMode = AutoSizeMode.GrowOnly,
             Padding = new Padding(sidePad, 0, sidePad, bottomPad)
         };
-        _actionButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+        _actionButton.Anchor = AnchorStyles.None;
         buttonPanel.Controls.Add(_actionButton);
+        buttonPanel.Layout += (s, e) =>
+        {
+            // Center the button horizontally within the panel's client area.
+            _actionButton.Left = Math.Max(0, (buttonPanel.ClientSize.Width - _actionButton.Width) / 2);
+            _actionButton.Top = 0;
+        };
 
         Controls.Add(buttonPanel);
         Controls.Add(content);
 
         // Let the form size to its content once the controls have measured.
+        // Use GrowOnly so the form never shrinks below the width established by
+        // the progress bar on the first layout pass. GrowAndShrink would collapse
+        // the form to the narrowest child ("Starting...") making the dialog ~half
+        // the intended width and clipping the status/detail text.
         AcceptButton = _actionButton;
         AutoSize = true;
-        AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        AutoSizeMode = AutoSizeMode.GrowOnly;
+        // Floor the form width so it is at least as wide as the content area
+        // (progress bar + side padding) even before the first layout pass.
+        MinimumSize = new Size(contentWidth + sidePad * 2 + SystemInformation.FrameBorderSize.Width * 2, 0);
     }
 
     private void OnActionButtonClick(object? sender, EventArgs e)

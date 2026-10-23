@@ -22,10 +22,12 @@ public readonly record struct ClineContextSyncOptions(
         string? modelId = null,
         bool imagesOn = false,
         string? displayName = null,
-        int maxTokens = 0)
+        int maxTokens = 0,
+        int maxContextWindow = 0)
     {
         var port = Math.Clamp(fluxMuxPort, 1, 65535);
-        var context = Math.Clamp(contextWindow, 1024, DeepSeekHarnessSetup.MaxLocalContextWindow);
+        var cap = maxContextWindow > 0 ? maxContextWindow : DeepSeekHarnessSetup.MaxLocalContextWindow;
+        var context = Math.Clamp(contextWindow, 1024, cap);
         var id = string.IsNullOrWhiteSpace(modelId) ? FluxMuxGatewayModels.LocalModelId : modelId.Trim();
         var label = string.IsNullOrWhiteSpace(displayName) ? id : displayName.Trim();
         var replyBudget = maxTokens > 0 ? Math.Clamp(maxTokens, 1, context) : 0;

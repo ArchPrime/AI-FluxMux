@@ -174,7 +174,7 @@ public static class FluxMuxGatewayRouting
             ConsentReason: FillingCloudConsentReason);
     }
 
-    public static bool PromptFillsLocalContext(JsonObject state, JsonObject payload)
+    public static bool PromptFillsLocalContext(JsonObject state, JsonObject payload, int? measuredPromptTokens = null, bool blockOnEstimate = true)
     {
         if (LocalChatPayloadSignals.PayloadHasImage(payload)
             && !Str(state, "local_vision").Equals("Enabled", StringComparison.OrdinalIgnoreCase)
@@ -183,10 +183,10 @@ public static class FluxMuxGatewayRouting
             return false;
         }
 
-        return EvaluatePromptFillsLocalContext(state, payload);
+        return EvaluatePromptFillsLocalContext(state, payload, measuredPromptTokens, blockOnEstimate);
     }
 
-    private static bool EvaluatePromptFillsLocalContext(JsonObject state, JsonObject payload)
+    private static bool EvaluatePromptFillsLocalContext(JsonObject state, JsonObject payload, int? measuredPromptTokens = null, bool blockOnEstimate = true)
     {
         var hotContext = ParseInt(Str(state, "local_context"));
         if (hotContext <= 0)
@@ -194,16 +194,56 @@ public static class FluxMuxGatewayRouting
             return false;
         }
 
-        var promptStd = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        // Prefer the model's real token count (from llama-server's input_tokens endpoint) over
+        // the chars/4 estimate. The estimate over-counts for dense tokenizers (Qwen, ~3-4
+        // chars/token), so a prompt well under the window can read as "prompt + reply budget >
+        // window" and get hard-blocked. When we have the real count, use it; otherwise fall
+        // back to the estimate.
+        var promptStd = measuredPromptTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
         var maxTokens = Math.Max(MaxTokensForTurn(state, payload), 0);
         if (LocalChatPayloadSignals.PayloadHasImage(payload)
             && LocalChatPayloadSignals.LatestUserTurnHasImage(payload))
         {
             return promptStd + maxTokens > hotContext
-                || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);
+                || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, measuredPromptTokens: measuredPromptTokens);
         }
 
-        // Blocking decision: the standard 4-chars/token estimate plus the reply
+        // When the model's real token count is unavailable (the llama-server input_tokens
+        // endpoint is missing, timed out, or the server is busy), we only have the chars/4
+        // estimate. That estimate over-counts for dense tokenizers (Qwen, ~3-4 chars/token),
+        // so a prompt well under the window can read as "prompt + reply budget > window" and
+        // get hard-blocked with a false "chat cannot continue" even though there is ample free
+        // context. The estimate is safe for *compaction* (acting early just shortens the
+        // forwarded history — it never blocks), but it is NOT safe for *blocking*: a false
+        // block strands the turn with no recovery path. So when we do not have the real count,
+        // never block on the estimate. A genuine overflow is still caught: llama-server reports
+        // a real exceed_context_size_error, which the gateway already handles (and offers the
+        // reload / compact escape). This is the structural fix for the "false block with ample
+        // free context" incident, which typically surfaced right after a context-fill stress
+        // test (the token counter is busy/timing out, so the estimate path is taken).
+        //
+        // The blockOnEstimate flag lets the *routing* path (DecideRoute, which uses the estimate
+        // to decide whether to offer a cloud hop) still react to a packed estimate, while the
+        // *blocking* path (ShouldBlockLocalForward, blockOnEstimate: false) never hard-blocks on
+        // an estimate. When blockOnEstimate is false and we have no measured count, return false
+        // immediately — the estimate is not safe for blocking.
+        if (measuredPromptTokens is null && !blockOnEstimate)
+        {
+            return false;
+        }
+
+        // "Barely used" guard: when we only have the (over-counting) estimate, never block when
+        // it is comfortably below the window (<= 70% of it) — at that fill level the reply
+        // budget cannot realistically push the turn over the edge, and the model will simply
+        // report a real overflow if the prompt genuinely does not fit. This stops the false
+        // "error state when context is barely used". When we have the real count, the guard is
+        // unnecessary (the count is accurate), so it only applies to the estimate path.
+        if (measuredPromptTokens is null && promptStd * 10 <= hotContext * 7)
+        {
+            return false;
+        }
+
+        // Blocking decision: the prompt (real count or standard estimate) plus the reply
         // budget, or the prompt alone already over the window.
         //
         // The 2-chars/token "filling" estimate is deliberately pessimistic for
@@ -216,8 +256,66 @@ public static class FluxMuxGatewayRouting
         // blocking condition here. It is used only to trigger history
         // compaction (where acting early is safe — it just shortens forwarded
         // history, it never blocks) via ShouldForwardCompact's fillingEstimate.
-        return promptStd + maxTokens > hotContext
-            || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);
+        //
+        // The reply budget (max_tokens) is a *request*, not a guarantee: the model
+        // stops generating when it has finished its answer, which is usually far
+        // shorter than the budget. When the prompt alone fits with meaningful
+        // headroom (>= 20% of the window), the reply budget cannot realistically
+        // push the turn over the edge, so we do NOT block on prompt+maxTokens.
+        // This prevents false "context full" errors when there is plenty of free
+        // context. The prompt-alone check (PromptExceedsContext) still catches
+        // genuine overflows.
+        // The prompt-alone check uses the strict overflow test (prompt > window), NOT
+        // PromptExceedsContext (which reserves a 256-token headroom and would falsely block a
+        // prompt that is merely very close to the window — exactly what the stress test probes).
+        // The model reports a genuine overflow; we only need to stop a prompt that cannot fit at all.
+        bool promptAloneExceeds = PromptAloneExceedsContext(payload, hotContext, measuredPromptTokens: measuredPromptTokens);
+        if (promptAloneExceeds)
+        {
+            return true;
+        }
+
+        // Only block on prompt+reply-budget when the prompt is already close to the
+        // window (less than 10% headroom). At that point the reply budget could
+        // realistically push the turn over the edge. The previous threshold was 20%,
+        // which fired too early (e.g., at 92% fill with a 32k reply budget). 10% is
+        // tighter: the prompt must be within 10% of the window before the reply budget
+        // is considered a realistic overflow risk.
+        int headroom = hotContext - promptStd;
+        if (headroom > 0 && headroom * 10 < hotContext)
+        {
+            return promptStd + maxTokens > hotContext;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when the prompt alone already fills the loaded window. This is the strict
+    /// overflow check used by the blocking path (<see cref="EvaluatePromptFillsLocalContext"/>).
+    ///
+    /// Unlike <see cref="LocalRequestOverlayRouting.PromptExceedsContext"/> — which reserves a
+    /// fixed <c>Headroom</c> (256 tokens) of slack and therefore blocks a prompt that is merely
+    /// very close to the window — this variant blocks only when the prompt genuinely cannot fit
+    /// at all. A 256-token reservation is 0.065% of a 393K window: it hard-blocks a prompt at
+    /// 99.9% fill even though the model has ~98K free tokens and would answer a short reply
+    /// without issue. The context-fill stress test (which deliberately probes near the limit to
+    /// measure TTFT/tok-s up to and past 100% fill) would otherwise be falsely blocked at high
+    /// fill levels. The real overflow is still caught: the model reports it (and
+    /// <see cref="LocalRequestOverlayRouting.PromptExceedsContext"/> still reserves headroom for
+    /// the non-blocking compaction / reload-offer paths, where acting early is safe).
+    /// </summary>
+    public static bool PromptAloneExceedsContext(JsonObject payload, int hotContext, int? measuredPromptTokens = null)
+    {
+        if (hotContext <= 0)
+        {
+            return false;
+        }
+
+        // Prefer the model's real token count over the chars/4 estimate (which over-counts for
+        // dense tokenizers). Same preference as PromptExceedsContext.
+        var promptTokens = measuredPromptTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        return promptTokens > hotContext;
     }
 
     /// <summary>
@@ -226,7 +324,7 @@ public static class FluxMuxGatewayRouting
     /// payload), so the tighter estimate is appropriate here even though it
     /// would over-trip as a blocking condition for dense tokenizers.
     /// </summary>
-    public static bool PromptFillsLocalContextForCompact(JsonObject state, JsonObject payload)
+    public static bool PromptFillsLocalContextForCompact(JsonObject state, JsonObject payload, int? measuredPromptTokens = null)
     {
         var hotContext = ParseInt(Str(state, "local_context"));
         if (hotContext <= 0)
@@ -234,13 +332,15 @@ public static class FluxMuxGatewayRouting
             return false;
         }
 
-        var promptStd = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        // Prefer the model's real token count over the chars/4 estimate for the compact trigger
+        // too, so dense-tokenizer prompts are not compacted on an over-count.
+        var promptStd = measuredPromptTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
         var maxTokens = Math.Max(MaxTokensForTurn(state, payload), 0);
         if (LocalChatPayloadSignals.PayloadHasImage(payload)
             && LocalChatPayloadSignals.LatestUserTurnHasImage(payload))
         {
             return promptStd + maxTokens > hotContext
-                || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);
+                || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, measuredPromptTokens: measuredPromptTokens);
         }
 
         var promptFill = LocalRequestOverlayRouting.EstimatePromptTokens(
@@ -249,7 +349,7 @@ public static class FluxMuxGatewayRouting
 
         return promptFill > hotContext
             || promptStd + maxTokens > hotContext
-            || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext);
+            || LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, measuredPromptTokens: measuredPromptTokens);
     }
 
     private static int MaxTokensForTurn(JsonObject state, JsonObject payload)
@@ -544,7 +644,8 @@ public static class FluxMuxGatewayRouting
         JsonObject state,
         JsonObject payload,
         string? cloudRecommendStatus = null,
-        string? forceRoute = null)
+        string? forceRoute = null,
+        int? measuredPromptTokens = null)
     {
         if (IsForce(forceRoute, Local))
         {
@@ -566,7 +667,11 @@ public static class FluxMuxGatewayRouting
             return false;
         }
 
-        return PromptFillsLocalContext(state, payload);
+        // The blocking path never hard-blocks on the chars/4 estimate (it over-counts for dense
+        // tokenizers and a false block strands the turn with no recovery path). A genuine
+        // overflow is still caught: llama-server reports a real exceed_context_size_error.
+        // The routing path (DecideRoute) still uses the estimate to offer a cloud hop.
+        return PromptFillsLocalContext(state, payload, measuredPromptTokens, blockOnEstimate: false);
     }
 
     private static int MessageBlobLength(JsonObject payload)

@@ -3,8 +3,10 @@ using System.Text.Json.Nodes;
 namespace FluxMux.Avalonia.Services;
 
 /// <summary>
-/// Compact breaks the prompt prefix. Skip llama-server cache_prompt on
-/// that forwarded turn only. Session --no-cache-prompt stays on the profile.
+/// Compact breaks the prompt prefix. Always skip llama-server cache_prompt on
+/// that forwarded turn. This is a correctness guard, not a tuning knob: after a
+/// compact the prefix has changed, so reusing the old KV cache would produce
+/// wrong output. The session --no-cache-prompt flag stays on the profile.
 /// </summary>
 public static class LocalPrefixCachePolicy
 {
@@ -15,12 +17,9 @@ public static class LocalPrefixCachePolicy
             return;
         }
 
-        var live = (rules ?? PortForwardingRules.Defaults).Clamp();
-        if (!live.SkipPrefixCacheAfterCompact)
-        {
-            return;
-        }
-
+        // Always skip the prefix cache after a compact. The SkipPrefixCacheAfterCompact
+        // port-rule is a no-op (always on) because reusing the cache after a compact
+        // is never safe - the prefix has changed.
         payload["cache_prompt"] = false;
     }
 }

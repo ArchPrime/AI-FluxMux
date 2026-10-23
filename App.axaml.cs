@@ -42,21 +42,53 @@ public partial class App : Application
             // Crash diagnostics: write full stack to Desktop on any unhandled exception.
             // In Avalonia 12.1.1 the event lives on Avalonia.Threading.Dispatcher
             // (not on Application); the UI dispatcher is Dispatcher.UIThread.
+            //
+            // Benign exceptions (cancellation, socket teardown during shutdown) are LOGGED
+            // but HANDLED (args.Handled = true) so they do not crash the app. These are
+            // expected during normal shutdown / user-cancelled launches and were previously
+            // crashing the app on every restart.
             Dispatcher.UIThread.UnhandledException += (_, args) =>
             {
-                CrashLogger.LogUnhandled(args.Exception, "Avalonia UI thread (Dispatcher.UnhandledException)");
-                args.Handled = false; // let the normal crash flow continue
+                var ex = args.Exception;
+                // Benign shutdown/cancellation artifacts are expected and should NOT write a
+                // crash report (they were filling the desktop with FluxMux_Crash_*.txt).
+                // Only genuinely unexpected exceptions get a report.
+                if (IsBenignShutdownException(ex))
+                {
+                    args.Handled = true;
+                    return;
+                }
+
+                CrashLogger.LogUnhandled(ex, "Avalonia UI thread (Dispatcher.UnhandledException)");
+                // Anything else still crashes (args.Handled stays false).
+                args.Handled = false;
             };
             AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             {
                 if (args.ExceptionObject is Exception ex)
                 {
-                    CrashLogger.LogUnhandled(ex, "AppDomain.UnhandledException");
+                    // Benign shutdown/cancellation artifacts are expected and should NOT write
+                    // a crash report. Only genuinely unexpected exceptions get a report.
+                    if (!IsBenignShutdownException(ex))
+                    {
+                        CrashLogger.LogUnhandled(ex, "AppDomain.UnhandledException");
+                    }
                 }
             };
             TaskScheduler.UnobservedTaskException += (_, args) =>
             {
+                // Benign socket/cancellation exceptions from fire-and-forget tasks (e.g. a
+                // TCP probe cancelled during shutdown) are EXPECTED and should NOT write a
+                // crash report. Only genuinely unexpected exceptions get a report.
+                if (IsBenignShutdownException(args.Exception))
+                {
+                    // Mark observed so the finalizer thread never rethrows; no report.
+                    args.SetObserved();
+                    return;
+                }
+
                 CrashLogger.LogUnhandled(args.Exception, "TaskScheduler.UnobservedTaskException");
+                // Always mark observed so the finalizer thread never rethrows and crashes.
                 args.SetObserved();
             };
 
@@ -96,6 +128,54 @@ public partial class App : Application
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    /// <summary>
+    /// True when an unhandled exception is a benign shutdown/cancellation artifact that should
+    /// be logged but NOT crash the app. These occur routinely when the user cancels a launch,
+    /// the app is shutting down, or a fire-and-forget TCP probe is torn down mid-connect.
+    /// Treating them as fatal was crashing the app on every restart (see the accumulating
+    /// FluxMux_Crash_*.txt reports).
+    /// </summary>
+    private static bool IsBenignShutdownException(Exception? exception)
+    {
+        // Walk the exception chain (including AggregateException inner exceptions) looking for
+        // a benign type. If any link is benign, the whole thing is a shutdown artifact.
+        var queue = new Queue<Exception?>(new[] { exception });
+        while (queue.Count > 0)
+        {
+            var ex = queue.Dequeue();
+            if (ex is null)
+            {
+                continue;
+            }
+
+            if (ex is OperationCanceledException
+                || ex is TaskCanceledException
+                || ex is ObjectDisposedException
+                || ex is System.Net.Sockets.SocketException
+                || ex is System.Net.Http.HttpRequestException
+                || ex is IOException)
+            {
+                return true;
+            }
+
+            if (ex is AggregateException agg)
+            {
+                foreach (var inner in agg.InnerExceptions)
+                {
+                    queue.Enqueue(inner);
+                }
+                continue;
+            }
+
+            if (ex.InnerException is not null)
+            {
+                queue.Enqueue(ex.InnerException);
+            }
+        }
+
+        return false;
     }
 
     public static void ApplyRequestedTheme(string? theme)

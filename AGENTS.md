@@ -6,6 +6,10 @@ Open **this folder** as the Cursor workspace. The parent `Workspace` git tree al
 
 Do not restructure `MainViewModel.cs` / `FluxMuxRuntimeService.cs` / `MainWindow.axaml` for GitHub cosmetics while behaviour is still changing. Extract a slice only after that behaviour has settled (Health copy, Compact, idle timeout, fingerprints are the pattern). Decompiler leftovers in `FluxMuxRuntimeService.cs` (`goto IL_*`, `if (1 == 0)`, `num`/`text`/`flag`) have been removed — do not reintroduce them, and do not mix a further split of that file with profile, Validate, or NVFP4 launch work.
 
+## Reasoning protocol (always in effect)
+
+When reasoning about a non-trivial problem, lay out **(a) what you've established** (facts confirmed from the code/logs) and **(b) the unresolved dilemmas** (open decisions), then ask the user to decide — **do not cycle/re-derive the same points indefinitely.** If you find yourself re-arguing a point you already made, stop and present the established facts + the specific dilemma instead. This was requested after the agent cycled on the stress-test graph throughput question.
+
 ## Product facts
 
 - Public Endpoint URL / **Port**: `http://127.0.0.1:5001` (change only if Endpoint settings use another port). That is what Client apps call. Several can be active at once (Cline and Harness together) if they all use this Port.

@@ -39,10 +39,11 @@ public static class LocalReloadRouting
         bool compactAlreadyOn,
         string hotModel,
         string hotVariant,
-        bool payloadHasImage = false)
+        bool payloadHasImage = false,
+        bool blockedForContext = false)
     {
         var nearLimit = !promptExceeds && LocalHistoryCompaction.IsNearLimit(turnTokens, hotContext);
-        if (!needVision && !needThinking && !nearLimit && !promptExceeds)
+        if (!needVision && !needThinking && !nearLimit && !promptExceeds && !blockedForContext)
         {
             return null;
         }
@@ -94,7 +95,11 @@ public static class LocalReloadRouting
         var destContext = candidate is null ? 0 : ParseInt(Str(candidate, "context"), 0);
         var destinationTight = candidate is not null
             && LocalHistoryCompaction.IsDestinationTight(destContext, turnTokens);
-        var compactRecommended = !compactAlreadyOn && (destinationTight || nearLimit || promptExceeds);
+        // When the turn is blocked for context reasons (even if promptExceeds/nearLimit are false,
+        // e.g. the reply-budget path), always recommend compact so the user has a "Compact and
+        // retry" escape. This is the graceful-escape fix: a blocked turn must never strand the
+        // user with no recovery path.
+        var compactRecommended = !compactAlreadyOn && (destinationTight || nearLimit || promptExceeds || blockedForContext);
         if (candidate is null && !compactRecommended)
         {
             return null;

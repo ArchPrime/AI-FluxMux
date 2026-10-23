@@ -61,9 +61,16 @@ public static class LocalHistoryCompaction
             return false;
         }
 
-        // Filling uses the tighter 2-chars/token estimate. Compact used to wait
-        // for 85% of the 4-chars/token count, so Cline/Harness 400'd first.
-        return promptExceeds || fillingEstimate || IsNearLimit(promptTokens, contextTokens, rules);
+        // The 2-chars/token "filling" estimate is deliberately pessimistic so a
+        // code-heavy pack is compacted before llama-server 400s. But it doubles
+        // the perceived token count for dense tokenizers (Qwen, ~3-4 chars/token),
+        // so on its own it would trip compaction at roughly half the real context
+        // fill. Gate it: only let the filling estimate fire once the standard
+        // 4-chars/token estimate is already in the filling zone (>= 60% of the
+        // window). Below that the window is not actually filling, so the safe
+        // promptExceeds / IsNearLimit (85% watermark) conditions decide instead.
+        var fillingZone = contextTokens > 0 && promptTokens * 5 >= contextTokens * 3;
+        return promptExceeds || (fillingEstimate && fillingZone) || IsNearLimit(promptTokens, contextTokens, rules);
     }
 
     public static bool IsDestinationTight(int destinationContext, int turnTokens)

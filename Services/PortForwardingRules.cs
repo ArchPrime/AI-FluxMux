@@ -78,6 +78,7 @@ public sealed record PortForwardingRules
     public int MaxForwardedImages { get; init; } = LocalChatPayloadSignals.MaxForwardedImages;
 
     public int FirstByteSeconds { get; init; } = LocalStreamHangPolicy.FirstByteSeconds;
+    public int ThinkingFirstByteSeconds { get; init; } = LocalStreamHangPolicy.ThinkingFirstByteSeconds;
     public int HangQuietSeconds { get; init; } = 15;
     public int ThinkTokensPerSecond { get; init; } = LocalStreamHangPolicy.ThinkTokensPerSecond;
     public int MaxThinkFirstByteSeconds { get; init; } = LocalStreamHangPolicy.MaxThinkFirstByteSeconds;
@@ -152,6 +153,7 @@ public sealed record PortForwardingRules
             MinResultCharsToClear = Math.Clamp(MinResultCharsToClear, 80, 2000),
             MaxForwardedImages = Math.Clamp(MaxForwardedImages, 1, 8),
             FirstByteSeconds = Math.Clamp(FirstByteSeconds, 5, 120),
+            ThinkingFirstByteSeconds = Math.Clamp(ThinkingFirstByteSeconds, 60, 900),
             HangQuietSeconds = Math.Clamp(HangQuietSeconds, 5, 60),
             ThinkTokensPerSecond = Math.Clamp(ThinkTokensPerSecond, 5, 80),
             MaxThinkFirstByteSeconds = Math.Clamp(MaxThinkFirstByteSeconds, 30, 300),

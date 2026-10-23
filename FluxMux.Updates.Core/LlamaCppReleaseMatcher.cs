@@ -141,6 +141,7 @@ public static class LlamaCppReleaseMatcher
         var cudaMinors = serverZips
             .Select(asset => ExtractCudaMinor(asset.Name))
             .Where(minor => minor is not null)
+            .Select(minor => minor!)
             .Distinct(StringComparer.Ordinal)
             .ToList();
         var ambiguous = family.Backend == "cuda" && family.CudaExact is null && cudaMinors.Count > 1;

@@ -366,17 +366,28 @@ public sealed class FluxMuxGatewayRoutingTests
         };
         // 500000 chars + tool history: 4-char est ~125000, +max(16384) >
         // 131072. The standard estimate plus the reply budget genuinely
-        // overflows, so this packed tool-history turn routes to cloud and
-        // blocks local forward.
+        // overflows, so this packed tool-history turn routes to cloud. The
+        // *routing* path (PromptFillsLocalContext, default blockOnEstimate: true)
+        // still reacts to the estimate to offer a cloud hop. The *blocking* path
+        // (ShouldBlockLocalForward, blockOnEstimate: false) does NOT hard-block on
+        // the estimate — a genuine overflow is caught by llama-server's real
+        // exceed_context_size_error instead.
         var filling = ChatPayloadWithToolHistory(new string('n', 500000));
         Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, filling));
         var fillingRoute = FluxMuxGatewayRouting.DecideRoute(state, filling);
         Assert.Equal(FluxMuxGatewayRouting.CloudConsent, fillingRoute.Kind);
         Assert.Equal(FluxMuxGatewayRouting.FillingCloudConsentReason, fillingRoute.ConsentReason);
-        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+        // The blocking path does NOT hard-block on the estimate (the structural fix).
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
             FluxMuxGatewayRouting.Local,
             state,
             filling));
+        // A genuine measured overflow still blocks.
+        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            filling,
+            measuredPromptTokens: 125000));
     }
 
     [Fact]
@@ -662,14 +673,26 @@ public sealed class FluxMuxGatewayRoutingTests
         };
         // 500000 chars: 4-char est = 125000, +max(16384) = 141384 > 131072.
         // The standard estimate plus the reply budget genuinely overflows the
-        // window, so this packed turn blocks (and routes to cloud when ready).
+        // window, so this packed turn routes to cloud when ready. The *routing* path
+        // (PromptFillsLocalContext, default blockOnEstimate: true) still reacts to the
+        // estimate to offer a cloud hop. The *blocking* path (ShouldBlockLocalForward,
+        // blockOnEstimate: false) does NOT hard-block on the estimate — a genuine overflow
+        // is caught by llama-server's real exceed_context_size_error instead.
         var payload = ChatPayload(new string('n', 500000));
 
+        // Routing path: the estimate still triggers the filling classification.
         Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
-        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+        // Blocking path: the estimate does NOT hard-block (the structural fix).
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
             FluxMuxGatewayRouting.Local,
             state,
             payload));
+        // A genuine measured overflow still blocks.
+        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload,
+            measuredPromptTokens: 125000));
         var route = FluxMuxGatewayRouting.DecideRoute(state, payload);
         Assert.Equal(FluxMuxGatewayRouting.CloudConsent, route.Kind);
         Assert.Equal(FluxMuxGatewayRouting.FillingCloudConsentReason, route.ConsentReason);
@@ -700,6 +723,224 @@ public sealed class FluxMuxGatewayRoutingTests
             state,
             payload));
         Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContextForCompact(state, payload));
+    }
+
+    [Fact]
+    public void Prompt_barely_using_the_window_is_never_blocked_even_with_a_large_reply_budget()
+    {
+        // Reproduces the "error state when context is barely used" report: a prompt that is
+        // really well under the loaded window must not be hard-blocked just because the
+        // 4-chars/token estimate plus a large reply budget reads as "> window". The model has
+        // plenty of room, so the turn should forward; if it genuinely overflows, llama-server
+        // reports a real exceed_context_size_error instead.
+        var state = HarnessDualReadyState();
+        state["local_context"] = 262144;
+        state["local_overlays"] = new JsonArray
+        {
+            new JsonObject { ["variant"] = "max context", ["max_tokens"] = 32768 }
+        };
+        // ~120k raw chars: 4-char estimate = 30k (~11% of 262144). 30k + 32768 = 62768,
+        // far under the window, but the over-counting estimate must not block it.
+        var payload = ChatPayload(new string('n', 120000));
+        payload["max_tokens"] = 32768;
+
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload));
+    }
+
+    [Fact]
+    public void Prompt_near_the_window_still_blocks_despite_the_barely_used_guard()
+    {
+        // The barely-used guard must not swallow genuine overflows: when the standard
+        // estimate is already near/over the window, the *routing* path still classifies the
+        // turn as filling. The *blocking* path (ShouldBlockLocalForward) does NOT hard-block
+        // on the estimate (the structural fix) — a genuine overflow is caught by llama-server's
+        // real exceed_context_size_error instead.
+        var state = HarnessDualReadyState();
+        state["local_context"] = 131072;
+        state["local_overlays"] = new JsonArray
+        {
+            new JsonObject { ["variant"] = "vision", ["max_tokens"] = 16384 }
+        };
+        // 500000 chars: 4-char estimate = 125000 (> 70% of 131072), +16384 = 141384 > 131072.
+        var payload = ChatPayload(new string('n', 500000));
+        payload["max_tokens"] = 16384;
+
+        // Routing path: the estimate still triggers the filling classification.
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        // Blocking path: the estimate does NOT hard-block (the structural fix).
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload));
+        // A genuine measured overflow still blocks.
+        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload,
+            measuredPromptTokens: 125000));
+    }
+
+    [Fact]
+    public void Measured_token_count_overrides_the_estimate_for_blocking()
+    {
+        // When the model's real token count is available (from llama-server's input_tokens
+        // endpoint), it is used instead of the chars/4 estimate. A prompt whose estimate is
+        // near the window but whose real count is far below it must NOT block.
+        var state = HarnessDualReadyState();
+        state["local_context"] = 131072;
+        state["local_overlays"] = new JsonArray
+        {
+            new JsonObject { ["variant"] = "vision", ["max_tokens"] = 16384 }
+        };
+        // 500000 chars: 4-char estimate = 125000 (near the window, would block on estimate).
+        var payload = ChatPayload(new string('n', 500000));
+        payload["max_tokens"] = 16384;
+
+        // Routing path: the estimate still triggers the filling classification.
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        // Blocking path: the estimate does NOT hard-block (the structural fix).
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload));
+        // ...but the real count (30k, well under the window) does not block either.
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload, measuredPromptTokens: 30000));
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload,
+            measuredPromptTokens: 30000));
+    }
+
+    [Fact]
+    public void Measured_token_count_near_window_still_blocks()
+    {
+        // The real count is authoritative: when it is near/over the window, the turn blocks
+        // even if the (under-counting) estimate would not.
+        var state = HarnessDualReadyState();
+        state["local_context"] = 131072;
+        state["local_overlays"] = new JsonArray
+        {
+            new JsonObject { ["variant"] = "vision", ["max_tokens"] = 16384 }
+        };
+        var payload = ChatPayload(new string('n', 10000));
+        payload["max_tokens"] = 16384;
+
+        // Estimate (2500 tokens) is tiny, but the real count (120k) + reply budget (16384)
+        // = 136384 > 131072, so it blocks.
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload));
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload, measuredPromptTokens: 120000));
+        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload,
+            measuredPromptTokens: 120000));
+    }
+
+    [Fact]
+    public void Measured_prompt_near_window_does_not_block_when_it_still_fits()
+    {
+        // Regression: the context-fill stress test probes up to and past 100% of the context
+        // limit. A prompt at 75% of a 393K window (294,912 tokens) left ~98K free, yet the old
+        // prompt-alone check (PromptExceedsContext, which reserves a 256-token headroom) plus
+        // the <20%-headroom reply-budget rule hard-blocked it with a false "prompt already
+        // fills the window". The strict overflow test (prompt > window) must NOT block a prompt
+        // that genuinely still fits, even very close to the window.
+        var state = HarnessDualReadyState();
+        state["local_context"] = 393216;
+        state["local_overlays"] = new JsonArray
+        {
+            new JsonObject { ["variant"] = "default", ["max_tokens"] = 32768 }
+        };
+        // A real measured count at 75% fill. The estimate path is irrelevant here (we pass the
+        // real count), so the payload text can be short.
+        var payload = ChatPayload("summarize the key points above in one short sentence");
+        payload["max_tokens"] = 32;
+
+        // 294,912 tokens < 393,216 window: the prompt alone does not exceed the context.
+        Assert.False(FluxMuxGatewayRouting.PromptAloneExceedsContext(payload, 393216, measuredPromptTokens: 294912));
+        // And the full blocking decision must not block it either.
+        Assert.False(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload, measuredPromptTokens: 294912));
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload,
+            measuredPromptTokens: 294912));
+    }
+
+    [Fact]
+    public void Measured_prompt_over_window_still_blocks()
+    {
+        // The strict overflow test still catches a genuine overflow: a prompt whose real count
+        // exceeds the window is blocked even though it is not "close" in the <20%-headroom sense
+        // (it is already over the top).
+        var state = HarnessDualReadyState();
+        state["local_context"] = 393216;
+        var payload = ChatPayload("summarize the key points above in one short sentence");
+        payload["max_tokens"] = 32;
+
+        // 400,000 tokens > 393,216 window: genuine overflow.
+        Assert.True(FluxMuxGatewayRouting.PromptAloneExceedsContext(payload, 393216, measuredPromptTokens: 400000));
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload, measuredPromptTokens: 400000));
+        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload,
+            measuredPromptTokens: 400000));
+    }
+
+    [Fact]
+    public void Prompt_exactly_at_window_does_not_block()
+    {
+        // A prompt whose real count equals the window exactly is not "over" it — the model has
+        // room for at least a single reply token. Only strictly-greater counts block.
+        var payload = ChatPayload("x");
+        Assert.False(FluxMuxGatewayRouting.PromptAloneExceedsContext(payload, 393216, measuredPromptTokens: 393216));
+        Assert.True(FluxMuxGatewayRouting.PromptAloneExceedsContext(payload, 393216, measuredPromptTokens: 393217));
+    }
+
+    [Fact]
+    public void Estimate_only_path_never_blocks_even_when_estimate_plus_budget_overflows()
+    {
+        // Structural fix for the "false block with ample free context" incident: when the model's
+        // real token count is unavailable (the llama-server input_tokens endpoint is missing,
+        // timed out, or the server is busy — e.g. right after a context-fill stress test), the
+        // *blocking* path (ShouldBlockLocalForward) must NOT hard-block on the chars/4 estimate.
+        // The estimate over-counts for dense tokenizers (Qwen, ~3-4 chars/token), so a prompt
+        // well under the window can read as "prompt + reply budget > window" and get hard-blocked
+        // with no recovery path. A genuine overflow is still caught: llama-server reports a real
+        // exceed_context_size_error. The *routing* path (PromptFillsLocalContext, default
+        // blockOnEstimate: true) still reacts to the estimate to offer a cloud hop.
+        var state = HarnessDualReadyState();
+        state["local_context"] = 131072;
+        state["local_overlays"] = new JsonArray
+        {
+            new JsonObject { ["variant"] = "vision", ["max_tokens"] = 16384 }
+        };
+        // 500000 chars: 4-char estimate = 125000, +16384 = 141384 > 131072. On the estimate
+        // path this would have blocked before the fix. It must NOT block now.
+        var payload = ChatPayload(new string('n', 500000));
+        payload["max_tokens"] = 16384;
+
+        // Routing path: the estimate still triggers the filling classification.
+        Assert.True(FluxMuxGatewayRouting.PromptFillsLocalContext(state, payload, measuredPromptTokens: null));
+        // Blocking path: the estimate does NOT hard-block (the structural fix).
+        Assert.False(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload,
+            measuredPromptTokens: null));
+
+        // The same prompt with a genuine measured overflow still blocks.
+        Assert.True(FluxMuxGatewayRouting.ShouldBlockLocalForward(
+            FluxMuxGatewayRouting.Local,
+            state,
+            payload,
+            measuredPromptTokens: 125000));
     }
 
     [Fact]

@@ -11,6 +11,13 @@ namespace FluxMux.Avalonia.Services;
 public static class CloudEndpointValidationProbe
 {
     public const string ForceRouteHeader = "X-FluxMux-Force-Route";
+    /// <summary>
+    /// Marks a request as an internal probe (e.g. the context-fill stress test). Probe
+    /// requests measure raw prefill/decode at a given fill level and must NOT be steered:
+    /// the gateway skips the "large document" context dialog for them so the test is not
+    /// interrupted (or compromised) by a steering decision.
+    /// </summary>
+    public const string ProbeRequestHeader = "X-FluxMux-Probe-Request";
     public const string UserText = "Reply with the single word OK.";
     public const int MaxTokens = 1024;
 

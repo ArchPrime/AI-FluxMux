@@ -274,6 +274,20 @@ public partial class MainViewModel : ViewModelBase
     private bool _dependencyTabInitialized;
     private CancellationTokenSource? _localReadinessPollCts;
     private CancellationTokenSource? _localLaunchCountdownCts;
+    // Cancellation source for the on-demand context-fill stress test. Set while the test
+    // is running so the "Cancel stress test" button can stop it early.
+    private CancellationTokenSource? _stressTestCts;
+    // Set to true when the countdown is stopped, so the background task can't write a
+    // stale frame after the stop is posted (the task may be mid-iteration when the stop
+    // is dispatched to the UI thread). Checked before each write to the countdown text.
+    private volatile bool _localLaunchCountdownStopped;
+    // Continuous launch-start timestamp for the countdown timer. Set once when the
+    // countdown monitor starts and NOT reset when the launch phase changes, so the
+    // "elapsed" / "estimated time left" figures span the whole launch (pre-warmup →
+    // cold load → testing endpoint → awaiting response) instead of restarting at each
+    // stage. Aligned with the launchStartedUtc baseline that the recorded launch
+    // telemetry (readyMs) is measured against.
+    private DateTime _localLaunchCountdownStartUtc = DateTime.MinValue;
     private CancellationTokenSource? _localValidateCts;
     private CancellationTokenSource? _activeEndpointHealthCts;
     private bool _benchmarkStatusActive;
@@ -400,6 +414,10 @@ public partial class MainViewModel : ViewModelBase
         _runtimeService.PortRulesTelemetryNotice += snap =>
         {
             SafeUiInvoke(() => ApplyPortRulesTelemetry(snap));
+        };
+        _runtimeService.HailMaryOffered += line =>
+        {
+            SafeUiInvoke(() => ApplyHailMaryOffer(line));
         };
 
         var startupNotice = _runtimeService.ConsumeStartupRuntimeNotice();
@@ -670,7 +688,8 @@ public partial class MainViewModel : ViewModelBase
     public bool CanStopHarnessWeb => ShowHarnessSetupPanel && IsHarnessWebRunning;
 
     public bool ShowHarnessStopUnavailableHint =>
-        ShowHarnessSetupPanel && _harnessWebUiReachable && !IsHarnessWebRunning;
+        ShowHarnessSetupPanel && _harnessWebUiReachable && !IsHarnessWebRunning
+        && !DeepSeekHarnessWebHost.LaunchLogIndicatesFluxMuxManaged((int)HarnessWebPort);
 
     public string HarnessStopUnavailableHint =>
         "Harness web is already running on "
@@ -1173,11 +1192,20 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand(CanExecute = nameof(CanStopHarnessWeb))]
     private void StopHarnessWeb()
     {
+        var port = (int)HarnessWebPort;
         _harnessStartCts?.Cancel();
         _harnessWebStopIntentional = true;
-        _harnessWebHost.Stop((int)HarnessWebPort);
+        _harnessWebHost.Stop(port);
         _harnessLaunchedByThisFluxMuxSession = false;
         _harnessStartedUtc = null;
+
+        // After Stop, if the port is already free the PID record is stale — clear it so
+        // a later external dsh web on the same port does not keep the stop button armed.
+        if (!DeepSeekHarnessWebHost.IsPortListening(port))
+        {
+            DeepSeekHarnessWebHost.ClearPidRecord();
+        }
+
         SetHarnessWebUiReachable(false);
         HarnessWebUiStatusText = "Stopped DeepSeek Harness web started by AI-FluxMux.";
         StatusMessage = "DeepSeek Harness web stopped.";
@@ -1365,7 +1393,8 @@ public partial class MainViewModel : ViewModelBase
             ResolveHarnessYamlMaxTokens(),
             ResolveHarnessYamlImagesOn(),
             ResolveHarnessYamlReasoningOn(),
-            ResolveHarnessYamlModelDisplayName());
+            ResolveHarnessYamlModelDisplayName(),
+            ResolveRunningProfileExtendContextIntoRam() ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : 0);
     }
 
     private bool ResolveHarnessYamlReasoningOn()
@@ -1771,9 +1800,49 @@ public partial class MainViewModel : ViewModelBase
             ResolveClineImagesOn(),
             ResolveHarnessYamlReasoningOn(),
             ResolveHarnessYamlModelDisplayName(),
-            FluxMuxGatewayModels.LocalModelId,
+            ResolveClineModelId(),
             SelectedEndpointApp.Equals("DeepSeek Harness", StringComparison.OrdinalIgnoreCase)
-                || HarnessWebIsInPlay);
+                || HarnessWebIsInPlay,
+            ResolveRunningProfileExtendContextIntoRam() ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : 0);
+
+    /// <summary>
+    /// Reads the YaRN "Extend context into RAM" flag directly from the running profile's
+    /// settings on disk, rather than relying on the UI property <see cref="LocalVariantExtendContextIntoRam"/>
+    /// which may not yet be loaded when the Cline sync fires (e.g. right after a launch,
+    /// before the user has navigated to the profile editor). This ensures the Cline context
+    /// window is set to the YaRN-aware cap (1M) instead of the default 262144.
+    /// </summary>
+    private bool ResolveRunningProfileExtendContextIntoRam()
+    {
+        if (string.IsNullOrWhiteSpace(_runningLocalModel))
+        {
+            return LocalVariantExtendContextIntoRam;
+        }
+
+        var settings = GetLiveLocalProfileSettings(_runningLocalVariant, _runningLocalModel);
+        if (settings is null)
+        {
+            return LocalVariantExtendContextIntoRam;
+        }
+
+        return ParseBool(settings["LocalExtendContextIntoRam"]?.ToString() ?? string.Empty, LocalVariantExtendContextIntoRam);
+    }
+
+    /// <summary>
+    /// Returns the formatted profile ID (model + variant) for the currently-loaded
+    /// local profile, so the Cline sync updates both the "local" entry and the
+    /// specific profile entry in models.json. Falls back to "local" when no profile
+    /// is loaded.
+    /// </summary>
+    private string ResolveClineModelId()
+    {
+        if (string.IsNullOrWhiteSpace(_runningLocalModel))
+        {
+            return FluxMuxGatewayModels.LocalModelId;
+        }
+
+        return FluxMuxGatewayModels.FormatProfileId(_runningLocalModel, _runningLocalVariant);
+    }
 
     private int ResolveClineContextWindow()
     {
@@ -2405,6 +2474,24 @@ public partial class MainViewModel : ViewModelBase
         }
 
         _config.SetBool("InterventionPopupsEnabled", value);
+        SaveCurrentSelections();
+    }
+
+    /// <summary>
+    /// When true, AI-FluxMux loads the currently-selected Quick Select profile automatically
+    /// on startup (after the gateway is ready). Persisted to config.
+    /// </summary>
+    [ObservableProperty]
+    public partial bool LoadSelectedProfileOnStartup { get; set; }
+
+    partial void OnLoadSelectedProfileOnStartupChanged(bool value)
+    {
+        if (_isLoadingConfig)
+        {
+            return;
+        }
+
+        _config.SetBool("LoadSelectedProfileOnStartup", value);
         SaveCurrentSelections();
     }
 
@@ -3077,6 +3164,7 @@ public partial class MainViewModel : ViewModelBase
             : snapshot.CpuCores.ToString(CultureInfo.InvariantCulture) + " logical processors";
         CpuGauge.Tooltip = "CPU " + CpuGauge.PercentText + " across " + snapshot.CpuCores
             + " logical processors. Updated about once a second.";
+        UpdateContextGauge();
         NoteActiveQuickSelectInFlightTransition();
         RefreshGenerationSpeedTelemetry();
         RefreshLastRouteExplanation();
@@ -3088,6 +3176,41 @@ public partial class MainViewModel : ViewModelBase
         }
 
         MaybeReconcileHarnessWebState();
+    }
+
+    /// <summary>
+    /// Updates the live "Context" gauge from the gateway's measured prompt-token count.
+    /// Shows the current prompt's token usage vs. the loaded profile's context limit.
+    /// </summary>
+    private void UpdateContextGauge()
+    {
+        try
+        {
+            var (promptTokens, contextLimit, model) = _runtimeService.ReadLocalContextUsage();
+            if (contextLimit > 0 && promptTokens > 0)
+            {
+                var percent = Math.Clamp(100.0 * promptTokens / contextLimit, 0, 100);
+                ContextGauge.Percent = percent;
+                ContextGauge.PercentText = percent.ToString("0", CultureInfo.InvariantCulture) + "%";
+                ContextGauge.DetailText = promptTokens.ToString("0", CultureInfo.InvariantCulture)
+                    + " / " + contextLimit.ToString("0", CultureInfo.InvariantCulture) + " tokens";
+                ContextGauge.Badge = string.IsNullOrEmpty(model) ? string.Empty : model.Length > 18 ? model[..18] + "…" : model;
+                ContextGauge.Tooltip = "Context fill: " + ContextGauge.DetailText
+                    + " (" + ContextGauge.PercentText + "). Measured by the model's tokenizer each turn.";
+            }
+            else
+            {
+                ContextGauge.Percent = 0;
+                ContextGauge.PercentText = "—";
+                ContextGauge.DetailText = "Waiting for a turn…";
+                ContextGauge.Badge = string.Empty;
+                ContextGauge.Tooltip = "Context fill updates after each turn is measured by the model's tokenizer.";
+            }
+        }
+        catch
+        {
+            // Best-effort: a gauge read failure must not break the telemetry loop.
+        }
     }
 
     private void RefreshGenerationSpeedTelemetry()
@@ -3537,6 +3660,94 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial bool LocalReloadCompactVisible { get; set; }
 
+    // Hail Mary banner: shown when a turn 400s on context overflow and the non-destructive
+    // prune pipeline (stages 1-4) already ran but the turn still can't fit. The button runs
+    // the destructive stage-5 middle-cut and re-sends the turn.
+    [ObservableProperty]
+    public partial bool HailMaryBannerVisible { get; set; }
+
+    [ObservableProperty]
+    public partial string HailMaryBannerText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string HailMaryBannerTooltip { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial int HailMaryBannerUrgency { get; set; }
+
+    partial void OnHailMaryBannerUrgencyChanged(int value)
+    {
+        OnPropertyChanged(nameof(HailMaryBannerAccentBrush));
+        OnPropertyChanged(nameof(HailMaryBannerBackgroundBrush));
+    }
+
+    public IBrush HailMaryBannerAccentBrush
+    {
+        get
+        {
+            var brush = HailMaryBannerUrgency switch
+            {
+                0 => new SolidColorBrush(Color.Parse("#E5484D")), // red
+                1 => new SolidColorBrush(Color.Parse("#F5A524")), // amber
+                _ => new SolidColorBrush(Color.Parse("#3B82F6"))  // blue
+            };
+            return brush;
+        }
+    }
+
+    public IBrush HailMaryBannerBackgroundBrush
+    {
+        get
+        {
+            var brush = HailMaryBannerUrgency switch
+            {
+                0 => new SolidColorBrush(Color.Parse("#FDEBEC")),
+                1 => new SolidColorBrush(Color.Parse("#FEF3C7")),
+                _ => new SolidColorBrush(Color.Parse("#DBEAFE"))
+            };
+            return brush;
+        }
+    }
+
+    [ObservableProperty]
+    public partial int LocalReloadRecommendUrgency { get; set; }
+
+    partial void OnLocalReloadRecommendUrgencyChanged(int value)
+    {
+        OnPropertyChanged(nameof(LocalReloadRecommendAccentBrush));
+        OnPropertyChanged(nameof(LocalReloadRecommendBackgroundBrush));
+    }
+
+    public IBrush LocalReloadRecommendAccentBrush
+    {
+        get
+        {
+            var urgency = LocalReloadRecommendUrgency;
+            if (urgency >= 2)
+                return new SolidColorBrush(Color.FromRgb(0xE5, 0x39, 0x35)); // red - critical
+            if (urgency >= 1)
+                return new SolidColorBrush(Color.FromRgb(0xFF, 0x98, 0x00)); // amber - warning
+            return new SolidColorBrush(Color.FromRgb(0x1E, 0x88, 0xE5)); // blue - normal
+        }
+    }
+
+    /// <summary>
+    /// A low-opacity version of the accent color, used as the dialog background so the entire
+    /// dialog is tinted by severity (red/amber/blue) for at-a-glance recognition.
+    /// </summary>
+    public IBrush LocalReloadRecommendBackgroundBrush
+    {
+        get
+        {
+            var urgency = LocalReloadRecommendUrgency;
+            if (urgency >= 2)
+                return new SolidColorBrush(Color.FromArgb(0x33, 0xE5, 0x39, 0x35)); // red @ 20%
+            if (urgency >= 1)
+                return new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0x98, 0x00)); // amber @ 20%
+            return new SolidColorBrush(Color.FromArgb(0x33, 0x1E, 0x88, 0xE5)); // blue @ 20%
+        }
+    }
+
     // Document context dialog properties
     [ObservableProperty]
     public partial bool DocumentContextDialogVisible { get; set; }
@@ -3546,6 +3757,52 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     public partial int DocumentContextKeepTurns { get; set; } = 3;
+
+    // True while the context-fill stress test is running (drives the Cancel button).
+    [ObservableProperty]
+    public partial bool StressTestRunning { get; set; }
+
+    partial void OnStressTestRunningChanged(bool value)
+    {
+        // When the stress test starts, expand the diagnostics panel row to roughly double its
+        // default pixel height. The main tabs row is 1* with MinHeight=160, so a 0.45*
+        // diagnostics row gets ~31% of the shared space. To get ~double the pixel height,
+        // the diagnostics row needs a much larger star weight: 1.8* gives ~64% of the shared
+        // space, which is roughly double the 31% the default gets. When the test stops,
+        // restore the default split.
+        DiagnosticsRowHeight = value ? new GridLength(1.8, GridUnitType.Star) : new GridLength(0.45, GridUnitType.Star);
+    }
+
+    // The height of the diagnostics panel row (Row 3 of MainLayoutGrid). Normally 0.45* so the
+    // main tabs get more space; expands to 1.8* (~double the default pixel height) when the
+    // stress test is running so the live telemetry graph has room to show the bars and axes.
+    [ObservableProperty]
+    public partial GridLength DiagnosticsRowHeight { get; set; } = new(0.45, GridUnitType.Star);
+
+    // How the context-fill stress test drives each fill level. Progressive (default) builds a
+    // realistic multi-turn conversation up to the target, measuring the model's real token
+    // count each turn — most faithful to real chat. SinglePrompt sends one diverse prompt
+    // per level (faster). Bound to a UI toggle.
+    [ObservableProperty]
+    public partial Services.ContextFillMode StressTestMode { get; set; } = Services.ContextFillMode.Progressive;
+
+    // Display options for the stress-test mode selector in the UI.
+    public IReadOnlyList<string> StressTestModeOptions { get; } =
+    [
+        "Progressive (real chat)",
+        "Single prompt (fast)"
+    ];
+
+    // The selected mode option (bound to the ComboBox). Maps to StressTestMode.
+    [ObservableProperty]
+    public partial string SelectedStressTestMode { get; set; } = "Progressive (real chat)";
+
+    partial void OnSelectedStressTestModeChanged(string value)
+    {
+        StressTestMode = value.StartsWith("Single", StringComparison.OrdinalIgnoreCase)
+            ? Services.ContextFillMode.SinglePrompt
+            : Services.ContextFillMode.Progressive;
+    }
 
     [ObservableProperty]
     public partial bool DocumentContextSummarizeWarningVisible { get; set; }
@@ -3626,6 +3883,25 @@ public partial class MainViewModel : ViewModelBase
         LocalReloadRecommendVisible = false;
         StatusMessage = "Keeping the current local profile. Similar reload suggestions are suppressed for 15 minutes.";
         RefreshLocalReloadRecommendBanner();
+    }
+
+    [RelayCommand]
+    private void HailMaryShrinkTurn()
+    {
+        // The non-destructive prune pipeline (stages 1-4) already ran automatically when the
+        // turn 400'd on context overflow. This button runs the destructive stage-5 middle-cut
+        // and asks the gateway to re-send the turn. The gateway applies the middle-cut to the
+        // last payload it saw and retries.
+        HailMaryBannerVisible = false;
+        StatusMessage = "Hail Mary: cutting the middle of this chat's history to make room. Re-sending the turn…";
+        _runtimeService.RequestHailMaryMiddleCut();
+    }
+
+    [RelayCommand]
+    private void DismissHailMaryBanner()
+    {
+        HailMaryBannerVisible = false;
+        _runtimeService.DismissHailMaryBanner();
     }
 
     [RelayCommand]
@@ -3791,6 +4067,19 @@ public partial class MainViewModel : ViewModelBase
     public LiveUtilizationGaugeViewModel RamGauge { get; } = new() { Title = "CPU RAM" };
 
     public LiveUtilizationGaugeViewModel CpuGauge { get; } = new() { Title = "CPU util" };
+
+    // Live context-fill gauge: shows the current prompt's token usage vs. the loaded
+    // profile's context limit. Updated from the gateway's measured prompt-token count.
+    public LiveUtilizationGaugeViewModel ContextGauge { get; } = new() { Title = "Context" };
+
+    // Live telemetry graph: plots time-series or curve data (context-fill stress test,
+    // launch progress, model-switch progress, chat port-rule triggers, etc.). Points are
+    // added incrementally as data arrives, and the graph updates live.
+    public TelemetryGraphViewModel TelemetryGraph { get; } = new();
+
+    // Second telemetry graph for the context-fill stress test: plots tok/s (throughput)
+    // alongside TTFT (latency). This shows the tradeoff between speed and context fill.
+    public TelemetryGraphViewModel TelemetryGraphThroughput { get; } = new();
 
     public const string GpuVramScanningText = "scanning....";
 
@@ -4029,8 +4318,260 @@ public partial class MainViewModel : ViewModelBase
     {
         if (!_benchmarkStatusActive && !_suppressStatusDiagnostic)
         {
-            AppendDiagnosticEntry("STATUS", value);
+            // Log a concise single-line form to the terminal (the status bar keeps the
+            // full text). Launch phases are the verbose ones that word-wrap.
+            AppendDiagnosticEntry("STATUS", ConciseDiagnosticStatus(value));
         }
+    }
+
+    /// <summary>
+    /// Shortens verbose launch/switch status lines into compact single-line forms for the
+    /// diagnostic terminal, so they don't word-wrap. Non-launch status lines pass through
+    /// unchanged. The user-facing status bar keeps the full text; only the terminal log
+    /// uses this compact form.
+    /// </summary>
+    private static string ConciseDiagnosticStatus(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return value;
+        }
+
+        // Launch/switch phases: strip the "{slotLabel}:" prefix and shorten the verb.
+        var text = value;
+        var colonIdx = text.IndexOf(':');
+        if (colonIdx > 0 && colonIdx < 40)
+        {
+            var prefix = text[..colonIdx].Trim();
+            if (prefix.Length <= 24 && !prefix.Contains(' '))
+            {
+                text = text[(colonIdx + 1)..].TrimStart();
+            }
+        }
+
+        if (text.StartsWith("stopping the active cloud route", StringComparison.OrdinalIgnoreCase)
+            || text.StartsWith("stopping active cloud route", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: stopping cloud route";
+        }
+        if (text.StartsWith("restarting cloud route", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: restarting cloud route";
+        }
+        if (text.StartsWith("this profile is already running", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: already running";
+        }
+        if (text.StartsWith("launching local model endpoint", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: starting local model";
+        }
+        if (text.StartsWith("restarting local model endpoint", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: restarting local model";
+        }
+        if (text.StartsWith("launching an extended-context (YaRN) profile", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: YaRN profile (cold load can take several minutes)";
+        }
+        if (text.StartsWith("stopping the active managed local runtime", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: stopping local runtime";
+        }
+        if (text.StartsWith("stopping the active cloud route before local launch", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: stopping cloud, starting local";
+        }
+        if (text.StartsWith("Context set to", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: context changed, re-launching";
+        }
+        if (text.StartsWith("Local route ready", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: ready";
+        }
+        if (text.StartsWith("llama-server is ready on the daemon port", StringComparison.OrdinalIgnoreCase))
+        {
+            return "launch: daemon port ready, checking public endpoint";
+        }
+
+        // Countdown monitor lines: "llama-server is loading {target}... cold-load wait X | estimated time left Y"
+        // and "{phase}: {target} | estimated time left Y" / "... taking longer than expected by Y".
+        // Compact to a SHORT single line that won't word-wrap in the terminal:
+        //   "loading {model} · {phase} · {timer}"
+        // The full text stays in the status bar; only the terminal log uses this compact form.
+        if (text.StartsWith("llama-server is loading", StringComparison.OrdinalIgnoreCase)
+            || (text.IndexOf('|') > 0 && text.Length - text.IndexOf('|') < 60
+                && (text.Contains("estimated time left", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("taking longer", StringComparison.OrdinalIgnoreCase)
+                    || text.Contains("elapsed", StringComparison.OrdinalIgnoreCase))))
+        {
+            var pipeIdx = text.IndexOf('|');
+            var left = (pipeIdx > 0 ? text[..pipeIdx] : text).Trim();
+            var right = pipeIdx > 0 ? text[(pipeIdx + 1)..].Trim() : string.Empty;
+
+            // Strip the "llama-server is loading " prefix from the left.
+            if (left.StartsWith("llama-server is loading", StringComparison.OrdinalIgnoreCase))
+            {
+                left = left["llama-server is loading".Length..].Trim();
+            }
+            // The left is now "{model}... cold-load wait {estimate}" or "{model}... elapsed {elapsed}"
+            // (case 1: phase is "Loading model"), or "{phase}: {target}" (case 2: phase is not
+            // "Loading model"). Extract just the model name from the left.
+            var ellipsisIdx = left.IndexOf("...", StringComparison.Ordinal);
+            if (ellipsisIdx > 0)
+            {
+                // Case 1: left is "{target}... cold-load wait {estimate}" or "{target}... elapsed {elapsed}".
+                // Split on "..." and keep the first part (the target).
+                left = left[..ellipsisIdx].Trim();
+            }
+            else
+            {
+                // Case 2: left is "{phase}: {target}". Split on ": " and keep the second part (the target).
+                var colonIndex = left.IndexOf(": ", StringComparison.Ordinal);
+                if (colonIndex > 0)
+                {
+                    left = left[(colonIndex + 2)..].Trim();
+                }
+                else
+                {
+                    left = left.TrimEnd('.').Trim();
+                }
+            }
+
+            // The left is now the target, which is "{model} / {variant}" or just "{model}".
+            // Split on " / " and keep the first part (the model name) so the compact line
+            // is short and doesn't word-wrap.
+            var slashIdx = left.IndexOf(" / ", StringComparison.Ordinal);
+            if (slashIdx > 0)
+            {
+                left = left[..slashIdx].Trim();
+            }
+
+            // Extract just the timer figure from the right (e.g. "20s", "3m 12s", "12s").
+            var timer = ExtractTimerFigure(right, left);
+
+            // Determine the phase from the right fragment's verb.
+            var phase = "loading";
+            if (right.Contains("taking longer", StringComparison.OrdinalIgnoreCase))
+            {
+                phase = "running long";
+            }
+            else if (right.Contains("estimated time left", StringComparison.OrdinalIgnoreCase))
+            {
+                phase = "est left";
+            }
+            else if (left.Contains("elapsed", StringComparison.OrdinalIgnoreCase) || right.Contains("elapsed", StringComparison.OrdinalIgnoreCase))
+            {
+                phase = "elapsed";
+            }
+            else if (left.Length > 0 && !left.Contains("loading", StringComparison.OrdinalIgnoreCase))
+            {
+                // The left is a phase label like "AI-FluxMux is testing the public endpoint".
+                phase = ShortenPhaseLabel(left);
+            }
+
+            var model = left.Length > 0 ? left : "model";
+            return $"loading {model} · {phase} · {timer}";
+        }
+
+        return value;
+    }
+
+    /// <summary>
+    /// Pulls just the trailing duration figure out of a countdown fragment, e.g.
+    /// "estimated time left 20s" → "20s", "taking longer than expected by 3m 12s" → "3m 12s",
+    /// "elapsed 45s" → "45s". Falls back to the whole fragment when no figure is found.
+    /// </summary>
+    private static string ExtractTimerFigure(string right, string left)
+    {
+        var source = right.Length > 0 ? right : left;
+        var match = System.Text.RegularExpressions.Regex.Match(
+            source, @"\d+\s*(?:m\s*)?s(?:ec)?\b|\d+\s*ms\b|\d+\s*m\b");
+        return match.Success ? match.Value.Trim() : source;
+    }
+
+    /// <summary>
+    /// Shortens a verbose launch-phase label into a compact terminal-friendly form.
+    /// </summary>
+    private static string ShortenPhaseLabel(string label)
+    {
+        var text = label.Trim();
+        if (text.Contains("testing the public endpoint", StringComparison.OrdinalIgnoreCase))
+        {
+            return "testing endpoint";
+        }
+        if (text.Contains("preparing", StringComparison.OrdinalIgnoreCase))
+        {
+            return "preparing";
+        }
+        if (text.Contains("switching", StringComparison.OrdinalIgnoreCase))
+        {
+            return "switching";
+        }
+        if (text.Contains("stopping", StringComparison.OrdinalIgnoreCase))
+        {
+            return "stopping";
+        }
+        if (text.Contains("starting", StringComparison.OrdinalIgnoreCase))
+        {
+            return "starting";
+        }
+        var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return words.Length >= 2 ? words[0] + " " + words[1] : text;
+    }
+
+    // Transient action feedback shown near the Model Profiles buttons (Save, Revert,
+    // Use model defaults, Rename, Delete, Make New Variant). Auto-clears after a few
+    // seconds so it does not linger. Distinct from StatusMessage (which is the
+    // persistent diagnostic status line).
+    [ObservableProperty]
+    public partial string ProfileActionFeedbackText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial IBrush ProfileActionFeedbackBrush { get; set; } = Brushes.Black;
+
+    private DispatcherTimer? _profileActionFeedbackTimer;
+
+    private static readonly SolidColorBrush ProfileActionSuccessBrush =
+        new(Color.Parse("#16A34A")); // green, matches the validated-check icon
+
+    private static readonly SolidColorBrush ProfileActionWarningBrush =
+        new(Color.Parse("#C2410C")); // amber, matches the stale/warning state
+
+    private static readonly SolidColorBrush ProfileActionErrorBrush =
+        new(Color.Parse("#DC2626")); // red, matches the missing-file warning icon
+
+    /// <summary>
+    /// Shows a short, colored confirmation near the Model Profiles buttons, then clears
+    /// it after a few seconds. Call from each profile button command so the user gets
+    /// immediate feedback that the action happened.
+    /// </summary>
+    private void SetProfileActionFeedback(string text, ProfileActionFeedbackKind kind)
+    {
+        ProfileActionFeedbackText = text;
+        ProfileActionFeedbackBrush = kind switch
+        {
+            ProfileActionFeedbackKind.Success => ProfileActionSuccessBrush,
+            ProfileActionFeedbackKind.Warning => ProfileActionWarningBrush,
+            _ => ProfileActionErrorBrush,
+        };
+
+        _profileActionFeedbackTimer?.Stop();
+        _profileActionFeedbackTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+        _profileActionFeedbackTimer.Tick += (_, _) =>
+        {
+            _profileActionFeedbackTimer.Stop();
+            ProfileActionFeedbackText = string.Empty;
+        };
+        _profileActionFeedbackTimer.Start();
+    }
+
+    private enum ProfileActionFeedbackKind
+    {
+        Success,
+        Warning,
+        Error,
     }
 
     private void AppendDiagnosticEntry(string category, string message, string? entity = null)
@@ -5560,7 +6101,8 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     private decimal _localAutoCompactPinUserChars = 2000;
-
+    [ObservableProperty]
+    private decimal _localMaxForwardedImages = 1;
     public ObservableCollection<string> LocalReasoningOptions { get; } =
     ["Off", "On"];
 
@@ -6736,6 +7278,59 @@ public partial class MainViewModel : ViewModelBase
         await LaunchLocalRouteAsync("Active local slot", target.Model, target.Variant);
     }
 
+    /// <summary>
+    /// Auto-loads the most recently launched local profile on startup, if the user enabled
+    /// "Load selected profile on startup". Runs in the background so the UI stays responsive.
+    /// No-op if the feature is off or no profile has been launched before.
+    ///
+    /// Uses <see cref="FluxMuxRuntimeService.GetLastLaunchedLocal"/> (the separate
+    /// last_launched_local.json file) as the source of truth, NOT the UI selection. The user
+    /// expects the profile they were actually using to come back, which is the most recent
+    /// launch — not the currently selected Quick Select slot (which may have changed since
+    /// the last launch).
+    /// </summary>
+    public async Task AutoLoadSelectedProfileOnStartupAsync()
+    {
+        if (!LoadSelectedProfileOnStartup)
+        {
+            return;
+        }
+
+        // Use the most recently launched profile (recorded at launch time in a separate file),
+        // not the UI selection. This ensures the profile the user was actually using comes back.
+        var (lastModel, lastVariant, _) = _runtimeService.GetLastLaunchedLocal();
+        if (string.IsNullOrWhiteSpace(lastModel))
+        {
+            // No launch has been recorded yet — fall back to the UI selection.
+            var target = ResolveActiveLocalTarget();
+            if (string.IsNullOrWhiteSpace(target.Model))
+            {
+                return;
+            }
+            AppendDiagnosticEntry("Startup", $"Auto-loading selected profile (no launch record): {target.Model} / {target.Variant}");
+            await LaunchLocalRouteAsync("Active local slot", target.Model, target.Variant);
+            return;
+        }
+
+        // Verify the last-launched profile still exists in the profile list before launching.
+        // If the profile was deleted or renamed, fall back to the UI selection.
+        if (!LocalProfiles.Contains(lastModel, StringComparer.OrdinalIgnoreCase))
+        {
+            AppendDiagnosticEntry("Startup", $"Last-launched profile '{lastModel}' no longer exists — falling back to selected profile.");
+            var target = ResolveActiveLocalTarget();
+            if (string.IsNullOrWhiteSpace(target.Model))
+            {
+                return;
+            }
+            AppendDiagnosticEntry("Startup", $"Auto-loading selected profile: {target.Model} / {target.Variant}");
+            await LaunchLocalRouteAsync("Active local slot", target.Model, target.Variant);
+            return;
+        }
+
+        AppendDiagnosticEntry("Startup", $"Auto-loading last-launched profile: {lastModel} / {lastVariant}");
+        await LaunchLocalRouteAsync("Active local slot", lastModel, lastVariant);
+    }
+
     [RelayCommand]
     private async Task LaunchSelection1LocalAsync()
         => await LaunchLocalRouteAsync(
@@ -6802,12 +7397,31 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        // Pre-warm the OS page cache for the model file in the background so this launch
+        // (and any later launch of the same file) is a warm RAM read, not a cold NVMe read.
+        // This is the single biggest factor in cold-vs-warm launch time, and it's what lets
+        // a cold YaRN launch (big KV allocation + cold disk) finish instead of timing out.
+        var modelPathForWarm = ResolveLocalModelPath(model);
+        if (!string.IsNullOrWhiteSpace(modelPathForWarm))
+        {
+            _runtimeService.PreWarmModelPageCache(modelPathForWarm);
+        }
+
+        // Up-front warning for long-load profiles (YaRN / extended-context / GPU+CPU):
+        // tell the user this launch can take several minutes from cold, so they don't think
+        // it's hung. The countdown monitor below shows live elapsed time + estimate.
+        var longLoadProfile = IsLongLoadLocalProfile(model, variant);
+        if (longLoadProfile)
+        {
+            StatusMessage = $"{slotLabel}: launching an extended-context (YaRN) profile — the first (cold) load can take several minutes while the model and its large KV cache load into GPU+RAM. A live progress timer is shown below.";
+        }
+
         RememberMountedLocal(model, variant);
         LocalRouteIndicatorState = RouteIndicatorState.Amber;
         _runtimeService.ResetLocalRequestOverlays();
 
         var launchStartedUtc = DateTime.UtcNow;
-        StartLocalLaunchCountdownMonitor(model, variant);
+        StartLocalLaunchCountdownMonitor(model, variant, longLoadProfile: longLoadProfile, launchStartedUtc: launchStartedUtc);
         var keepCountdownRunning = false;
         var vision = GetLocalVisionLaunchSettings(model, variant);
 
@@ -6993,15 +7607,37 @@ public partial class MainViewModel : ViewModelBase
         bool recordLaunchTelemetry,
         bool alsoMarkBaseVariant = false)
     {
+        // Stop the countdown FIRST, before writing the ready notice. The stop sets
+        // _localLaunchCountdownStopped and clears the countdown text on the UI thread;
+        // doing it before the ready write guarantees any countdown frame already queued
+        // on the UI thread is suppressed (its guard sees the flag set) instead of
+        // overwriting the ready notice with a stale "estimated time left" line.
+        StopLocalLaunchCountdownMonitor();
+
         _lastHealthDetail = details;
         ConnectionHealthText = details;
+        RunContextFillStressTestCommand.NotifyCanExecuteChanged();
         if (recordLaunchTelemetry && launchElapsedMs is int elapsedMs && elapsedMs > 0)
         {
             _runtimeService.RecordLocalLaunchTelemetry(model, variant, elapsedMs, "ready");
             UpdateLocalLaunchTelemetrySummary();
         }
 
-        StatusMessage = LocalLaunchStatus.RouteReady;
+        // Descriptive ready message: include the actual launch time (when known) and a
+        // note that the first reply may take a moment. The previous terse "Local route
+        // ready" left the user staring at silence for 60-120s while the health monitor
+        // polled quietly and the first real chat completion was pending.
+        var launchTimeText = launchElapsedMs is int elapsedMs2 && elapsedMs2 > 0
+            ? $" in {FormatTelemetryDuration(elapsedMs2)}"
+            : string.Empty;
+        // Honest "first reply" note. The model is launched and the endpoint is responding,
+        // but the first real message from the user may take a noticeable delay: the first
+        // large request triggers the cold KV-cache allocation (for YaRN / extended-context
+        // profiles) and prefill scales with prompt size. We don't quote a specific time
+        // because it depends on the user's message size, their settings, and their hardware.
+        // Just be honest about the uncertainty and ask for patience.
+        var firstReplyText = " · your model is now launched, but depending on your settings, and hardware, and the complexity of your first message, you should expect a noticeable delay before it can respond. Please be patient…";
+        StatusMessage = $"Local route ready{launchTimeText}{firstReplyText}";
         LocalRouteIndicatorState = RouteIndicatorState.Live;
         RememberMountedLocal(model, variant);
         if (!string.IsNullOrWhiteSpace(model))
@@ -7022,7 +7658,6 @@ public partial class MainViewModel : ViewModelBase
         }
 
         StartMountedEndpointHealthMonitor();
-        StopLocalLaunchCountdownMonitor();
         RegisterCompatibleQuickSelectLocalOverlays(model);
         ApplyLiveLocalRequestSettingsFor(model, variant);
         UpdateRoutingPoolStatus();
@@ -7608,6 +8243,12 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand]
     private async Task KillLocalModelNowAsync()
     {
+        // Cancel any in-progress launch first. If the model is still launching (not yet
+        // alive), IsManagedLocalAlive() returns false and the method would return early,
+        // leaving the launch running. Cancelling the in-progress launch aborts it so the
+        // Stop button works even when the model is still loading.
+        _runtimeService.CancelInProgressLocalLaunch();
+
         if (!_runtimeService.IsManagedLocalAlive())
         {
             StatusMessage = "No local model is running.";
@@ -7641,6 +8282,10 @@ public partial class MainViewModel : ViewModelBase
     private async Task StopLocalRouteAsync(string slotLabel)
     {
         CancelLocalRuntimeMonitors();
+        // Cancel any in-progress launch so the Stop button works even when the model is
+        // still loading (not yet alive). Without this, the launch would continue running
+        // in the background after the user clicked Stop.
+        _runtimeService.CancelInProgressLocalLaunch();
         // Cancel any in-flight "Validate to endpoint" so it stops polling the
         // endpoint we are about to stop. Without this, the validation loop keeps
         // running until its 5-minute timeout and the Stop button appears to do nothing.
@@ -7669,6 +8314,7 @@ public partial class MainViewModel : ViewModelBase
         ConnectionHealthText = result.Details;
         StatusMessage = result.Status;
         LocalRouteIndicatorState = RouteIndicatorState.Off;
+        RunContextFillStressTestCommand.NotifyCanExecuteChanged();
         if (RequestRoutingEnabled && !string.IsNullOrWhiteSpace(_mountedCloudProvider))
         {
             _runningLocalModel = string.Empty;
@@ -8283,6 +8929,572 @@ public partial class MainViewModel : ViewModelBase
         DiagnosticTerminalText = "Diagnostic log cleared.";
     }
 
+    /// <summary>
+    /// Returns true when a local model is currently running and ready for a stress test.
+    /// The stress test button is disabled (greyed out) when no model is loaded.
+    /// </summary>
+    private bool CanRunContextFillStressTest()
+    {
+        if (StressTestRunning)
+        {
+            return false;
+        }
+        var model = SelectedLocalProfile;
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return false;
+        }
+        return IsLocalModelCurrentlyRunning(model);
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRunContextFillStressTest))]
+    private async Task RunContextFillStressTest()
+    {
+        var model = SelectedLocalProfile;
+        var variant = SelectedLocalVariant;
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            StatusMessage = "No local model selected for the stress test.";
+            return;
+        }
+
+        // Check if a local model is currently running. If not, prompt the user to launch one first.
+        if (!IsLocalModelCurrentlyRunning(model))
+        {
+            StatusMessage = "No local model is running. Launch a model first, then run the stress test.";
+            AppendDiagnosticEntry("Stress", "Stress test not started: no local model is running. Launch a model first, then run the stress test.");
+            return;
+        }
+
+        // Start the live telemetry graph IMMEDIATELY, before any blocking work (the hardware
+        // context computation below makes nvidia-smi / external process calls that can take
+        // 10-20s). This way the graph panel (title, axes) appears the moment the stress test
+        // starts, not after the blocking call completes. Each fill level adds its own point
+        // (see onLevelStart below); no baseline is seeded, so the curve is built from real data.
+        // X-axis uses absolute token counts (not % fill) so the graph is self-describing.
+
+        // Use the ACTUAL context limit the gateway is using (the managed/launched context),
+        // NOT the profile's OverrideContext. The two can differ: the model may have been launched
+        // with a smaller context than OverrideContext specifies (e.g. VRAM constraints, YaRN
+        // spill, or a manual -c override). If the stress test used OverrideContext (393K) while
+        // the gateway's local_context was 262K, a "75%" prompt would actually be 112% of the real
+        // window and get blocked as a genuine overflow — making the test useless.
+        //
+        // Prefer the live managed context (what the gateway is actually enforcing). Fall back to
+        // the profile's OverrideContext when no model is currently managed (shouldn't happen since
+        // we checked IsLocalModelCurrentlyRunning above, but be safe).
+        int contextLimit = _runtimeService.ManagedLocalContext;
+        if (contextLimit <= 0)
+        {
+            contextLimit = _runtimeService.GetLocalProfileContextLimit(model, variant);
+        }
+        if (contextLimit <= 0)
+        {
+            StatusMessage = "Could not determine the context limit for the selected profile.";
+            return;
+        }
+
+        TelemetryGraph.SetSeries("TTFT (s)", "Context (tok)", "TTFT (s)", isLogScaleY: true,
+            "TTFT = Time To First Token (latency from prompt to first token)");
+
+        // Compute the fill levels in absolute tokens based on the context limit and VRAM context.
+        var vramContext = _runtimeService.ManagedLocalVramContext;
+        var fillLevels = Services.ContextFillStressProbe.ComputeFillLevels(contextLimit, vramContext);
+        var lastFillLevel = fillLevels.Length > 0 ? fillLevels[^1] : contextLimit;
+        var fillStep = fillLevels.Length > 1 ? fillLevels[1] - fillLevels[0] : 0;
+        if (fillStep <= 0 && fillLevels.Length > 0)
+        {
+            fillStep = fillLevels[0];
+        }
+        var paddedMax = (int)((double)lastFillLevel * 1.1);
+        var xAxisMax = fillStep > 0
+            ? (int)Math.Ceiling((double)paddedMax / fillStep) * fillStep
+            : paddedMax;
+        TelemetryGraph.SetAxisRange(0.0, xAxisMax, 0.0, 350.0);
+        TelemetryGraph.SetFillLevels(fillLevels);
+
+        // Throughput graph: plots tok/s (generation speed) alongside TTFT. Same X-axis range
+        // (absolute tokens), Y-axis is tok/s (starts at 0, grows as faster readings arrive).
+        TelemetryGraphThroughput.SetSeries("(tok/s)", "Context (tok)", "tok/s", isLogScaleY: false,
+            "tok/s = tokens per second (generation speed after the first token)");
+        TelemetryGraphThroughput.SetAxisRange(0.0, xAxisMax, 0.0, 350.0);
+        TelemetryGraphThroughput.SetFillLevels(fillLevels);
+
+        // Load the previous stress test result (if any) and show ghost bars for comparison.
+        // The ghost bars are horizontal dotted lines at the top of each previous run's bar,
+        // so the user can see how the current run compares to the last one.
+        //
+        // Ghost bars are shown for ALL previous results, regardless of how many levels the
+        // current run has. The only exception is when the previous run was ABORTED (user
+        // cancelled it), in which case the ghost bars are hidden because the partial data
+        // is not a meaningful comparison.
+        var previousResult = LoadPreviousStressTestResult(model, variant);
+        if (previousResult is { Levels.Count: > 0 })
+        {
+            if (previousResult.Aborted)
+            {
+                AppendDiagnosticEntry("Stress", "previous run was aborted — ghost hidden");
+            }
+            else
+            {
+                var previousTtftLevels = previousResult.Levels
+                    .Where(l => l.IsSuccess)
+                    .Select(l => ((double Tokens, double Value))(l.PromptTokens, (double)l.TtftMs / 1000.0))
+                    .ToList();
+                var previousThroughputLevels = previousResult.Levels
+                    .Where(l => l.IsSuccess)
+                    .Select(l => ((double Tokens, double Value))(l.PromptTokens, l.TokensPerSecond))
+                    .ToList();
+                TelemetryGraph.SetGhostBars(previousTtftLevels);
+                TelemetryGraphThroughput.SetGhostBars(previousThroughputLevels);
+                AppendDiagnosticEntry("Stress", $"comparing against previous run: {previousTtftLevels.Count} levels · {previousResult.HardwareContext}");
+            }
+        }
+
+        // Build the hardware context string (VRAM, RAM, offload mode) so the results
+        // are self-describing and generalizable to other hardware.
+        string hardwareContext = "unknown";
+        try
+        {
+            var advice = _runtimeService.GetLocalHardwareLaunchAdvice(
+                model, LocalModelDirectory, false, string.Empty, 0);
+            hardwareContext = $"GPU {advice.GpuTotalGb:0.#} GB, RAM {advice.TotalRamGb:0.#} GB, " +
+                              $"offload {advice.OffloadMode}, NVIDIA {advice.NvidiaAvailable}";
+        }
+        catch
+        {
+            hardwareContext = "hardware details unavailable";
+        }
+
+        AppendDiagnosticEntry("Stress", $"start · {model} / {variant} · limit {FormatTokens(contextLimit)} · mode {StressTestMode}");
+        AppendDiagnosticEntry("Stress", $"hw · {hardwareContext}");
+        AppendDiagnosticEntry("Stress", "WARNING: runs to failure — deliberately exceeds the context limit; model may OOM/hang at high fill");
+        AppendDiagnosticEntry("Stress", "live telemetry below · each level waits for first token (prefill) · 'Cancel stress test' to stop early");
+        AppendDiagnosticEntry("Stress", "uses synthetic requests · does not affect your chat · context stays clear after the test");
+
+        var logPath = Path.Combine(_runtimeService.LogDirectory, "context_fill_perf.log");
+        var cts = new CancellationTokenSource();
+        _stressTestCts = cts;
+        StressTestRunning = true;
+        RunContextFillStressTestCommand.NotifyCanExecuteChanged();
+        try
+        {
+            using var http = new HttpClient { Timeout = System.Threading.Timeout.InfiniteTimeSpan };
+            var result = await ContextFillStressProbe.RunAsync(
+                http,
+                (int)OrchestratorPort,
+                model,
+                contextLimit,
+                hardwareContext,
+                fillLevels,
+                onLevelStart: (fillPercent, promptTokens) =>
+                {
+                    AppendDiagnosticEntry("Stress",
+                        $"fill {FormatTokens(promptTokens)} · target {FormatTokens(promptTokens)} · waiting for first token");
+                    // Show the progressive "testing" bar at this fill level.
+                    SafeUiInvoke(() =>
+                    {
+                        TelemetryGraph.SetTestingBand(fillPercent, "waiting…");
+                        TelemetryGraphThroughput.SetTestingBand(fillPercent, "waiting…");
+                    });
+                },
+                onLevelHeartbeat: (fillPercent, promptTokens, elapsedMs) =>
+                {
+                    // Concise single-line heartbeat (no word-wrap). Also drive the live graph
+                    // so the curve builds in real time during the long prefill wait.
+                    AppendDiagnosticEntry("Stress",
+                        $"fill {FormatTokens(promptTokens)} · waiting {elapsedMs / 1000}s");
+                    // Marshal to the UI thread: the heartbeat runs on a background thread
+                    // (Task.Run in the probe), and Avalonia bindings require property changes
+                    // on the UI thread to trigger a re-render.
+                    SafeUiInvoke(() =>
+                    {
+                        TelemetryGraph.UpdateTestingBarProgress(Math.Min(1.0, (double)elapsedMs / 1000.0 / 300.0));
+                        TelemetryGraphThroughput.UpdateTestingBarProgress(Math.Min(1.0, (double)elapsedMs / 1000.0 / 300.0));
+                    });
+                },
+                onLevelComplete: level =>
+                {
+                    // Concise single-line completion entry.
+                    var status = level.IsSuccess
+                        ? $"OK {level.TokensPerSecond:0.#} tok/s"
+                        : level.Status;
+                    AppendDiagnosticEntry("Stress",
+                        $"fill {FormatTokens(level.PromptTokens)} · TTFT {level.TtftMs / 1000.0:0.#}s · {status}");
+
+                    // Update the context gauge with the actual prompt token count.
+                    _runtimeService.UpdateContextGauge(level.PromptTokens, level.ContextLimit, model);
+
+                    // Finalize the live graph point. Use TTFT in seconds for the Y-axis.
+                    var ttftSeconds = level.IsSuccess
+                        ? level.TtftMs / 1000.0
+                        : level.TotalMs / 1000.0;
+                    // Marshal to the UI thread (same reason as the heartbeat above).
+                    SafeUiInvoke(() =>
+                    {
+                        TelemetryGraph.ClearTestingBand();
+                        TelemetryGraphThroughput.ClearTestingBand();
+                        if (level.IsSuccess)
+                        {
+                            TelemetryGraph.AddPoint(level.PromptTokens, ttftSeconds, $"OK {level.TokensPerSecond:0.#} tok/s");
+                            TelemetryGraphThroughput.AddPoint(level.PromptTokens, level.TokensPerSecond, $"{level.TokensPerSecond:0.#} tok/s");
+                        }
+                        else
+                        {
+                            TelemetryGraph.AddPoint(level.PromptTokens, ttftSeconds, level.Status, isFailure: true);
+                        }
+                    });
+                },
+                mode: StressTestMode,
+                onMeasuredTokens: (fillPercent, targetTokens, measuredTokens) =>
+                {
+                    // Log the model's real measured token count (the number the model actually saw).
+                    AppendDiagnosticEntry("Stress",
+                        $"fill {FormatTokens(measuredTokens)} · measured {FormatTokens(measuredTokens)} tokens");
+                },
+                cancellationToken: cts.Token);
+
+            // Write to the log file (survives crash/freeze).
+            ContextFillStressProbe.WriteToLogFile(result, logPath);
+
+            // Save the result to the history JSON so the next run can show ghost bars.
+            SaveStressTestResult(result, model, variant);
+
+            // Show the full summary in the diagnostics panel.
+            AppendDiagnosticEntry("Stress", ContextFillStressProbe.FormatForDiagnostics(result));
+            AppendDiagnosticEntry("Stress", $"results → {logPath}");
+
+            // Guard: if the test completed with ZERO levels, the model was not actually ready
+            // (the probe returned instantly without running any fill level). This is the root
+            // cause of the "graph disappears after a test" symptom: with no data points,
+            // HasPoints=false → IsPlotVisible=false → the "No telemetry" placeholder shows.
+            // Log a clear diagnostic so the user can see WHY the graph is empty instead of
+            // silently showing the placeholder.
+            if (result.Levels.Count == 0)
+            {
+                AppendDiagnosticEntry("Stress",
+                    "WARNING: test completed with NO fill levels — the model was not ready to accept requests. " +
+                    "The graph is empty because no data was collected. Check that the local model is fully launched " +
+                    "(the route indicator should be green, not amber) before running the stress test again.");
+            }
+
+            // Update the graph heading + the red-hatched "untested region" overlay from the final
+            // result. The hatch covers everything beyond the last SUCCESSFUL fill level, so a
+            // failed point sits inside the hatched region (the test stopped there).
+            var successfulLevels = result.Levels.Where(l => l.IsSuccess).ToList();
+            var maxTtft = successfulLevels.Count > 0
+                ? successfulLevels.Max(l => l.TtftMs / 1000.0)
+                : 0.0;
+            var maxTtftFillTokens = successfulLevels.Count > 0
+                ? successfulLevels.OrderByDescending(l => l.TtftMs).First().PromptTokens
+                : 0;
+            var firstFailure = result.Levels.FirstOrDefault(l => !l.IsSuccess);
+            // Where the red "untested region" line/hatch starts:
+            // - Aborted: the LAST COMPLETED fill level. The abort happens mid-level (the
+            //   in-progress level produced no bar), so marking the in-progress level would put
+            //   the line over the last COMPLETED bar. Using the last completed level's token
+            //   count places the line at that bar, and SetUnfilledRegion's barHalfWidth push
+            //   moves it just to the right of that bar (not overlapping it).
+            // - Failed: the first failed level (it has no bar either — failures are not plotted
+            //   as bars — so the line sits exactly where the test stopped).
+            int? failedFillTokens;
+            if (result.Aborted)
+            {
+                var lastCompletedIndex = result.Levels.Count - 1;
+                failedFillTokens = lastCompletedIndex >= 0
+                    ? (int?)result.Levels[lastCompletedIndex].PromptTokens
+                    : null;
+            }
+            else
+            {
+                failedFillTokens = firstFailure.PromptTokens > 0 ? firstFailure.PromptTokens : (int?)null;
+            }
+            SafeUiInvoke(() =>
+            {
+                TelemetryGraph.SetStressTestSummary(
+                    completedLevels: result.Levels.Count,
+                    totalLevels: fillLevels.Length,
+                    maxTtftSeconds: maxTtft,
+                    maxTtftFillTokens: maxTtftFillTokens,
+                    failedFillTokens: failedFillTokens,
+                    aborted: result.Aborted);
+                // Hatch from the first FAILED level to the axis max. The vertical red dashed
+                // line marks where the test stopped (the first failure), not where the last
+                // success was. If all levels succeeded (no failure), the line is hidden.
+                TelemetryGraph.SetUnfilledRegion(failedFillTokens.HasValue
+                    ? (double)failedFillTokens.Value
+                    : null);
+            });
+
+            if (result.Levels.Count == 0)
+            {
+                // No data was collected — the model was not ready. Show a clear status message
+                // instead of the misleading "Stress test complete · highest fill 0" message.
+                StatusMessage = "Stress test produced no data — the model was not ready. Check that the route indicator is green (not amber), then try again.";
+            }
+            else if (result.Aborted)
+            {
+                // The abort happens mid-level: the last completed level is the highest
+                // successful one, and the in-progress level (the next fill level) produced no
+                // result. Report the last completed level as the abort point so the status
+                // matches the red "untested region" line on the graph (which marks the last
+                // completed level).
+                var lastCompletedIndex = result.Levels.Count - 1;
+                var abortedAtTokens = lastCompletedIndex >= 0
+                    ? result.Levels[lastCompletedIndex].PromptTokens
+                    : 0;
+                var highestOk = successfulLevels.Count > 0 ? successfulLevels.Max(l => l.PromptTokens) : 0;
+                StatusMessage = $"Stress test ABORTED at {FormatTokens(abortedAtTokens)} · highest successful {FormatTokens(highestOk)} · {result.Mode}";
+            }
+            else
+            {
+                var highestTokens = successfulLevels.Count > 0
+                    ? successfulLevels.Max(l => l.PromptTokens)
+                    : 0;
+                StatusMessage = $"Stress test complete · highest fill {FormatTokens(highestTokens)} · {result.Mode}";
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendDiagnosticEntry("Stress", $"failed: {ex.GetBaseException().Message}");
+            StatusMessage = "Stress test failed: " + ex.GetBaseException().Message;
+        }
+        finally
+        {
+            // Re-enable the stress test button IMMEDIATELY, before any post-test work.
+            // The context clear below can take up to 10s; if it ran inline here the button
+            // would stay greyed out for that whole window, so the user could not start a
+            // new test. Reset state first, then clear the context in the background.
+            _stressTestCts = null;
+            // Set StressTestRunning = false immediately so the "Cancel stress test" button
+            // hides and the "Stress test" button reverts. This also triggers
+            // OnStressTestRunningChanged(false) which collapses the diagnostics panel.
+            // We then re-expand the panel for 8 seconds so the user can read the results.
+            StressTestRunning = false;
+            RunContextFillStressTestCommand.NotifyCanExecuteChanged();
+
+            // Clear the model's context after the stress test completes or is cancelled.
+            // The stress test sends large prompts (up to 110% of context limit) to the model,
+            // which fills the model's KV cache. If we don't clear it, the next chat turn
+            // from the client app will fail with "context too small" because the model's
+            // context is still occupied by the stress test's data.
+            //
+            // Run this in the background so it never blocks the UI or the re-enabled button.
+            // It is also best-effort: if it fails, the user can still start a new chat in
+            // the client app, which will use a fresh context.
+            _ = Task.Run(() => ClearLocalModelContextAfterStressTestAsync(model, variant));
+
+            // Reset the telemetry graphs so the "No telemetry" placeholder reappears when
+            // the graph is empty. Without this, IsActive stays true after the first stress
+            // test and the placeholder is permanently hidden.
+            SafeUiInvoke(() =>
+            {
+                TelemetryGraph.Deactivate();
+                TelemetryGraphThroughput.Deactivate();
+            });
+
+            // Clear any stale local-reload recommendation so it doesn't block the next turn.
+            _runtimeService.ClearLocalReloadRecommend();
+
+            // Keep the diagnostics panel expanded for 8 seconds so the user can read the
+            // results and compare the ghost bars, then collapse it back to the default size.
+            // StressTestRunning is already false (set above), so we directly manipulate
+            // DiagnosticsRowHeight to keep the panel expanded without affecting the buttons.
+            SafeUiInvoke(() =>
+            {
+                DiagnosticsRowHeight = new GridLength(1.8, GridUnitType.Star);
+            });
+            _ = Task.Delay(TimeSpan.FromSeconds(8)).ContinueWith(_ =>
+            {
+                SafeUiInvoke(() =>
+                {
+                    // Only collapse if the test is still not running (the user may have
+                    // started a new test in the meantime).
+                    if (!StressTestRunning)
+                    {
+                        DiagnosticsRowHeight = new GridLength(0.45, GridUnitType.Star);
+                    }
+                });
+            });
+        }
+    }
+
+    /// <summary>
+    /// Clears the local model's context after a stress test by sending a tiny prompt directly
+    /// to the managed llama-server's daemon port (Port+1), bypassing the gateway. Targeting the
+    /// daemon port directly (rather than the gateway's /v1/chat/completions) avoids routing the
+    /// clear to whichever model is currently active, which is why the previous approach
+    /// frequently reported "context clear failed". Best-effort: any failure is logged but
+    /// swallowed, since the user can always start a new chat to reset.
+    /// </summary>
+    private async Task ClearLocalModelContextAfterStressTestAsync(string model, string variant)
+    {
+        try
+        {
+            int daemonPort = (int)OrchestratorPort + 1;
+            using var clearHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            var clearRequest = new HttpRequestMessage(HttpMethod.Post,
+                $"http://127.0.0.1:{daemonPort}/v1/chat/completions")
+            {
+                Content = new StringContent(
+                    """
+                    {
+                        "model": "local",
+                        "stream": false,
+                        "max_tokens": 1,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "Clear"
+                            }
+                        ]
+                    }
+                    """,
+                    System.Text.Encoding.UTF8,
+                    "application/json")
+            };
+            await clearHttp.SendAsync(clearRequest);
+            SafeUiInvoke(() => AppendDiagnosticEntry("Stress", "context cleared"));
+        }
+        catch
+        {
+            // Best-effort: if the clear fails, the user can still start a new chat.
+            SafeUiInvoke(() => AppendDiagnosticEntry("Stress", "context clear failed (start a new chat to reset)"));
+        }
+    }
+
+    /// <summary>
+    /// Returns the file path for the stress test history JSON for the given model/variant.
+    /// </summary>
+    private string StressTestHistoryPath(string model, string variant)
+    {
+        var text = System.Text.RegularExpressions.Regex.Replace(model + "|" + variant, "[^\\w.-]", "_").Trim('_');
+        return Path.Combine(_runtimeService.LogDirectory, "context_fill_history_" + text + ".json");
+    }
+
+    /// <summary>
+    /// Saves the stress test result to a JSON file so it can be loaded as the "previous run"
+    /// for ghost bar comparison on the next stress test.
+    /// </summary>
+    private void SaveStressTestResult(Services.ContextFillStressResult result, string model, string variant)
+    {
+        try
+        {
+            var path = StressTestHistoryPath(model, variant);
+            var directoryName = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(directoryName))
+            {
+                Directory.CreateDirectory(directoryName);
+            }
+            var value = new
+            {
+                model = result.Model,
+                variant = result.Variant,
+                contextLimit = result.ContextLimit,
+                hardwareContext = result.HardwareContext,
+                startedUtc = result.StartedUtc,
+                completedUtc = result.CompletedUtc,
+                aborted = result.Aborted,
+                levels = result.Levels.Select(l => new
+                {
+                    fillPercent = l.FillPercent,
+                    promptTokens = l.PromptTokens,
+                    contextLimit = l.ContextLimit,
+                    ttftMs = l.TtftMs,
+                    totalMs = l.TotalMs,
+                    tokensPerSecond = l.TokensPerSecond,
+                    completionTokens = l.CompletionTokens,
+                    isSuccess = l.IsSuccess,
+                    status = l.Status
+                })
+            };
+            var contents = System.Text.Json.JsonSerializer.Serialize(value, new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true
+            });
+            File.WriteAllText(path, contents);
+        }
+        catch
+        {
+            // Best-effort: if the save fails, the ghost bars just won't show on the next run.
+        }
+    }
+
+    /// <summary>
+    /// Loads the previous stress test result from the JSON history file. Returns null when
+    /// no previous run exists or the file cannot be read.
+    /// </summary>
+    private Services.ContextFillStressResult? LoadPreviousStressTestResult(string model, string variant)
+    {
+        try
+        {
+            var path = StressTestHistoryPath(model, variant);
+            if (!File.Exists(path))
+            {
+                return null;
+            }
+            var json = File.ReadAllText(path);
+            using var jsonDocument = System.Text.Json.JsonDocument.Parse(json);
+            var rootElement = jsonDocument.RootElement;
+            var model2 = rootElement.TryGetProperty("model", out var v1) ? (v1.GetString() ?? model) : model;
+            var variant2 = rootElement.TryGetProperty("variant", out var v2) ? (v2.GetString() ?? variant) : variant;
+            var contextLimit = rootElement.TryGetProperty("contextLimit", out var v3) ? v3.GetInt32() : 0;
+            var hardwareContext = rootElement.TryGetProperty("hardwareContext", out var v4) ? (v4.GetString() ?? "unknown") : "unknown";
+            var startedUtc = rootElement.TryGetProperty("startedUtc", out var v5) && v5.TryGetDateTime(out var v6) ? v6 : DateTime.MinValue;
+            var completedUtc = rootElement.TryGetProperty("completedUtc", out var v7) && v7.TryGetDateTime(out var v8) ? v8 : DateTime.MinValue;
+            var aborted = rootElement.TryGetProperty("aborted", out var vAborted) ? vAborted.GetBoolean() : false;
+            var list = new List<Services.ContextFillLevelResult>();
+            if (rootElement.TryGetProperty("levels", out var v9))
+            {
+                foreach (var item in v9.EnumerateArray())
+                {
+                    list.Add(new Services.ContextFillLevelResult(
+                        item.GetProperty("fillPercent").GetInt32(),
+                        item.GetProperty("promptTokens").GetInt32(),
+                        item.GetProperty("contextLimit").GetInt32(),
+                        item.GetProperty("ttftMs").GetInt64(),
+                        item.GetProperty("totalMs").GetInt64(),
+                        item.GetProperty("tokensPerSecond").GetDouble(),
+                        item.GetProperty("completionTokens").GetInt32(),
+                        item.GetProperty("isSuccess").GetBoolean(),
+                        item.GetProperty("status").GetString() ?? string.Empty));
+                }
+            }
+            if (list.Count == 0)
+            {
+                return null;
+            }
+            return new Services.ContextFillStressResult
+            {
+                Model = model2,
+                Variant = variant2,
+                ContextLimit = contextLimit,
+                HardwareContext = hardwareContext,
+                Levels = list,
+                StartedUtc = startedUtc,
+                CompletedUtc = completedUtc,
+                Aborted = aborted
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    [RelayCommand]
+    private void CancelContextFillStressTest()
+    {
+        try
+        {
+            _stressTestCts?.Cancel();
+        }
+        catch
+        {
+        }
+        AppendDiagnosticEntry("Stress", "Cancel requested for context-fill stress test…");
+    }
+
     [RelayCommand]
     private void RefreshLocalProfiles()
     {
@@ -8337,6 +9549,7 @@ public partial class MainViewModel : ViewModelBase
             variantName);
         RefreshCloudFamilyModelIdEditor(bindDraftToCurrent: true);
         StatusMessage = "Cloud profile saved, including Provider and Model id when you changed them. In Model Profiles, click Validate to endpoint to test these settings and offer this profile in Quick Select.";
+        SetProfileActionFeedback("Profile saved.", ProfileActionFeedbackKind.Success);
     }
 
     [RelayCommand]
@@ -8447,6 +9660,7 @@ public partial class MainViewModel : ViewModelBase
         LoadCloudVariantSettingsEditor();
         RefreshProfileEndpointStatusSurfaces();
         StatusMessage = "Cloud model profile variant settings and priorities reverted to the last saved state.";
+        SetProfileActionFeedback("Changes reverted to the last saved state.", ProfileActionFeedbackKind.Success);
     }
 
     [RelayCommand]
@@ -8460,6 +9674,7 @@ public partial class MainViewModel : ViewModelBase
         LoadCloudPriorityOrder(settings);
         RefreshProfileEndpointStatusSurfaces();
         StatusMessage = "Model defaults loaded into this cloud model profile variant. Click Save profile to keep them.";
+        SetProfileActionFeedback("Model defaults loaded. Click Save profile to keep them.", ProfileActionFeedbackKind.Warning);
     }
 
     [RelayCommand]
@@ -8792,6 +10007,7 @@ public partial class MainViewModel : ViewModelBase
 
         SaveCurrentSelections();
         StatusMessage = "Cloud model profile variant renamed.";
+        SetProfileActionFeedback("Profile renamed.", ProfileActionFeedbackKind.Success);
     }
 
     [RelayCommand]
@@ -8980,6 +10196,7 @@ public partial class MainViewModel : ViewModelBase
             StatusMessage = copyCount > 0
                 ? $"Removed {confirmName} and {copyCount} cop{(copyCount == 1 ? "y" : "ies")} from AI-FluxMux."
                 : $"Removed {confirmName} from AI-FluxMux.";
+            SetProfileActionFeedback("Profile deleted.", ProfileActionFeedbackKind.Success);
             return;
         }
 
@@ -8999,6 +10216,7 @@ public partial class MainViewModel : ViewModelBase
         SelectedCloudVariant = BaseVariantDisplayName;
         SaveCurrentSelections();
         StatusMessage = "Cloud profile deleted: " + label + ".";
+        SetProfileActionFeedback("Profile deleted.", ProfileActionFeedbackKind.Success);
     }
 
     [RelayCommand]
@@ -9055,6 +10273,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         StatusMessage = "Local profile saved. In Model Profiles, click Validate to endpoint to test these settings and offer this profile in Quick Select.";
+        SetProfileActionFeedback("Profile saved.", ProfileActionFeedbackKind.Success);
         ReassertLocalVariantEditor(intended ?? SelectedLocalVariantItem);
     }
 
@@ -9385,6 +10604,7 @@ public partial class MainViewModel : ViewModelBase
         LoadLocalVariantSettingsEditor();
         RefreshProfileEndpointStatusSurfaces();
         StatusMessage = "Local model profile variant settings and priorities reverted to the last saved state.";
+        SetProfileActionFeedback("Changes reverted to the last saved state.", ProfileActionFeedbackKind.Success);
     }
 
     [RelayCommand]
@@ -9412,6 +10632,7 @@ public partial class MainViewModel : ViewModelBase
         LoadLocalVariantSettingsForm(settings);
         LoadLocalPriorityOrder(settings);
         RefreshProfileEndpointStatusSurfaces();
+        SetProfileActionFeedback("Model defaults loaded. Click Save profile to keep them.", ProfileActionFeedbackKind.Warning);
     }
 
     [RelayCommand]
@@ -9520,6 +10741,7 @@ public partial class MainViewModel : ViewModelBase
         StatusMessage = runningThisProfile
             ? "Local model profile variant renamed. llama-server is still the running local model; launch settings were not changed."
             : "Local model profile variant renamed.";
+        SetProfileActionFeedback("Profile renamed.", ProfileActionFeedbackKind.Success);
     }
 
     [RelayCommand]
@@ -9569,6 +10791,7 @@ public partial class MainViewModel : ViewModelBase
             StatusMessage = copyCount > 0
                 ? $"Removed {SelectedLocalProfile} and {copyCount} cop{(copyCount == 1 ? "y" : "ies")} from AI-FluxMux. The local model on disk was not deleted."
                 : $"Removed {SelectedLocalProfile} from AI-FluxMux. The local model on disk was not deleted.";
+            SetProfileActionFeedback("Profile deleted.", ProfileActionFeedbackKind.Success);
             return;
         }
 
@@ -9594,6 +10817,7 @@ public partial class MainViewModel : ViewModelBase
         SelectedLocalVariant = BaseVariantDisplayName;
         SaveCurrentSelections();
         StatusMessage = "Local profile deleted: " + label + ".";
+        SetProfileActionFeedback("Profile deleted.", ProfileActionFeedbackKind.Success);
     }
 
     [RelayCommand]
@@ -9643,6 +10867,7 @@ public partial class MainViewModel : ViewModelBase
             && !StatusMessage.Equals("Local model profile variant already exists.", StringComparison.Ordinal))
         {
             NewProfileVariantName = string.Empty;
+            SetProfileActionFeedback("New variant created. Change a setting, then Save profile.", ProfileActionFeedbackKind.Success);
         }
         RefreshProfileTemplateSources();
     }
@@ -9949,7 +11174,8 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        if (LocalVariantContext < 1024 || LocalVariantContext > DeepSeekHarnessSetup.MaxLocalContextWindow || LocalVariantTemperature is < 0 or > 2)
+        var maxCtx = LocalVariantExtendContextIntoRam ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : DeepSeekHarnessSetup.MaxLocalContextWindow;
+        if (LocalVariantContext < 1024 || LocalVariantContext > maxCtx || LocalVariantTemperature is < 0 or > 2)
         {
             StatusMessage = "Local profile validation failed: context or temperature is outside the supported editor range.";
             return;
@@ -10554,6 +11780,7 @@ public partial class MainViewModel : ViewModelBase
             _config.GetInt("IdleTimeoutMinutes", IdleTimeoutPolicy.DefaultMinutes));
         RequestRoutingEnabled = _config.GetBool("RequestRoutingEnabled", RequestRoutingEnabled);
         InterventionPopupsEnabled = _config.GetBool("InterventionPopupsEnabled", RequestRoutingEnabled);
+        LoadSelectedProfileOnStartup = _config.GetBool("LoadSelectedProfileOnStartup", LoadSelectedProfileOnStartup);
         _runtimeService.SetRequestRoutingTopology(RequestRoutingTopology.DualHot);
         UpdateRequestRoutingModeText();
         SelectedCloudRoutingCapacity = NormalizeCloudRoutingCapacityDisplay(
@@ -10941,6 +12168,47 @@ public partial class MainViewModel : ViewModelBase
     {
         OnPropertyChanged(nameof(LocalVariantContextMax));
         HandleLocalDetailedSettingsChanged();
+        if (!value)
+        {
+            // YaRN turned off: restore the VRAM-only default KV cache type (the same value
+            // AutoTune would calculate for a VRAM-only profile). The wizard's choice only
+            // applies while extending context into RAM; without this, a profile that was
+            // tuned for YaRN (e.g. q6_k) would keep the smaller cache after YaRN is off.
+            var advice = CurrentLocalHardwareAdvice();
+            var resolved = ResolveLocalPriorityOrder(LocalPriorityOrder);
+            var specType = InferSpecTypeFromProfile();
+            if (string.IsNullOrWhiteSpace(specType) || specType.Equals("Auto", StringComparison.OrdinalIgnoreCase))
+            {
+                specType = advice.SpecType;
+            }
+            var vramSettings = LocalPrioritySettingsCalculator.Calculate(
+                resolved,
+                advice,
+                FluxMuxRuntimeService.RecommendStoredChatTemplate(SelectedLocalProfile),
+                specType,
+                LocalVariantSwaFull,
+                LocalVariantAutoCompressEnabled,
+                LocalVariantVisionEnabled,
+                LocalVariantVisionProjectorPath,
+                ((int)LocalVariantVisionMaxImageEdge).ToString(CultureInfo.InvariantCulture),
+                DefaultLocalThreadCount(),
+                DefaultLocalBatchThreadCount(),
+                LocalVariantMaxTokens,
+                ((int)LocalVariantContext).ToString(CultureInfo.InvariantCulture),
+                extendContextIntoRam: false,
+                LocalVariantYarnMaxContext,
+                ComputeEffectiveKvBytesPerToken(),
+                kvCacheChoice: null,
+                LocalVariantUseYarn);
+            var vramKv = LocalPrioritySettingsCalculator.ClampKvCacheTypeAtOrAboveMinimum(
+                vramSettings.GetValueOrDefault("LocalKvCacheTypeK"));
+            if (!string.IsNullOrWhiteSpace(vramKv)
+                && !string.Equals(vramKv, LocalVariantKvCacheTypeK, StringComparison.OrdinalIgnoreCase))
+            {
+                LocalVariantKvCacheTypeK = vramKv;
+                LocalVariantKvCacheTypeV = vramKv;
+            }
+        }
         UpdateLocalKvCacheWizardInfo();
     }
     partial void OnLocalVariantUseYarnChanged(bool value)
@@ -10977,6 +12245,12 @@ public partial class MainViewModel : ViewModelBase
         if (value != null && !string.Equals(value.Value, LocalAutoCompactMode, StringComparison.OrdinalIgnoreCase))
         {
             LocalAutoCompactMode = value.Value;
+            // Changing the compaction mode invalidates any pending context-overflow / near-limit
+            // offer: that offer was computed under the previous mode, and re-surfacing it after the
+            // change (e.g. a stale "context is full" banner when the chat is actually small) is
+            // misleading. Clear it so the next turn re-evaluates under the new mode.
+            _runtimeService.ClearLocalReloadRecommend();
+            RefreshLocalReloadRecommendBanner();
         }
     }
     partial void OnLocalKvCacheWizardChoiceChanged(string value)
@@ -12245,6 +13519,21 @@ public partial class MainViewModel : ViewModelBase
         AppendDiagnosticEntry("PORT", text, "AI-FluxMux");
     }
 
+    private void ApplyHailMaryOffer(string line)
+    {
+        var text = (line ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        HailMaryBannerText = text;
+        HailMaryBannerTooltip = "Cuts the middle of this chat's forwarded history (keeping the most recent turns and the last user task) to make room for the reply. The Client app still has the full chat. This is destructive to the forwarded context — the model loses the older turns it was working from.";
+        HailMaryBannerUrgency = 0; // red — this is a failure state
+        HailMaryBannerVisible = true;
+        AppendDiagnosticEntry("HAIL-MARY", text, "AI-FluxMux");
+    }
+
     private string _lastPortRulesTelemetryDiagnostic = string.Empty;
 
     private void ApplyPortRulesTelemetry(PortRulesTelemetry snap)
@@ -12631,6 +13920,36 @@ public partial class MainViewModel : ViewModelBase
             || CloudRouteIndicatorState is RouteIndicatorState.Live or RouteIndicatorState.Amber;
         RefreshQuickSelectSlotActiveStates(state);
         RefreshLastRouteExplanation();
+        RefreshRunningProfileHighlight();
+    }
+
+    /// <summary>
+    /// Highlights the currently running profile in the Model Profiles tab with a green dot.
+    /// Iterates through the local and cloud variant tree items and sets IsRunning on the
+    /// one that matches the currently mounted route.
+    /// </summary>
+    private void RefreshRunningProfileHighlight()
+    {
+        var runningLocalModel = _runningLocalModel;
+        var runningLocalVariant = _runningLocalVariant;
+        var mountedCloudProvider = _mountedCloudProvider;
+        var mountedCloudModel = _mountedCloudModel;
+        var mountedCloudVariant = _mountedCloudVariant;
+        foreach (var localVariantTreeItem in LocalVariantTreeItems)
+        {
+            var isRunning = !string.IsNullOrWhiteSpace(runningLocalModel)
+                && localVariantTreeItem.ModelName.Equals(runningLocalModel, StringComparison.OrdinalIgnoreCase)
+                && localVariantTreeItem.Name.Equals(runningLocalVariant, StringComparison.OrdinalIgnoreCase);
+            localVariantTreeItem.SetIsRunning(isRunning);
+        }
+        foreach (var cloudVariantTreeItem in CloudVariantTreeItems)
+        {
+            var isRunning = !string.IsNullOrWhiteSpace(mountedCloudModel)
+                && cloudVariantTreeItem.Provider.Equals(mountedCloudProvider, StringComparison.OrdinalIgnoreCase)
+                && cloudVariantTreeItem.ModelName.Equals(mountedCloudModel, StringComparison.OrdinalIgnoreCase)
+                && cloudVariantTreeItem.Name.Equals(mountedCloudVariant, StringComparison.OrdinalIgnoreCase);
+            cloudVariantTreeItem.SetIsRunning(isRunning);
+        }
     }
 
     private void RefreshQuickSelectSlotActiveStates(RouteIndicatorState activeState)
@@ -14995,11 +16314,28 @@ public partial class MainViewModel : ViewModelBase
         string model,
         string variant,
         bool includeLoadEstimate = true,
-        bool dualHotAlongsideLocal = false)
+        bool dualHotAlongsideLocal = false,
+        bool longLoadProfile = false,
+        DateTime? launchStartedUtc = null)
     {
         StopLocalLaunchCountdownMonitor();
+        _localLaunchCountdownStopped = false;
+
+        // Continuous launch-start baseline. Use the caller's launchStartedUtc when
+        // provided (it matches the baseline the recorded launch telemetry uses),
+        // otherwise fall back to now. This is set ONCE and never reset on phase
+        // changes, so the timer spans the entire launch.
+        _localLaunchCountdownStartUtc = launchStartedUtc ?? DateTime.UtcNow;
 
         var estimateMs = includeLoadEstimate ? _runtimeService.GetLocalLaunchEstimateMs(model, variant) : 0;
+        // When no launch telemetry has been recorded yet (estimateMs == 0) and this is a
+        // long-load profile (YaRN / extended-context / GPU+CPU), use a conservative default
+        // estimate so the countdown shows "estimated time left" and the "taking longer than
+        // expected" warning instead of just "elapsed Xs". A cold YaRN load can take minutes.
+        if (estimateMs <= 0 && longLoadProfile)
+        {
+            estimateMs = 200000; // 200 seconds: a realistic cold-load floor for extended-context profiles
+        }
         var target = string.IsNullOrWhiteSpace(variant) ? model : $"{model} / {variant}";
         _localLaunchPhase = dualHotAlongsideLocal
             ? "AI-FluxMux is adding cloud beside the loaded local"
@@ -15018,42 +16354,61 @@ public partial class MainViewModel : ViewModelBase
         RefreshCompositeStatusMessage();
         _ = Task.Run(async () =>
         {
-            var phaseStopwatch = Stopwatch.StartNew();
             var observedPhaseVersion = _localLaunchPhaseVersion;
             try
             {
                 while (!cts.Token.IsCancellationRequested)
                 {
+                    // Track phase changes only to refresh the "why" label. The timer
+                    // itself is continuous (based on _localLaunchCountdownStartUtc) and
+                    // is NOT restarted when the phase changes, so "elapsed" /
+                    // "estimated time left" span the whole launch rather than resetting
+                    // at each stage (pre-warmup → cold load → testing endpoint →
+                    // awaiting response).
                     if (observedPhaseVersion != _localLaunchPhaseVersion)
                     {
                         observedPhaseVersion = _localLaunchPhaseVersion;
-                        phaseStopwatch.Restart();
                     }
 
                     var phase = _localLaunchPhase;
-                    var elapsedMs = (int)Math.Min(int.MaxValue, phaseStopwatch.ElapsedMilliseconds);
+                    var elapsedMs = (int)Math.Min(int.MaxValue, Math.Max(0, (DateTime.UtcNow - _localLaunchCountdownStartUtc).TotalMilliseconds));
                     var remainingMs = estimateMs - elapsedMs;
                     SafeUiInvoke(() =>
                     {
-                        if (!phase.Equals("Loading model", StringComparison.OrdinalIgnoreCase))
+                        // Guard on the UI thread, atomically with the write. Checking this on
+                        // the background thread (before SafeUiInvoke) races with the stop:
+                        // the stop lands on the UI thread and sets StatusMessage = "ready",
+                        // but a frame already dispatched could still execute after it and
+                        // overwrite the ready notice with a stale countdown line. Checking
+                        // here (same thread, same dispatch queue as the stop) prevents that.
+                        if (_localLaunchCountdownStopped)
                         {
-                            StatusMessageBrush = Brushes.SteelBlue;
-                            _localLaunchCountdownText = $"{phase}: {target} | elapsed {FormatTelemetryDuration(elapsedMs)}";
+                            return;
                         }
-                        else if (estimateMs <= 0)
-                        {
-                            StatusMessageBrush = Brushes.SteelBlue;
-                            _localLaunchCountdownText = $"llama-server is loading {target}... elapsed {FormatTelemetryDuration(elapsedMs)}";
-                        }
-                        else if (remainingMs >= 0)
+
+                        // Show the estimate from the start (not just during "Loading model") so
+                        // the user sees "estimated time left" for all models, including the early
+                        // phases (preparing to switch, starting llama-server, etc.).
+                        if (estimateMs > 0 && remainingMs >= 0)
                         {
                             StatusMessageBrush = Brushes.ForestGreen;
-                            _localLaunchCountdownText = $"llama-server is loading {target}... cold-load wait {FormatTelemetryDuration(estimateMs)} | estimated time left {FormatTelemetryDuration(remainingMs)}";
+                            _localLaunchCountdownText = phase.Equals("Loading model", StringComparison.OrdinalIgnoreCase)
+                                ? $"llama-server is loading {target}... cold-load wait {FormatTelemetryDuration(estimateMs)} | estimated time left {FormatTelemetryDuration(remainingMs)}"
+                                : $"{phase}: {target} | estimated time left {FormatTelemetryDuration(remainingMs)}";
+                        }
+                        else if (estimateMs > 0 && remainingMs < 0)
+                        {
+                            StatusMessageBrush = Brushes.DarkOrange;
+                            _localLaunchCountdownText = phase.Equals("Loading model", StringComparison.OrdinalIgnoreCase)
+                                ? $"llama-server is loading {target}... cold-load wait {FormatTelemetryDuration(estimateMs)} | taking longer than a cold load by {FormatTelemetryDuration(Math.Abs(remainingMs))}"
+                                : $"{phase}: {target} | taking longer than expected by {FormatTelemetryDuration(Math.Abs(remainingMs))}";
                         }
                         else
                         {
-                            StatusMessageBrush = Brushes.DarkOrange;
-                            _localLaunchCountdownText = $"llama-server is loading {target}... cold-load wait {FormatTelemetryDuration(estimateMs)} | taking longer than a cold load by {FormatTelemetryDuration(Math.Abs(remainingMs))}";
+                            StatusMessageBrush = Brushes.SteelBlue;
+                            _localLaunchCountdownText = phase.Equals("Loading model", StringComparison.OrdinalIgnoreCase)
+                                ? $"llama-server is loading {target}... elapsed {FormatTelemetryDuration(elapsedMs)}"
+                                : $"{phase}: {target} | elapsed {FormatTelemetryDuration(elapsedMs)}";
                         }
 
                         RefreshCompositeStatusMessage();
@@ -15105,6 +16460,26 @@ public partial class MainViewModel : ViewModelBase
             return "AI-FluxMux is testing the public endpoint";
         }
 
+        // 4th launch stage: the model is loaded and the port is open, but the first
+        // actual reply through the public endpoint has not come back yet. This is the
+        // "still loading / waiting for first reply / waiting for health check" window.
+        // It gets its own label so the user sees a distinct stage (and the continuous
+        // timer keeps running through it) instead of the countdown appearing to stall.
+        if (text.Contains("waiting for first reply", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("waiting for health check", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("waiting for the public endpoint", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("still loading", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Awaiting endpoint response";
+        }
+
+        if (text.Contains("measuring first reply", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("first reply in", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("first-response total", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Measuring first reply";
+        }
+
         if (text.Contains("stopping llama-server", StringComparison.OrdinalIgnoreCase))
         {
             return "AI-FluxMux is stopping llama-server";
@@ -15127,6 +16502,9 @@ public partial class MainViewModel : ViewModelBase
     {
         void StopCore()
         {
+            // Mark stopped FIRST so the background task's next write is suppressed, even
+            // if it's mid-iteration when this stop is dispatched to the UI thread.
+            _localLaunchCountdownStopped = true;
             try
             {
                 _localLaunchCountdownCts?.Cancel();
@@ -17583,7 +18961,7 @@ public partial class MainViewModel : ViewModelBase
         settings["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString();
         settings["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString();
         settings["LocalAutoCompactPinUserChars"] = ((int)LocalAutoCompactPinUserChars).ToString();
-        settings["OverrideMaxTokens"] = LocalVariantMaxTokens;
+        settings["LocalMaxForwardedImages"] = ((int)LocalMaxForwardedImages).ToString();
         settings["LocalBatchSize"] = LocalVariantBatchSize;
         settings["LocalUbatchSize"] = LocalVariantUbatchSize;
         settings["LocalSpecType"] = FluxMuxRuntimeService.NormalizeLlamaSpecType(LocalVariantSpecType);
@@ -18188,7 +19566,7 @@ public partial class MainViewModel : ViewModelBase
         LocalAutoCompactKeepTurns = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactKeepTurns"]?.ToString() ?? string.Empty, 6d), 4m, 12m);
         LocalAutoCompactKeepToolResults = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactKeepToolResults"]?.ToString() ?? string.Empty, 8d), 4m, 16m);
         LocalAutoCompactPinUserChars = Math.Clamp((decimal)ParseDouble(settings["LocalAutoCompactPinUserChars"]?.ToString() ?? string.Empty, 2000d), 500m, 5000m);
-        LocalVariantFit = CoerceOnOff(settings["LocalFit"]?.ToString(), advice.PreferFitEnabled ? "Enabled" : "Disabled");
+        LocalMaxForwardedImages = Math.Clamp((decimal)ParseDouble(settings["LocalMaxForwardedImages"]?.ToString() ?? string.Empty, 1d), 1m, 8m);
         LocalVariantFit = LocalOnOffOptions.FirstOrDefault(option =>
             option.Equals(LocalVariantFit, StringComparison.OrdinalIgnoreCase)) ?? LocalVariantFit;
         LocalVariantFitEnabled = LocalVariantFit.Equals("Enabled", StringComparison.OrdinalIgnoreCase);
@@ -19599,7 +20977,7 @@ public partial class MainViewModel : ViewModelBase
         LocalAutoCompactKeepTurns = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactKeepTurns", LocalAutoCompactKeepTurns.ToString()), 6d), 4m, 12m);
         LocalAutoCompactKeepToolResults = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactKeepToolResults", LocalAutoCompactKeepToolResults.ToString()), 8d), 4m, 16m);
         LocalAutoCompactPinUserChars = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactPinUserChars", LocalAutoCompactPinUserChars.ToString()), 2000d), 500m, 5000m);
-        // Sync the detailed settings "Compact" checkbox with the wizard's mode.
+        LocalMaxForwardedImages = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalMaxForwardedImages", LocalMaxForwardedImages.ToString()), 1d), 1m, 8m);
         LocalVariantAutoCompressEnabled = !string.Equals(LocalAutoCompactMode, "none", StringComparison.OrdinalIgnoreCase);
         RefreshLocalVisionHint();
         UpdateLocalPrioritySummaryTexts();
@@ -19694,7 +21072,7 @@ public partial class MainViewModel : ViewModelBase
         // Build the options list: only include types that physically fit AND are usable speed-wise.
         // A KV cache that's mostly in system RAM gives minutes-per-token, which is not a setting
         // a user should have to consciously choose. Exclude those options entirely.
-        string[] allTypes = ["q8_0", "q6_k", "q5_1", "q4_1"];
+        string[] allTypes = ["q8_0", "q6_k", "q5_1", "q4_1", "q4_0"];
         var fitting = new List<string>();
         foreach (var type in allTypes)
         {
@@ -19725,6 +21103,21 @@ public partial class MainViewModel : ViewModelBase
             fitting.Add(type);
         }
 
+        // Determine what "Auto" resolves to using PickKvTypeForYarnFit, which picks the
+        // best-fitting KV type based on VRAM availability. This is consistent with the
+        // priority wizard's auto-pick and ensures the wizard shows the same type that
+        // Calculate() would pick. Fall back to the first fitting type if PickKvTypeForYarnFit
+        // returns a type that's not in the fitting list (e.g. when the speed check excluded it).
+        var autoResolved = LocalPrioritySettingsCalculator.PickKvTypeForYarnFit(
+            advice,
+            effectiveContext,
+            extendIntoRam,
+            ComputeEffectiveKvBytesPerToken());
+        if (!fitting.Contains(autoResolved, StringComparer.OrdinalIgnoreCase))
+        {
+            autoResolved = fitting.Count > 0 ? fitting[0] : "q4_0";
+        }
+
         // Rebuild the options list. Do NOT null LocalKvCacheWizardChoice before clearing:
         // doing so fires OnLocalKvCacheWizardChoiceChanged (via the ObservableProperty setter)
         // while the ComboBox binding is mid-update, which can re-enter UpdateLocalKvCacheWizardInfo
@@ -19734,15 +21127,13 @@ public partial class MainViewModel : ViewModelBase
         {
             // Nothing is both fast enough and fits. Show the coarsest option so the user
             // can see why (won't run, or too slow) and adjust the context target.
-            LocalKvCacheWizardOptions.Add(new KvCacheWizardOption { Value = "q4_1", Display = "q4_1" });
-            LocalKvCacheWizardChoice = "q4_1";
+            LocalKvCacheWizardOptions.Add(new KvCacheWizardOption { Value = "q4_0", Display = "q4_0" });
+            LocalKvCacheWizardChoice = "q4_0";
             SelectedKvCacheWizardIndex = 0;
             LocalKvCacheAutoResolvedType = string.Empty;
         }
         else
         {
-            // Determine what "Auto" resolves to (the first fitting type).
-            var autoResolved = fitting[0];
             LocalKvCacheAutoResolvedType = autoResolved;
             LocalKvCacheWizardOptions.Add(new KvCacheWizardOption
             {
@@ -19781,9 +21172,20 @@ public partial class MainViewModel : ViewModelBase
         string autoNote = string.Empty;
         if (string.IsNullOrWhiteSpace(choice) || choice.Equals("Auto", StringComparison.OrdinalIgnoreCase))
         {
-            choice = fitting.Count > 0 ? fitting[0] : "q4_1";
+            choice = autoResolved;
             // Show which type Auto would pick (in the info text below the dropdown).
             autoNote = $"Auto picks {choice}. ";
+        }
+
+        // Sync the wizard's KV cache choice back to the detailed settings so the launch
+        // args (-ctk/-ctv) match what the wizard shows. The wizard takes precedence when
+        // YaRN is enabled: without this, the wizard could show "Auto → q6_k" while the
+        // profile still carries q8_0, and the launch would use the larger, slower cache.
+        if (!_isHydratingLocalVariantForm && !string.Equals(choice, "Auto", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(choice, LocalVariantKvCacheTypeK, StringComparison.OrdinalIgnoreCase))
+        {
+            LocalVariantKvCacheTypeK = choice;
+            LocalVariantKvCacheTypeV = choice;
         }
 
         // Use the effective KV bytes per token for the chosen type (accounts for hybrid-KV and
@@ -19816,8 +21218,8 @@ public partial class MainViewModel : ViewModelBase
 
         if (fitsOnGpu)
         {
-            fitLine = $"Fits on your {gpuGb:F0} GB GPU with room to spare.";
-            perfLine = "Fast: the whole context lives on the GPU.";
+            fitLine = $"Fits on your {gpuGb:F0} GB GPU.";
+            perfLine = "Cold load slower than VRAM-only (bigger KV cache).";
         }
         else if (fitsInSystem)
         {
@@ -19826,20 +21228,20 @@ public partial class MainViewModel : ViewModelBase
             {
                 // This option was excluded from the list, but the user somehow selected it
                 // (e.g. it was selected before they changed the context target).
-                fitLine = $"~{gpuFits:F0} GB stays on the GPU, ~{ramSpill:F0} GB spills to system RAM.";
+                fitLine = $"~{gpuFits:F0} GB on GPU, ~{ramSpill:F0} GB in RAM.";
                 perfLine = "Too slow: most of the context lives in system RAM. Lower the context target or use a smaller model.";
                 fidelityLine = string.Empty;
             }
             else
             {
-                fitLine = $"~{gpuFits:F0} GB stays on the GPU, ~{ramSpill:F0} GB spills to system RAM.";
-                perfLine = "Moderate speed: most of the context is on the GPU, some in RAM.";
+                fitLine = $"~{gpuFits:F0} GB on GPU, ~{ramSpill:F0} GB in RAM.";
+                perfLine = "Slower tokens than VRAM-only (part of the context is in RAM).";
             }
         }
         else
         {
-            fitLine = $"The overflow needs ~{ramSpill:F0} GB of system RAM, but only ~{availableRam:F0} GB is available.";
-            perfLine = "Will not run. Pick a lower context target or a smaller model.";
+            fitLine = $"Needs ~{ramSpill:F0} GB RAM, only ~{availableRam:F0} GB free.";
+            perfLine = "Won't run. Pick a lower context target or a smaller model.";
             fidelityLine = string.Empty;
         }
 
@@ -19895,7 +21297,7 @@ public partial class MainViewModel : ViewModelBase
             ["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString(),
             ["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString(),
             ["LocalAutoCompactPinUserChars"] = ((int)LocalAutoCompactPinUserChars).ToString(),
-            ["OverrideMaxTokens"] = LocalVariantMaxTokens,
+            ["LocalMaxForwardedImages"] = ((int)LocalMaxForwardedImages).ToString(),
             ["LocalBatchSize"] = LocalVariantBatchSize,
             ["LocalUbatchSize"] = LocalVariantUbatchSize,
             ["LocalSpecType"] = LocalVariantSpecType,
@@ -20657,6 +22059,33 @@ public partial class MainViewModel : ViewModelBase
         var targetKey = $"{model.Trim()}::{ProfileConfigVariantName(variantName)}";
         var matchingKey = profiles.Select(x => x.Key).FirstOrDefault(x => x.Equals(targetKey, StringComparison.OrdinalIgnoreCase));
         return string.IsNullOrWhiteSpace(matchingKey) ? null : profiles[matchingKey] as JsonObject;
+    }
+
+    /// <summary>
+    /// True when the given local profile is one that loads slowly from cold — an
+    /// extended-context (YaRN) profile, or a profile that spills KV into system RAM
+    /// (GPU+CPU / CPU-only offload). Used to (a) show an up-front "this will take a
+    /// while" warning at launch, and (b) give the countdown monitor a realistic estimate
+    /// when no launch telemetry has been recorded yet.
+    /// </summary>
+    private bool IsLongLoadLocalProfile(string? model, string? variant)
+    {
+        try
+        {
+            var settings = GetLiveLocalProfileSettings(variant ?? string.Empty, model);
+            if (settings is null)
+            {
+                return false;
+            }
+
+            var context = ParseInt(settings["OverrideContext"]?.ToString() ?? string.Empty, 0);
+            var offload = settings["LocalGpuOffloadMode"]?.ToString() ?? string.Empty;
+            return LocalLoadingRetryPolicy.IsLongLoadProfile(context, offload);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private JsonObject? GetLiveCloudProfileSettings(string variantName, string? provider = null, string? modelName = null)

@@ -19,7 +19,8 @@ public readonly record struct EndpointSettingsSnapshot(
     bool ReasoningOn,
     string DisplayName,
     string ModelId,
-    bool CreateHarnessSettingsIfMissing)
+    bool CreateHarnessSettingsIfMissing,
+    int MaxContextWindow = 0)
 {
     public string Fingerprint()
         => string.Join(

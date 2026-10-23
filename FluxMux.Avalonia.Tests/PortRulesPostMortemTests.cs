@@ -349,4 +349,38 @@ public sealed class PortRulesPostMortemTests
         Assert.Contains("gives compaction more room", text, StringComparison.Ordinal);
         Assert.Contains("Launch a model profile with higher **Context**", text, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Context_overflow_with_port_rules_off_does_not_name_a_Port_rule()
+    {
+        // When Port rules are off (or the profile's compaction mode is "None / endpoint
+        // managed"), the overflow was a safety check, not a Port rule. The message must not
+        // blame "Port rule Headroom / Watermark %" or point at "Servers → Advanced: Port rules".
+        var text = PortRulesPostMortem.FormatContextOverflow(
+            compactApplied: false,
+            PortForwardingRules.Defaults,
+            portRulesActive: false);
+        Assert.Contains("this turn was too large for the loaded Context", text);
+        Assert.Contains(PortRulesPostMortem.RaiseContextAdvice, text);
+        Assert.Contains(PortRulesPostMortem.SmallerNextStepAdvice, text);
+        Assert.DoesNotContain("Port rule", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Port-rule", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("**Headroom**", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("**Watermark %**", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(PortRulesPostMortem.PortRulesLocation, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Context_overflow_with_port_rules_on_still_names_the_Port_rule()
+    {
+        // The Port-rule wording is preserved when Port rules are actually active, so the
+        // user is pointed at the settings that genuinely control compaction.
+        var text = PortRulesPostMortem.FormatContextOverflow(
+            compactApplied: true,
+            PortForwardingRules.Defaults,
+            portRulesActive: true);
+        Assert.Contains("**Watermark %**", text);
+        Assert.Contains("**Headroom**", text);
+        Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
+    }
 }

@@ -36,8 +36,9 @@ public static class LocalVramFootprintEstimate
 
     public const double TextWorkingLeftoverGiB = 12.0;
 
-    public static int AdviseModelMaxContext(int reportedCtx)
+    public static int AdviseModelMaxContext(int reportedCtx, int maxContextWindow = 0)
     {
+        var cap = maxContextWindow > 0 ? maxContextWindow : DeepSeekHarnessSetup.MaxLocalContextWindow;
         if (reportedCtx <= 0)
         {
             return LongContextMetadataFloor;
@@ -45,15 +46,16 @@ public static class LocalVramFootprintEstimate
 
         if (reportedCtx < LongContextMetadataFloor)
         {
-            return Math.Clamp(reportedCtx, 4096, DeepSeekHarnessSetup.MaxLocalContextWindow);
+            return Math.Clamp(reportedCtx, 4096, cap);
         }
 
-        return DeepSeekHarnessSetup.MaxLocalContextWindow;
+        return cap;
     }
 
-    public static int SnapContextTokens(double tokens)
+    public static int SnapContextTokens(double tokens, int maxContextWindow = 0)
     {
-        var clamped = Math.Clamp(tokens, 4096.0, DeepSeekHarnessSetup.MaxLocalContextWindow);
+        var cap = maxContextWindow > 0 ? maxContextWindow : DeepSeekHarnessSetup.MaxLocalContextWindow;
+        var clamped = Math.Clamp(tokens, 4096.0, cap);
         return (int)(Math.Floor(clamped / 1024.0) * 1024.0);
     }
 

@@ -30,6 +30,42 @@ public sealed class UpdateCheckTests
     }
 
     [Fact]
+    public void Version_compare_distinguishes_prerelease_from_stable()
+    {
+        // Stable > prerelease (same numeric triple).
+        Assert.True(AppVersionComparer.Compare("0.2.1-alpha.5", "0.2.1") < 0);
+        Assert.True(AppVersionComparer.Compare("0.2.1", "0.2.1-alpha.5") > 0);
+        Assert.True(AppVersionComparer.Compare("0.2.1-rc.2", "0.2.1") < 0);
+        Assert.True(AppVersionComparer.Compare("0.2.1", "0.2.1-rc.2") > 0);
+    }
+
+    [Fact]
+    public void Version_compare_orders_prerelease_identifiers()
+    {
+        // alpha < beta < rc < stable.
+        Assert.True(AppVersionComparer.Compare("0.2.1-alpha.5", "0.2.1-beta.1") < 0);
+        Assert.True(AppVersionComparer.Compare("0.2.1-beta.1", "0.2.1-rc.1") < 0);
+        Assert.True(AppVersionComparer.Compare("0.2.1-rc.1", "0.2.1") < 0);
+    }
+
+    [Fact]
+    public void Version_compare_orders_prerelease_numeric_suffix()
+    {
+        // Within the same identifier type, higher numeric suffix is newer.
+        Assert.True(AppVersionComparer.Compare("0.2.1-rc.1", "0.2.1-rc.2") < 0);
+        Assert.True(AppVersionComparer.Compare("0.2.1-alpha.4", "0.2.1-alpha.5") < 0);
+        Assert.True(AppVersionComparer.Compare("0.2.1-rc.2", "0.2.1-rc.1") > 0);
+    }
+
+    [Fact]
+    public void Version_compare_rc_beats_alpha_with_same_numeric_triple()
+    {
+        // The exact scenario that broke the harness update: rc.2 should beat alpha.5.
+        Assert.True(AppVersionComparer.Compare("0.2.1-alpha.5", "0.2.1-rc.2") < 0);
+        Assert.True(AppVersionComparer.Compare("0.2.1-rc.2", "0.2.1-alpha.5") > 0);
+    }
+
+    [Fact]
     public void Manifest_requires_fluxmux_protocol()
     {
         var feed = new Uri("https://example.com/fluxmux-updates.json");

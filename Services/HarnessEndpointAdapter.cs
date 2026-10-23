@@ -26,7 +26,8 @@ internal sealed class HarnessEndpointAdapter(string id) : IEndpointSettingsAdapt
                 snapshot.AdvertisedMaxTokens,
                 snapshot.ImagesOn,
                 snapshot.ReasoningOn,
-                snapshot.DisplayName));
+                snapshot.DisplayName,
+                snapshot.MaxContextWindow));
         return new EndpointSettingsSyncResult(
             Id,
             result.Success,

@@ -248,18 +248,57 @@ public sealed class PortForwardingRulesTests
     }
 
     [Fact]
-    public void Compact_sets_cache_prompt_false_when_the_checkbox_is_on()
+    public void Long_load_profile_detection_is_context_or_ram_spill()
+    {
+        // Extended context (above the native 128K window) is a long-load signal.
+        Assert.True(LocalLoadingRetryPolicy.IsLongLoadProfile(393216, "GPU only"));
+        // RAM spill (GPU+CPU / CPU-only offload) is a long-load signal even at normal context.
+        Assert.True(LocalLoadingRetryPolicy.IsLongLoadProfile(32768, "GPU + CPU"));
+        Assert.True(LocalLoadingRetryPolicy.IsLongLoadProfile(32768, "CPU only"));
+        // Normal context + GPU-only offload is NOT a long-load profile.
+        Assert.False(LocalLoadingRetryPolicy.IsLongLoadProfile(32768, "GPU only"));
+        Assert.False(LocalLoadingRetryPolicy.IsLongLoadProfile(0, "GPU only"));
+    }
+
+    [Fact]
+    public void Long_load_profile_gets_a_much_longer_retry_window()
+    {
+        var rules = PortForwardingRules.Defaults with { LoadingRetryCount = 6, LoadingRetryDelaySeconds = 2 };
+
+        // Normal profile: stops retrying after the configured 6 retries.
+        Assert.True(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 5, rules, localContext: 32768, gpuOffloadMode: "GPU only"));
+        Assert.False(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 6, rules, localContext: 32768, gpuOffloadMode: "GPU only"));
+
+        // Long-load profile (YaRN / extended context): keeps retrying far past 6, up to the
+        // long-load budget, so a cold load that takes minutes is ridden out instead of failing.
+        Assert.True(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 6, rules, localContext: 393216, gpuOffloadMode: "GPU + CPU"));
+        Assert.True(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 100, rules, localContext: 393216, gpuOffloadMode: "GPU + CPU"));
+        Assert.True(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", LocalLoadingRetryPolicy.LongLoadRetryCount - 1, rules, localContext: 393216, gpuOffloadMode: "GPU + CPU"));
+        Assert.False(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", LocalLoadingRetryPolicy.LongLoadRetryCount, rules, localContext: 393216, gpuOffloadMode: "GPU + CPU"));
+    }
+
+    [Fact]
+    public void Long_load_profile_uses_a_longer_total_wait_cap()
+    {
+        Assert.Equal(LocalLoadingRetryPolicy.MaxTotalWaitSeconds, LocalLoadingRetryPolicy.EffectiveMaxTotalWaitSeconds(32768, "GPU only"));
+        Assert.Equal(LocalLoadingRetryPolicy.LongLoadMaxTotalWaitSeconds, LocalLoadingRetryPolicy.EffectiveMaxTotalWaitSeconds(393216, "GPU + CPU"));
+    }
+
+    [Fact]
+    public void Compact_always_sets_cache_prompt_false()
     {
         var payload = new JsonObject();
         LocalPrefixCachePolicy.ApplyAfterCompact(payload, compactApplied: true);
         Assert.False(payload["cache_prompt"]!.GetValue<bool>());
 
+        // Even with the rule explicitly off, the cache is always skipped after a compact
+        // because reusing the old KV cache after a prefix change is never safe.
         var keep = new JsonObject();
         LocalPrefixCachePolicy.ApplyAfterCompact(
             keep,
             compactApplied: true,
             PortForwardingRules.Defaults with { SkipPrefixCacheAfterCompact = false });
-        Assert.Null(keep["cache_prompt"]);
+        Assert.False(keep["cache_prompt"]!.GetValue<bool>());
     }
 
     [Fact]

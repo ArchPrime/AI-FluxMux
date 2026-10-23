@@ -33,6 +33,9 @@ public static class HarnessUpdateService
         var backup = Path.Combine(backupRoot, "dsh-config-" + stamp);
 
         // 1. Back up the config first, so a bad update is always reversible.
+        // Use a copy (not a move) so the backup is created even when the .dsh directory
+        // is locked by a running DSH process. The original .dsh stays in place; the npm
+        // update will overwrite it in situ.
         if (Directory.Exists(configDir))
         {
             Report("Backing up " + configDir + " ...");
@@ -50,7 +53,7 @@ public static class HarnessUpdateService
 
             try
             {
-                Directory.Move(configDir, backup);
+                CopyDirectory(configDir, backup);
             }
             catch (Exception ex)
             {
@@ -133,6 +136,25 @@ public static class HarnessUpdateService
     }
 
     private static HarnessUpdateOutcome Fail(string message) => new() { Succeeded = false, StatusText = message };
+
+    /// <summary>
+    /// Recursively copies a directory tree. Used instead of Directory.Move so the backup
+    /// is created even when the source directory is locked by a running process.
+    /// </summary>
+    private static void CopyDirectory(string sourceDir, string destDir)
+    {
+        Directory.CreateDirectory(destDir);
+        foreach (var file in Directory.GetFiles(sourceDir))
+        {
+            var destFile = Path.Combine(destDir, Path.GetFileName(file));
+            File.Copy(file, destFile, overwrite: true);
+        }
+        foreach (var subDir in Directory.GetDirectories(sourceDir))
+        {
+            var destSubDir = Path.Combine(destDir, Path.GetFileName(subDir));
+            CopyDirectory(subDir, destSubDir);
+        }
+    }
 
     private static (int ExitCode, string Output) RunProcess(string fileName, string arguments, out string output)
     {

@@ -91,6 +91,20 @@ public sealed partial class CloudVariantTreeItemViewModel : ObservableObject
     public void ApplyProfileWarning(bool show, string tooltip)
         => ApplyEndpointStatus(show, tooltip, isValidatedOnDisk: false, hasUnsavedEdits: false);
 
+    /// <summary>
+    /// Sets whether this profile is the one currently running. Called when the
+    /// running profile changes (launch, stop, switch).
+    /// </summary>
+    public void SetIsRunning(bool isRunning)
+    {
+        if (IsRunning == isRunning)
+        {
+            return;
+        }
+        IsRunning = isRunning;
+        OnPropertyChanged(nameof(IsRunning));
+    }
+
     public void ApplyEndpointStatus(bool showWarning, string warningTooltip, bool isValidatedOnDisk, bool hasUnsavedEdits)
     {
         ShowMissingFileWarning = showWarning;
@@ -175,6 +189,12 @@ public sealed partial class CloudVariantTreeItemViewModel : ObservableObject
     public bool ShowMissingFileWarning { get; private set; }
 
     public bool ShowValidatedCheck { get; private set; }
+
+    /// <summary>
+    /// True when this profile is the one currently running (launched from Quick Select).
+    /// Shown as a green "● Running" badge in the profile list.
+    /// </summary>
+    public bool IsRunning { get; private set; }
 
     public string MissingFileWarningTooltip { get; private set; } = string.Empty;
 

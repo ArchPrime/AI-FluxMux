@@ -787,4 +787,105 @@ public sealed class LocalPrioritySettingsCalculatorTests
         Assert.True(ctx > 131072, $"Expected extension, got {ctx}");
         Assert.True(ctx < 512 * 1024, $"Expected RAM-bounded context under 512K, got {ctx}");
     }
+
+    [Fact]
+    public void PickKvTypeForYarnFit_uses_effective_bytes_per_token_for_hybrid_models()
+    {
+        // 32 GB GPU, 17.8 GB model (Qwen3.8 NVFP4).
+        // Available VRAM for KV: 32 - 17.8 - overhead(~1.4) ≈ 12.8 GB.
+        // Raw q8_0 = 256 KB/token. At 393K context: 393216 * 256KB = 96 GB → doesn't fit.
+        // Effective q8_0 (hybrid 0.38 * FA 0.75 = 0.285): 256KB * 0.285 = 73 KB/token.
+        // At 393K context: 393216 * 73KB = 27.9 GB → still doesn't fit.
+        // Effective q4_0: 96KB * 0.285 = 27.4 KB/token. At 393K: 393216 * 27.4KB = 10.4 GB → fits.
+        // So the auto-pick should return q4_0, not q8_0.
+        var advice = new FluxMuxRuntimeService.LocalHardwareLaunchAdvice
+        {
+            GpuTotalGb = 32,
+            ModelFileGb = 17.8,
+            NvidiaAvailable = true,
+            ContextPriorityFirst = 262144,
+            ModelMaxCtx = 262144,
+            TotalRamGb = 64.0,
+            KvBytesPerToken = 262144,
+            HybridKv = true,
+            OffloadMode = "GPU + CPU",
+            OffloadModeAtMaxContext = "GPU + CPU"
+        };
+
+        // effectiveKvBytesPerToken = q8_0 raw (256KB) * 0.38 (hybrid) * 0.75 (FA) = 73,728
+        long effectiveBytes = (long)(256 * 1024 * 0.38 * 0.75);
+
+        var result = LocalPrioritySettingsCalculator.PickKvTypeForYarnFit(
+            advice,
+            contextTokens: 393216,
+            extendContextIntoRam: true,
+            effectiveKvBytesPerToken: effectiveBytes);
+
+        // Without the effective-bytes fix, q8_0 would be returned (96 GB raw > 12.8 GB,
+        // but the old code used raw bytes which made q8_0 "fit" incorrectly).
+        // With the fix, q8_0 effective = 27.9 GB > 12.8 GB, so it degrades.
+        Assert.True(result != "q8_0",
+            $"q8_0 should NOT be picked when the effective KV cache doesn't fit in VRAM, got {result}");
+    }
+
+    [Fact]
+    public void PickKvTypeForYarnFit_returns_q8_when_effective_kv_fits()
+    {
+        // 32 GB GPU, 10 GB model. Available VRAM for KV: 32 - 10 - overhead(~1.2) ≈ 20.8 GB.
+        // Effective q8_0 (hybrid 0.38 * FA 0.75 = 0.285): 256KB * 0.285 = 73 KB/token.
+        // At 131K context: 131072 * 73KB = 9.4 GB → fits in 20.8 GB.
+        var advice = new FluxMuxRuntimeService.LocalHardwareLaunchAdvice
+        {
+            GpuTotalGb = 32,
+            ModelFileGb = 10.0,
+            NvidiaAvailable = true,
+            ContextPriorityFirst = 131072,
+            ModelMaxCtx = 131072,
+            TotalRamGb = 64.0,
+            KvBytesPerToken = 262144,
+            HybridKv = true,
+            OffloadMode = "GPU + CPU",
+            OffloadModeAtMaxContext = "GPU + CPU"
+        };
+
+        long effectiveBytes = (long)(256 * 1024 * 0.38 * 0.75);
+
+        var result = LocalPrioritySettingsCalculator.PickKvTypeForYarnFit(
+            advice,
+            contextTokens: 131072,
+            extendContextIntoRam: true,
+            effectiveKvBytesPerToken: effectiveBytes);
+
+        Assert.True(result == "q8_0",
+            $"q8_0 should be picked when the effective KV cache fits in VRAM, got {result}");
+    }
+
+    [Fact]
+    public void PickKvTypeForYarnFit_without_effective_bytes_uses_raw()
+    {
+        // When effectiveKvBytesPerToken is null, the method falls back to raw bytes.
+        // 32 GB GPU, 10 GB model. Available VRAM for KV: ~20.8 GB.
+        // Raw q8_0 = 256 KB/token. At 65K context: 65536 * 256KB = 16 GB → fits.
+        var advice = new FluxMuxRuntimeService.LocalHardwareLaunchAdvice
+        {
+            GpuTotalGb = 32,
+            ModelFileGb = 10.0,
+            NvidiaAvailable = true,
+            ContextPriorityFirst = 65536,
+            ModelMaxCtx = 65536,
+            TotalRamGb = 64.0,
+            KvBytesPerToken = 262144,
+            OffloadMode = "GPU + CPU",
+            OffloadModeAtMaxContext = "GPU + CPU"
+        };
+
+        var result = LocalPrioritySettingsCalculator.PickKvTypeForYarnFit(
+            advice,
+            contextTokens: 65536,
+            extendContextIntoRam: true,
+            effectiveKvBytesPerToken: null);
+
+        Assert.True(result == "q8_0",
+            $"q8_0 should be picked when raw KV cache fits in VRAM, got {result}");
+    }
 }
