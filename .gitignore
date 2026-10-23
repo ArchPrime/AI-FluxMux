@@ -43,3 +43,23 @@ _cloud_duty_probe.txt
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Session and agent scratch
+.tmp-session-*.jsonl
+.tmp-sessions/
+_user_msgs*.txt
+_assistant_msgs*.txt
+
+# Backups and recovery scratch
+backup/
+master/
+acl-recovery/
+*.mangled-backup
+*.reverted-backup
+*.old-backup
+
+# One-off scripts and release scratch
+build_testrun.ps1
+current_release_body.md
+new_release_body.md
+
