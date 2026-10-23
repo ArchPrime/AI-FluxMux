@@ -412,7 +412,7 @@
                                                                                   <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}"
                                                                                             SelectedItem="{Binding SelectedLocalAutoCompactModeOption}"
                                                                                             HorizontalAlignment="Stretch"
-                                                                                            ToolTip.Tip="Auto-compact settings here override the default Port rules compaction settings. Port rules default uses the global defaults from Servers - Advanced: Port rules. Profile-specific uses the per-profile settings below. None / endpoint managed disables FluxMux compaction and lets the Client app manage it." />
+                                                                                            ToolTip.Tip="Choose how auto-compact settings are sourced for this profile. Use Port rules applies the shared settings from Servers - Advanced: Port rules. Profile-specific uses the per-profile settings below. None / endpoint managed disables FluxMux compaction and lets the endpoint manage context. Compaction only happens according to the selected option." />
                                                                               </StackPanel>
                                                                               <StackPanel Orientation="Horizontal" Spacing="6"
                                                                                              IsVisible="{Binding LocalAutoCompactMode, Converter={x:Static vm:StringEqualsConverter.Instance}, ConverterParameter=per-profile}">
@@ -523,7 +523,7 @@
                                                                             <TextBlock FontSize="12" FontWeight="SemiBold" Text="Fit and memory" />
                                                                             <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="6">
                                                                         <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Context" />
-                                                                        <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="1024" Maximum="262144" Increment="1024" Value="{Binding LocalVariantContext}" ToolTip.Tip="How much of the chat the model can keep in mind. Bigger uses more graphics memory and may need a full reload later. AutoTune sizes this from leftover GPU memory after Images (Max image edge). On this 32 GB PC the daily NVFP4 sizes are 213056 with Images off and 163840 with Images on." />
+                                                                        <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="1024" Maximum="{Binding LocalVariantContextMax}" Increment="1024" Value="{Binding LocalVariantContext}" ToolTip.Tip="How much of the chat the model can keep in mind. Bigger uses more graphics memory and may need a full reload later. AutoTune sizes this from leftover GPU memory after Images (Max image edge). On this 32 GB PC the daily NVFP4 sizes are 213056 with Images off and 163840 with Images on." />
                                                                         <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Flash" />
                                                                         <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantFlashAttention}" ToolTip.Tip="Can make long chats faster if your graphics card supports it. Leave Auto/On unless long chats feel broken." />
                                                                         <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Fit VRAM" />
@@ -719,6 +719,46 @@
                         </Border>
                         <StackPanel x:Name="SashDots"
                                     Orientation="Horizontal"
+                                    Spacing="5"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center"
+                                    IsHitTestVisible="False">
+                            <shapes:Ellipse Width="4" Height="4" Fill="{DynamicResource FluxSashGrip}" />
+                            <shapes:Ellipse Width="4" Height="4" Fill="{DynamicResource FluxSashGrip}" />
+                            <shapes:Ellipse Width="4" Height="4" Fill="{DynamicResource FluxSashGrip}" />
+                        </StackPanel>
+                    </Panel>
+                </ControlTemplate>
+            </Setter>
+            <Style Selector="^:pointerover /template/ Border#SashHoverLine">
+                <Setter Property="Opacity" Value="0.85" />
+            </Style>
+            <Style Selector="^:pressed /template/ Border#SashHoverLine">
+                <Setter Property="Opacity" Value="0.85" />
+            </Style>
+        </ControlTheme>
+        <ControlTheme x:Key="DiagnosticsVerticalSashTheme" TargetType="GridSplitter">
+            <Setter Property="Background" Value="{DynamicResource FluxChromeBackground}" />
+            <Setter Property="MinWidth" Value="12" />
+            <Setter Property="Focusable" Value="True" />
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Panel Background="{TemplateBinding Background}">
+                        <Border x:Name="SashHoverLine"
+                                Width="4"
+                                CornerRadius="2"
+                                HorizontalAlignment="Center"
+                                Background="{DynamicResource FluxSashHover}"
+                                IsHitTestVisible="False"
+                                Opacity="0">
+                            <Border.Transitions>
+                                <Transitions>
+                                    <DoubleTransition Property="Opacity" Duration="0:0:0.10" />
+                                </Transitions>
+                            </Border.Transitions>
+                        </Border>
+                        <StackPanel x:Name="SashDots"
+                                    Orientation="Vertical"
                                     Spacing="5"
                                     HorizontalAlignment="Center"
                                     VerticalAlignment="Center"
@@ -940,12 +980,12 @@
         <Style Selector="TextBox.diagnosticTerminal:focus">
             <Setter Property="Background" Value="#101828" />
             <Setter Property="Foreground" Value="#D1FADF" />
-            <Setter Property="BorderBrush" Value="#53B1FD" />
+            <Setter Property="BorderBrush" Value="#344054" />
         </Style>
         <Style Selector="TextBox.diagnosticTerminal:focus-within">
             <Setter Property="Background" Value="#101828" />
             <Setter Property="Foreground" Value="#D1FADF" />
-            <Setter Property="BorderBrush" Value="#53B1FD" />
+            <Setter Property="BorderBrush" Value="#344054" />
         </Style>
     </Window.Styles>
 
@@ -955,12 +995,12 @@
             <ScaleTransform ScaleX="1" ScaleY="1" />
         </LayoutTransformControl.LayoutTransform>
 
-    <Grid>
+    <Grid x:Name="MainLayoutGrid">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="5*" MinHeight="160" />
+            <RowDefinition Height="*" MinHeight="160" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" MinHeight="200" />
+            <RowDefinition Height="{Binding DiagnosticsRowHeight}" MinHeight="120" />
         </Grid.RowDefinitions>
         <Border Grid.Row="0"
                 Padding="18,8,0,8"
@@ -1023,6 +1063,14 @@
                         <views:OptionInfoNote InfoId="quickselect.intro"
                                               NoteText="Quick Select only runs profiles that already passed **Validate to endpoint** on the Model Profiles tab. Choose a validated profile in a slot, click **Save**, then **Launch**. A newly validated copy is offered on the first empty row. You cannot add another slot while a populated slot is still unsaved." />
                         <WrapPanel Orientation="Horizontal">
+                            <StackPanel Spacing="2" Margin="0,0,16,4">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <CheckBox VerticalAlignment="Center"
+                                              IsChecked="{Binding LoadSelectedProfileOnStartup}"
+                                              ToolTip.Tip="On: when AI-FluxMux starts, it automatically loads the currently-selected Quick Select profile (after the gateway is ready). Off: you launch profiles manually." />
+                                    <TextBlock VerticalAlignment="Center" Text="Auto-load selected profile on startup" />
+                                </StackPanel>
+                            </StackPanel>
                             <StackPanel Spacing="2" Margin="0,0,16,4">
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <CheckBox VerticalAlignment="Center"
@@ -1904,8 +1952,15 @@
 
             <TabItem Header="Model Profiles" ToolTip.Tip="Create model profiles for each local model or cloud model, then test that they actually answer before they appear in Quick Select.">
                 <ScrollViewer x:Name="ModelProfilesScroll" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
-                    <Grid RowDefinitions="Auto,Auto,Auto" RowSpacing="12" Margin="0,8,0,8">
-                        <Border Grid.Row="0"
+                    <Grid RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="12" Margin="0,8,0,8">
+                        <TextBlock Grid.Row="0"
+                                   FontSize="11"
+                                   FontWeight="DemiBold"
+                                   TextWrapping="Wrap"
+                                   Foreground="{Binding ProfileActionFeedbackBrush}"
+                                   Text="{Binding ProfileActionFeedbackText}"
+                                   IsVisible="{Binding ProfileActionFeedbackText, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}" />
+                        <Border Grid.Row="1"
                                 Background="{DynamicResource FluxMutedBackground}"
                                 BorderBrush="{DynamicResource FluxMutedBorder}"
                                 BorderThickness="1"
@@ -1927,7 +1982,7 @@
                                            Text="Export writes a temporary JSON pack (no API keys). Import patches the live fluxmux_config.json with pack contents, but only if the pack coding is clean. Any imported profiles with existing name but different settings are skipped; profiles with existing settings but different name are skipped. See Help: Model profile packs." />
                             </StackPanel>
                         </Border>
-                        <GroupBox Grid.Row="1" Header="Cloud Profiles">
+                        <GroupBox Grid.Row="2" Header="Cloud Profiles">
                             <StackPanel Spacing="10" Margin="8">
                                 <Border Background="{DynamicResource FluxMutedBackground}"
                                         BorderBrush="{DynamicResource FluxMutedBorder}"
@@ -2031,6 +2086,11 @@
                                                                            Foreground="#4ADE80"
                                                                            IsVisible="{Binding ShowValidatedCheck, FallbackValue=False, TargetNullValue=False}"
                                                                            ToolTip.Tip="{Binding EndpointStatusText}" />
+                                                                <TextBlock Classes="profileStatusIcon"
+                                                                           Text="●"
+                                                                           Foreground="#34D399"
+                                                                           IsVisible="{Binding IsRunning, FallbackValue=False, TargetNullValue=False}"
+                                                                           ToolTip.Tip="This profile is currently running (launched from Quick Select)" />
                                                             </Panel>
                                                             <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
                                                                 <StackPanel Orientation="Horizontal" Spacing="6">
@@ -2099,7 +2159,7 @@
                             </StackPanel>
                         </GroupBox>
 
-                        <GroupBox Grid.Row="2" Header="Local Profiles">
+                        <GroupBox Grid.Row="3" Header="Local Profiles">
                             <StackPanel Spacing="10" Margin="8">
                                 <Border Background="{DynamicResource FluxMutedBackground}"
                                         BorderBrush="{DynamicResource FluxMutedBorder}"
@@ -2180,6 +2240,11 @@
                                                                            Foreground="#4ADE80"
                                                                            IsVisible="{Binding ShowValidatedCheck, FallbackValue=False, TargetNullValue=False}"
                                                                            ToolTip.Tip="{Binding EndpointStatusText}" />
+                                                                <TextBlock Classes="profileStatusIcon"
+                                                                           Text="●"
+                                                                           Foreground="#34D399"
+                                                                           IsVisible="{Binding IsRunning, FallbackValue=False, TargetNullValue=False}"
+                                                                           ToolTip.Tip="This profile is currently running (launched from Quick Select)" />
                                                             </Panel>
                                                             <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
                                                                 <StackPanel Orientation="Horizontal" Spacing="6">
@@ -2342,7 +2407,11 @@
                             <StackPanel Margin="8" Spacing="8">
 
                                 <!-- ============ AI-FluxMux ============ -->
-                                <TextBlock FontWeight="SemiBold" Text="AI-FluxMux" />
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock FontWeight="SemiBold" Text="AI-FluxMux" />
+                                    <TextBlock Opacity="0.6" FontSize="11"
+                                               Text="{x:Static upc:FluxMuxAppInfo.Version}" />
+                                </StackPanel>
                                 <TextBlock TextWrapping="Wrap" Opacity="0.88"
                                            Text="Click &quot;Check for updates&quot; to look for a newer AI-FluxMux on GitHub. Clicking &quot;Update now&quot; starts the automatic update — AI-FluxMux closes, the updater backs up and replaces the files, then prompts you to restart. Set an update source only if you have a preferred alternate source of updates." />
                                 <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
@@ -2680,7 +2749,8 @@
                       ToolTip.Tip="Drag to make the log area taller or shorter." />
 
         <Border Grid.Row="3"
-                Padding="14,6,14,14"
+                x:Name="DiagnosticsPanelBorder"
+                Padding="14,6,14,8"
                 ClipToBounds="True"
                 HorizontalAlignment="Stretch"
                 Background="{DynamicResource FluxChromeBackground}"
@@ -2805,33 +2875,68 @@
                         </StackPanel>
                     </Border>
                     <Border IsVisible="{Binding LocalReloadRecommendVisible}"
-                            Background="{DynamicResource FluxTintBlueBackground}"
-                            BorderBrush="{DynamicResource FluxTintBlueBorder}"
+                            Background="{Binding LocalReloadRecommendBackgroundBrush}"
+                            BorderBrush="{Binding LocalReloadRecommendAccentBrush}"
                             BorderThickness="1"
                             CornerRadius="4"
-                            Padding="8,6"
+                            Padding="0"
                             views:MarkedText.Tip="{Binding LocalReloadRecommendTooltip}">
-                        <StackPanel Spacing="8">
-                            <TextBlock views:MarkedText.Source="{Binding LocalReloadRecommendText}"
-                                       TextWrapping="Wrap"
-                                       FontSize="12" />
-                            <WrapPanel>
-                                <Button Content="Compact"
-                                        Margin="0,0,8,4"
-                                        IsVisible="{Binding LocalReloadCompactVisible}"
-                                        Command="{Binding CompactLocalReloadRecommendCommand}"
-                                        ToolTip.Tip="Shorten older turns that AI-FluxMux forwards to the local model, but only when this chat is actually filling the loaded Context. The Client app still has the full chat. If the suggested model profile's Context is too small for this chat, Compact also loads that model profile." />
-                                <Button Content="Load suggested model profile"
-                                        Margin="0,0,8,4"
-                                        IsVisible="{Binding LocalReloadLoadVisible}"
-                                        Command="{Binding ApproveLocalReloadRecommendCommand}"
-                                        views:MarkedText.Tip="Unload the model profile that is running now and start the suggested model profile named in the blue note. The new local starts without the in-memory reading of this chat. If that model profile's Context is smaller than this chat, the next turn may still fail unless you **Compact** first." />
-                                <Button Content="Keep current model profile"
-                                        Margin="0,0,8,4"
-                                        Command="{Binding DeclineLocalReloadRecommendCommand}"
-                                        ToolTip.Tip="Keep the local model profile that is already loaded. Hide this suggestion for 15 minutes. Does not shorten what AI-FluxMux forwards." />
-                            </WrapPanel>
-                        </StackPanel>
+                        <Grid ColumnDefinitions="4,*">
+                            <!-- Severity accent: a 4px-wide bar on the left edge, colored by urgency
+                                 (red/amber/blue). The rest of the dialog is tinted by the background. -->
+                            <Border Grid.Column="0"
+                                    CornerRadius="4,0,0,4"
+                                    Background="{Binding LocalReloadRecommendAccentBrush}" />
+                            <StackPanel Grid.Column="1" Spacing="8" Margin="8,6">
+                                <TextBlock views:MarkedText.Source="{Binding LocalReloadRecommendText}"
+                                           TextWrapping="Wrap"
+                                           FontSize="12" />
+                                <WrapPanel>
+                                    <Button Content="Compact"
+                                            Margin="0,0,8,4"
+                                            IsVisible="{Binding LocalReloadCompactVisible}"
+                                            Command="{Binding CompactLocalReloadRecommendCommand}"
+                                            ToolTip.Tip="Shorten older turns that AI-FluxMux forwards to the local model, but only when this chat is actually filling the loaded Context. The Client app still has the full chat. If the suggested model profile's Context is too small for this chat, Compact also loads that model profile." />
+                                    <Button Content="Load suggested model profile"
+                                            Margin="0,0,8,4"
+                                            IsVisible="{Binding LocalReloadLoadVisible}"
+                                            Command="{Binding ApproveLocalReloadRecommendCommand}"
+                                            views:MarkedText.Tip="Unload the model profile that is running now and start the suggested model profile named in the blue note. The new local starts without the in-memory reading of this chat. If that model profile's Context is smaller than this chat, the next turn may still fail unless you **Compact** first." />
+                                    <Button Content="Keep current model profile"
+                                            Margin="0,0,8,4"
+                                            Command="{Binding DeclineLocalReloadRecommendCommand}"
+                                            ToolTip.Tip="Keep the local model profile that is already loaded. Hide this suggestion for 15 minutes. Does not shorten what AI-FluxMux forwards." />
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <Border IsVisible="{Binding HailMaryBannerVisible}"
+                            Background="{Binding HailMaryBannerBackgroundBrush}"
+                            BorderBrush="{Binding HailMaryBannerAccentBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="0"
+                            views:MarkedText.Tip="{Binding HailMaryBannerTooltip}">
+                        <Grid ColumnDefinitions="4,*">
+                            <Border Grid.Column="0"
+                                    CornerRadius="4,0,0,4"
+                                    Background="{Binding HailMaryBannerAccentBrush}" />
+                            <StackPanel Grid.Column="1" Spacing="8" Margin="8,6">
+                                <TextBlock views:MarkedText.Source="{Binding HailMaryBannerText}"
+                                           TextWrapping="Wrap"
+                                           FontSize="12" />
+                                <WrapPanel>
+                                    <Button Content="Hail Mary: shrink this turn"
+                                            Margin="0,0,8,4"
+                                            Command="{Binding HailMaryShrinkTurnCommand}"
+                                            ToolTip.Tip="Cuts the middle of this chat's forwarded history (keeping the most recent turns and the last user task) to make room for the reply, then re-sends the turn. The Client app still has the full chat." />
+                                    <Button Content="Dismiss"
+                                            Margin="0,0,8,4"
+                                            Command="{Binding DismissHailMaryBannerCommand}"
+                                            ToolTip.Tip="Hide this suggestion. Start a fresh chat or take another action instead." />
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
                     </Border>
                     <Border IsVisible="{Binding DocumentContextDialogVisible}"
                             Background="{DynamicResource FluxTintAmberBackground}"
@@ -2909,7 +3014,7 @@
                             BorderThickness="1"
                             CornerRadius="4"
                             Padding="8,6">
-                        <Grid ColumnDefinitions="*,*,*,*" ColumnSpacing="10">
+                        <Grid ColumnDefinitions="*,*,*,*,*" ColumnSpacing="10">
                             <ContentControl Grid.Column="0"
                                             Content="{Binding GpuVramGauge}"
                                             ContentTemplate="{StaticResource LiveUtilizationGaugeTemplate}" />
@@ -2922,36 +3027,536 @@
                             <ContentControl Grid.Column="3"
                                             Content="{Binding CpuGauge}"
                                             ContentTemplate="{StaticResource LiveUtilizationGaugeTemplate}" />
+                            <ContentControl Grid.Column="4"
+                                            Content="{Binding ContextGauge}"
+                                            ContentTemplate="{StaticResource LiveUtilizationGaugeTemplate}" />
                         </Grid>
                     </Border>
                     </StackPanel>
-                    <Grid Grid.Row="1" RowDefinitions="*,Auto" RowSpacing="4" MinHeight="66">
-                        <TextBox x:Name="DiagnosticTerminal"
-                                 Classes="diagnosticTerminal"
-                                 Grid.Row="0"
-                                 IsReadOnly="True"
-                                 AcceptsReturn="True"
+                    <!-- Live telemetry graph (context-fill stress test, launch progress, etc.).
+                         Plots time-series or curve data. Points are added incrementally as data
+                         arrives, and the graph updates live. -->
+                    <Grid Grid.Row="1" RowSpacing="4" ClipToBounds="True">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid x:Name="GraphTerminalGrid"
+                              Grid.Row="0"
+                              ColumnDefinitions="*,Auto,*"
+                              ClipToBounds="True">
+                            <Border Grid.Column="0"
+                                    ClipToBounds="True"
+                                    Background="#101828"
+                                    BorderBrush="#344054"
+                                    BorderThickness="1"
+                                    CornerRadius="4"
+                                    Padding="8,6">
+                        <Grid RowSpacing="6">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <!-- TTFT plot area: * with a light MinHeight so it never collapses
+                                     to zero when the diagnostics panel is small, without forcing
+                                     the panel taller than the default split allows. -->
+                                <RowDefinition Height="*" MinHeight="60" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <!-- Throughput plot area: * with a light MinHeight. -->
+                                <RowDefinition Height="*" MinHeight="60" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <!-- Title bar -->
+                            <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding TelemetryGraph.Title}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold"
+                                           Foreground="#E4E7EC"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding TelemetryGraph.SummaryText}"
+                                           FontSize="10"
+                                           Opacity="0.72"
+                                           Foreground="#D0D5DD"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis" />
+                            </Grid>
+
+                            <!-- Plot area with axes. Wrapped in a Panel so the "No telemetry"
+                                 placeholder can overlay the plot area (centered on top of it)
+                                 instead of occupying its own grid row. The plot area is visible
+                                 when there are data points (HasPoints), NOT when the graph is
+                                 "active" (IsActive). This is critical: after a stress test
+                                 completes, Deactivate() sets IsActive=false (so the "No telemetry"
+                                 placeholder can reappear when the graph is empty), but the plot
+                                 area must stay visible to show the test's data points. Binding to
+                                 HasPoints keeps the plot visible while data exists, and hides it
+                                 (showing the placeholder) only when the graph is truly empty. -->
+                            <Panel Grid.Row="1">
+                            <Grid
+                                  RowDefinitions="*,Auto"
+                                  ColumnDefinitions="Auto,*"
+                                  IsVisible="{Binding TelemetryGraph.IsPlotVisible}">
+                                <!-- Y-axis labels + tick marks (left column). Positioned by code-behind
+                                     at 0/25/50/75/100% of the plot height. The tick marks project
+                                     outward (leftward) from the plot edge; the numbers are right-aligned
+                                     against the ticks and centered on them. No top/bottom margin so the
+                                     canvas height matches the plot area exactly. -->
+                                <Canvas x:Name="TtftYAxisLabelCanvas"
+                                        Grid.Row="0" Grid.Column="0"
+                                        Width="32"
+                                        Margin="0,0,0,0"
+                                        IsHitTestVisible="False"
+                                        ToolTip.Tip="{Binding TelemetryGraph.YAxisTooltip}">
+                                    <TextBlock x:Name="TtftYLabelMax"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <TextBlock x:Name="TtftYLabel75"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <TextBlock x:Name="TtftYLabel50"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <TextBlock x:Name="TtftYLabel25"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <TextBlock x:Name="TtftYLabelMin"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <!-- Tick marks: short horizontal lines projecting outward (leftward)
+                                         from the plot edge. Positioned by code-behind. -->
+                                    <Rectangle x:Name="TtftYTick0" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                    <Rectangle x:Name="TtftYTick1" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                    <Rectangle x:Name="TtftYTick2" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                    <Rectangle x:Name="TtftYTick3" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                    <Rectangle x:Name="TtftYTick4" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                </Canvas>
+                                <!-- Plot area -->
+                                <Border x:Name="TtftPlotBorder" Grid.Row="0" Grid.Column="1"
+                                        Background="#0F172A"
+                                        BorderBrush="#344054"
+                                        BorderThickness="1">
+                                    <Grid Background="#1A34D399">
+                                        <!-- Grid lines -->
+                                        <Grid RowDefinitions="*,*,*,*,*" ColumnDefinitions="*,*,*,*,*">
+                                            <Rectangle Grid.Row="0" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Row="1" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Row="2" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Row="3" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Row="4" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Column="0" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                            <Rectangle Grid.Column="1" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                            <Rectangle Grid.Column="2" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                            <Rectangle Grid.Column="3" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                            <Rectangle Grid.Column="4" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                        </Grid>
+                                        <!-- Untested-region: dotted vertical line at the boundary + hatched fill to the right edge.
+                                             Replaces the old solid red rectangle, which was misleading (looked like a data bar). -->
+                                        <Viewbox Stretch="Fill">
+                                            <Path Data="{Binding TelemetryGraph.UnfilledRegionGeometry}"
+                                                  IsVisible="{Binding TelemetryGraph.HasUnfilledRegion}"
+                                                  Width="100" Height="100">
+                                                <Path.Fill>
+                                                    <DrawingBrush TileMode="Tile" Opacity="0.30"
+                                                                  Transform="scale(0.08)">
+                                                        <DrawingBrush.Drawing>
+                                                            <GeometryDrawing Brush="#EF4444"
+                                                                              Geometry="M0,8 L8,0 M-2,2 L2,-2 M6,10 L10,6" />
+                                                        </DrawingBrush.Drawing>
+                                                    </DrawingBrush>
+                                                </Path.Fill>
+                                            </Path>
+                                        </Viewbox>
+                                        <Viewbox Stretch="Fill">
+                                            <Path Data="{Binding TelemetryGraph.UnfilledRegionLineGeometry}"
+                                                  IsVisible="{Binding TelemetryGraph.HasUnfilledRegion}"
+                                                  Stroke="#EF4444" StrokeThickness="1.5" StrokeDashArray="4,4"
+                                                  Width="100" Height="100" />
+                                        </Viewbox>
+                                        <!-- Progressive "testing" bar (grows from baseline as prefill progress is reported).
+                                             Dimmer than the finalized data bars to make clear no data has been obtained yet.
+                                             Pulses (opacity oscillates) to indicate "in progress" (driven by the code-behind timer). -->
+                                        <Viewbox Stretch="Fill">
+                                            <Path x:Name="TtftTestingBarPath"
+                                                  Data="{Binding TelemetryGraph.TestingBarPath}"
+                                                  IsVisible="{Binding TelemetryGraph.IsTestingBandVisible}"
+                                                  Fill="#34D399"
+                                                  Opacity="0.45"
+                                                  Width="100" Height="100" />
+                                        </Viewbox>
+                                        <!-- Data bars + ghost tick marks in the same Viewbox (shared 100×100
+                                             coordinate space ensures ghost lines align with bar positions). -->
+                                        <Viewbox Stretch="Fill">
+                                            <Canvas Width="100" Height="100">
+                                                <Path Data="{Binding TelemetryGraph.BarPathData}"
+                                                      IsVisible="{Binding TelemetryGraph.HasPoints}"
+                                                      Fill="#34D399" />
+                                                <Path Data="{Binding TelemetryGraph.FailureBarPathData}"
+                                                      IsVisible="{Binding TelemetryGraph.HasPoints}"
+                                                      Stroke="#EF4444" StrokeThickness="1.5"
+                                                      StrokeDashArray="0.5,0.5" Fill="Transparent"
+                                                      Opacity="0.9" />
+                                                <Path Data="{Binding TelemetryGraph.GhostBarGeometry}"
+                                                      IsVisible="{Binding TelemetryGraph.HasGhostBars}"
+                                                      Stroke="#94A3B8" StrokeThickness="1.0"
+                                                      StrokeDashArray="0.5,0.5" Fill="Transparent"
+                                                      Opacity="0.85" />
+                                            </Canvas>
+                                        </Viewbox>
+                                        <!-- Bar value labels: overlay Canvas (same cell as the Viewbox) using
+                                             the same font as axis labels. Positioned by code-behind in pixel space. -->
+                                        <Canvas x:Name="TtftBarValueLabelCanvas"
+                                                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                                IsHitTestVisible="False" ClipToBounds="True">
+                                            <TextBlock x:Name="TtftBarValue1" Text="{Binding TelemetryGraph.BarValueText1}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="TtftBarValue2" Text="{Binding TelemetryGraph.BarValueText2}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="TtftBarValue3" Text="{Binding TelemetryGraph.BarValueText3}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="TtftBarValue4" Text="{Binding TelemetryGraph.BarValueText4}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="TtftBarValue5" Text="{Binding TelemetryGraph.BarValueText5}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="TtftBarValue6" Text="{Binding TelemetryGraph.BarValueText6}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                        </Canvas>
+                                    </Grid>
+                                </Border>
+                                <!-- Placeholder when no data. Overlays the entire graph panel (centered
+                                     on top of the Border) rather than occupying its own grid row or
+                                     sitting inside the Border. This prevents the text from being
+                                     clipped by the Border's ClipToBounds when the panel is dragged
+                                     up. Shown when the plot is NOT visible (IsPlotVisible=false),
+                                     hidden when the plot is visible (during a test OR after a test
+                                     with data). -->
+                                <TextBlock Grid.ColumnSpan="3"
+                                           Text="No telemetry"
+                                           FontSize="11"
+                                           Opacity="0.5"
+                                           Foreground="#D0D5DD"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           IsVisible="{Binding TelemetryGraph.IsPlotVisible, Converter={x:Static vm:InvertBoolToVisibilityConverter.Instance}}" />
+                                <!-- X-axis labels (bottom row): a fixed pool of 16 static TextBlocks,
+                                     one per fill level (up to 16). The code-behind shows/hides and
+                                     positions them on each timer tick using the XAxisLabels
+                                     collection. Static TextBlocks are always measured before
+                                     positioning, so centering is correct (same pattern as the
+                                     bar-value labels). -->
+                                <Canvas x:Name="TtftXAxisLabelCanvas"
+                                        Grid.Row="1" Grid.Column="1"
+                                        Height="16"
+                                        Margin="2,2,2,0"
+                                        ClipToBounds="True">
+                                    <!-- Match the Y-axis tick label style (FontSize 9, Opacity 0.72,
+                                         #D0D5DD, Normal weight) so both axes read consistently. -->
+                                    <TextBlock x:Name="TtftXLabel1" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel2" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel3" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel4" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel5" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel6" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel7" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel8" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel9" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel10" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel11" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel12" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel13" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel14" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel15" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="TtftXLabel16" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                </Canvas>
+                            </Grid>
+                            </Panel>
+                            <!-- Axis titles. Hidden when the plot is not visible. -->
+                            <Grid Grid.Row="2" ColumnDefinitions="Auto,*" ColumnSpacing="4"
+                                  IsVisible="{Binding TelemetryGraph.IsPlotVisible}">
+                                <!-- Y-axis label is now redundant: the graph title ("TTFT (s)")
+                                     serves as the y-axis heading. Hidden to avoid duplication. -->
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding TelemetryGraph.YLabel}"
+                                           FontSize="10"
+                                           Opacity="0.72"
+                                           Foreground="#D0D5DD"
+                                           HorizontalAlignment="Left"
+                                           VerticalAlignment="Center"
+                                           IsVisible="False" />
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding TelemetryGraph.XLabel}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold"
+                                           Foreground="#E4E7EC"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Grid>
+                            <!-- Throughput graph (tok/s) -->
+                            <Grid Grid.Row="3" ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding TelemetryGraphThroughput.Title}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold"
+                                           Foreground="#E4E7EC"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding TelemetryGraphThroughput.SummaryText}"
+                                           FontSize="10"
+                                           Opacity="0.72"
+                                           Foreground="#D0D5DD"
+                                           TextWrapping="NoWrap"
+                                           TextTrimming="CharacterEllipsis" />
+                            </Grid>
+                            <!-- Throughput graph plot area. Wrapped in a Panel so the "No telemetry"
+                                 placeholder can overlay the plot area (centered on top of it) when the
+                                 graph is empty, matching the TTFT graph's placeholder. -->
+                            <Panel Grid.Row="4">
+                            <Grid
+                                  RowDefinitions="*,Auto"
+                                  ColumnDefinitions="Auto,*"
+                                  IsVisible="{Binding TelemetryGraphThroughput.IsPlotVisible}">
+                                <!-- Y-axis labels + tick marks. Positioned by code-behind at
+                                     0/25/50/75/100% of the plot height. The tick marks project
+                                     outward (leftward) from the plot edge; the numbers are right-aligned
+                                     against the ticks and centered on them. -->
+                                <Canvas x:Name="ThroughputYAxisLabelCanvas"
+                                        Grid.Row="0" Grid.Column="0"
+                                        Width="32"
+                                        Margin="0,0,0,0"
+                                        IsHitTestVisible="False">
+                                    <TextBlock x:Name="ThroughputYLabelMax"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <TextBlock x:Name="ThroughputYLabel75"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <TextBlock x:Name="ThroughputYLabel50"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <TextBlock x:Name="ThroughputYLabel25"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <TextBlock x:Name="ThroughputYLabelMin"
+                                               FontSize="9" Opacity="0.72" Foreground="#D0D5DD"
+                                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+                                               HorizontalAlignment="Right"
+                                               IsVisible="False" />
+                                    <!-- Tick marks: short horizontal lines projecting outward (leftward)
+                                         from the plot edge. Positioned by code-behind. -->
+                                    <Rectangle x:Name="ThroughputYTick0" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                    <Rectangle x:Name="ThroughputYTick1" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                    <Rectangle x:Name="ThroughputYTick2" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                    <Rectangle x:Name="ThroughputYTick3" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                    <Rectangle x:Name="ThroughputYTick4" Height="1" Fill="#475569" Width="4" IsVisible="False" />
+                                </Canvas>
+                                <!-- Plot area -->
+                                <Border x:Name="ThroughputPlotBorder" Grid.Row="0" Grid.Column="1"
+                                        Background="#0F172A"
+                                        BorderBrush="#344054"
+                                        BorderThickness="1">
+                                    <Grid Background="#1A34D399">
+                                        <!-- Grid lines -->
+                                        <Grid RowDefinitions="*,*,*,*,*" ColumnDefinitions="*,*,*,*,*">
+                                            <Rectangle Grid.Row="0" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Row="1" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Row="2" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Row="3" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Row="4" Grid.ColumnSpan="5" Height="1" Fill="#1E293B" VerticalAlignment="Top" />
+                                            <Rectangle Grid.Column="0" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                            <Rectangle Grid.Column="1" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                            <Rectangle Grid.Column="2" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                            <Rectangle Grid.Column="3" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                            <Rectangle Grid.Column="4" Grid.RowSpan="5" Width="1" Fill="#1E293B" HorizontalAlignment="Left" />
+                                        </Grid>
+                                        <!-- Untested-region: dotted vertical line at the boundary + hatched fill to the right edge. -->
+                                        <Viewbox Stretch="Fill">
+                                            <Path Data="{Binding TelemetryGraphThroughput.UnfilledRegionGeometry}"
+                                                  IsVisible="{Binding TelemetryGraphThroughput.HasUnfilledRegion}"
+                                                  Width="100" Height="100">
+                                                <Path.Fill>
+                                                    <DrawingBrush TileMode="Tile" Opacity="0.30"
+                                                                  Transform="scale(0.08)">
+                                                        <DrawingBrush.Drawing>
+                                                            <GeometryDrawing Brush="#EF4444"
+                                                                              Geometry="M0,8 L8,0 M-2,2 L2,-2 M6,10 L10,6" />
+                                                        </DrawingBrush.Drawing>
+                                                    </DrawingBrush>
+                                                </Path.Fill>
+                                            </Path>
+                                        </Viewbox>
+                                        <Viewbox Stretch="Fill">
+                                            <Path Data="{Binding TelemetryGraphThroughput.UnfilledRegionLineGeometry}"
+                                                  IsVisible="{Binding TelemetryGraphThroughput.HasUnfilledRegion}"
+                                                  Stroke="#EF4444" StrokeThickness="1.5" StrokeDashArray="4,4"
+                                                  Width="100" Height="100" />
+                                        </Viewbox>
+                                        <!-- In-progress "testing" bar: reflects the LIVE tok/s from the gateway's
+                                             GenerationSpeedTracker once the first token arrives (before that it's a small
+                                             pulsing placeholder). Dimmer than the finalized data bars; pulses to indicate
+                                             "in progress" (driven by the code-behind timer). -->
+                                        <Viewbox Stretch="Fill">
+                                            <Path x:Name="ThroughputTestingBarPath"
+                                                  Data="{Binding TelemetryGraphThroughput.TestingBarPath}"
+                                                  IsVisible="{Binding TelemetryGraphThroughput.IsTestingBandVisible}"
+                                                  Fill="#60A5FA"
+                                                  Opacity="0.45"
+                                                  Width="100" Height="100" />
+                                        </Viewbox>
+                                        <!-- Data bars + ghost tick marks in the same Viewbox -->
+                                        <Viewbox Stretch="Fill">
+                                            <Canvas Width="100" Height="100">
+                                                <Path Data="{Binding TelemetryGraphThroughput.BarPathData}"
+                                                      IsVisible="{Binding TelemetryGraphThroughput.HasPoints}"
+                                                      Fill="#60A5FA" />
+                                                <Path Data="{Binding TelemetryGraphThroughput.GhostBarGeometry}"
+                                                      IsVisible="{Binding TelemetryGraphThroughput.HasGhostBars}"
+                                                      Stroke="#94A3B8" StrokeThickness="1.0"
+                                                      StrokeDashArray="0.5,0.5" Fill="Transparent"
+                                                      Opacity="0.85" />
+                                            </Canvas>
+                                        </Viewbox>
+                                        <!-- Bar value labels: overlay Canvas using same font as axis labels -->
+                                        <Canvas x:Name="ThroughputBarValueLabelCanvas"
+                                                HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
+                                                IsHitTestVisible="False" ClipToBounds="True">
+                                            <TextBlock x:Name="ThroughputBarValue1" Text="{Binding TelemetryGraphThroughput.BarValueText1}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="ThroughputBarValue2" Text="{Binding TelemetryGraphThroughput.BarValueText2}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="ThroughputBarValue3" Text="{Binding TelemetryGraphThroughput.BarValueText3}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="ThroughputBarValue4" Text="{Binding TelemetryGraphThroughput.BarValueText4}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="ThroughputBarValue5" Text="{Binding TelemetryGraphThroughput.BarValueText5}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                            <TextBlock x:Name="ThroughputBarValue6" Text="{Binding TelemetryGraphThroughput.BarValueText6}"
+                                                       FontSize="9" Opacity="0.85" Foreground="#D0D5DD" />
+                                        </Canvas>
+                                    </Grid>
+                                </Border>
+                                <!-- X-axis labels: a fixed pool of 16 static TextBlocks, one per
+                                     fill level (up to 16). Positioned on each timer tick using the
+                                     XAxisLabels collection (same pattern as the TTFT graph). -->
+                                <Canvas x:Name="ThroughputXAxisLabelCanvas"
+                                        Grid.Row="1" Grid.Column="1"
+                                        Height="16"
+                                        Margin="2,2,2,0"
+                                        ClipToBounds="True">
+                                    <!-- Match the Y-axis tick label style (FontSize 9, Opacity 0.72,
+                                         #D0D5DD, Normal weight) so both axes read consistently. -->
+                                    <TextBlock x:Name="ThroughputXLabel1" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel2" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel3" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel4" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel5" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel6" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel7" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel8" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel9" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel10" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel11" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel12" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel13" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel14" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel15" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                    <TextBlock x:Name="ThroughputXLabel16" FontSize="9" Opacity="0.72" Foreground="#D0D5DD" VerticalAlignment="Top" />
+                                </Canvas>
+                            </Grid>
+                            <!-- Placeholder when no data. Overlays the entire throughput plot area
+                                 (centered on top of it). Shown when the plot is NOT visible
+                                 (IsPlotVisible=false), hidden when the plot is visible. Mirrors the
+                                 TTFT graph's placeholder so both graphs show "No telemetry" when empty. -->
+                            <TextBlock Grid.ColumnSpan="3"
+                                       Text="No telemetry"
+                                       FontSize="11"
+                                       Opacity="0.5"
+                                       Foreground="#D0D5DD"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       IsVisible="{Binding TelemetryGraphThroughput.IsPlotVisible, Converter={x:Static vm:InvertBoolToVisibilityConverter.Instance}}" />
+                            </Panel>
+                            <!-- Axis titles for throughput graph. Hidden when the plot is not visible. -->
+                            <Grid Grid.Row="5" ColumnDefinitions="Auto,*" ColumnSpacing="4"
+                                  IsVisible="{Binding TelemetryGraphThroughput.IsPlotVisible}">
+                                <!-- Y-axis label is now redundant: the graph title ("(tok/s)")
+                                     serves as the y-axis heading. Hidden to avoid duplication. -->
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding TelemetryGraphThroughput.YLabel}"
+                                           FontSize="10"
+                                           Opacity="0.72"
+                                           Foreground="#D0D5DD"
+                                           HorizontalAlignment="Left"
+                                           VerticalAlignment="Center"
+                                           IsVisible="False" />
+                                <TextBlock Grid.Column="1"
+                                           Text="{Binding TelemetryGraphThroughput.XLabel}"
+                                           FontSize="11"
+                                           FontWeight="SemiBold"
+                                           Foreground="#E4E7EC"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center" />
+                            </Grid>
+                        </Grid>
+                            </Border>
+                            <GridSplitter Grid.Column="1"
+                                          Theme="{StaticResource DiagnosticsVerticalSashTheme}"
+                                          ResizeDirection="Columns"
+                                          VerticalAlignment="Stretch"
+                                          ToolTip.Tip="Drag to make the graph or the terminal wider." />
+                            <Border Grid.Column="2"
+                                    ClipToBounds="True"
+                                    Background="#101828"
+                                    BorderBrush="#344054"
+                                    BorderThickness="1"
+                                    CornerRadius="4"
+                                    Padding="8,6">
+                            <TextBox x:Name="DiagnosticTerminal"
+                                     Classes="diagnosticTerminal"
+                                     IsReadOnly="True"
+                                     AcceptsReturn="True"
                                  Text="{Binding DiagnosticTerminalText}"
                                  TextWrapping="Wrap"
                                  FontFamily="Cascadia Mono,Consolas"
                                  FontSize="11"
                                  Foreground="#D1FADF"
-                                 Background="#101828"
-                                 BorderBrush="#344054"
+                                 Background="Transparent"
+                                 BorderBrush="Transparent"
                                  ScrollViewer.VerticalScrollBarVisibility="Auto"
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                             <TextBox.Resources>
-                                <SolidColorBrush x:Key="TextControlBackground">#101828</SolidColorBrush>
-                                <SolidColorBrush x:Key="TextControlBackgroundPointerOver">#101828</SolidColorBrush>
-                                <SolidColorBrush x:Key="TextControlBackgroundFocused">#101828</SolidColorBrush>
-                                <SolidColorBrush x:Key="TextControlBackgroundDisabled">#101828</SolidColorBrush>
+                                <SolidColorBrush x:Key="TextControlBackground">Transparent</SolidColorBrush>
+                                <SolidColorBrush x:Key="TextControlBackgroundPointerOver">Transparent</SolidColorBrush>
+                                <SolidColorBrush x:Key="TextControlBackgroundFocused">Transparent</SolidColorBrush>
+                                <SolidColorBrush x:Key="TextControlBackgroundDisabled">Transparent</SolidColorBrush>
                                 <SolidColorBrush x:Key="TextControlForeground">#D1FADF</SolidColorBrush>
                                 <SolidColorBrush x:Key="TextControlForegroundPointerOver">#D1FADF</SolidColorBrush>
                                 <SolidColorBrush x:Key="TextControlForegroundFocused">#D1FADF</SolidColorBrush>
                                 <SolidColorBrush x:Key="TextControlForegroundDisabled">#D1FADF</SolidColorBrush>
                             </TextBox.Resources>
                         </TextBox>
-                        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        </Border>
+                        </Grid>
+                        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="8" MinHeight="48">
                             <WrapPanel Grid.Column="0" VerticalAlignment="Center">
                                 <Button x:Name="GpuVramButton"
                                         Content="GPU &amp; VRAM"
@@ -2959,6 +3564,47 @@
                                         VerticalAlignment="Center"
                                         Click="GpuVramButton_Click"
                                         ToolTip.Tip="VRAM usage, display adapters, and tips for freeing graphics memory." />
+                                <!-- Stress-test control group: the mode dropdown and the "Stress test"
+                                     button are wrapped in a single border so they read as one linked
+                                     control. The ComboBox has a FIXED width (120) so the group's
+                                     desired size is stable; the button's width is content-driven.
+                                     A Grid (not StackPanel) is used so the Border's size is stable
+                                     regardless of which child is visible (the button hides when the
+                                     test is running). VerticalAlignment=Center + no added Margin
+                                     keeps the bottom-bar depth unchanged.
+                                     The "Cancel stress test" button is in the same Grid column as
+                                     "Stress test" so the border wraps the dropdown + whichever
+                                     button is visible. -->
+                                <Border BorderBrush="#344054"
+                                        BorderThickness="1"
+                                        CornerRadius="4"
+                                        Padding="4,2"
+                                        VerticalAlignment="Center"
+                                        Margin="0,0,6,0">
+                                    <Grid ColumnDefinitions="Auto,Auto">
+                                        <ComboBox Grid.Column="0"
+                                                  Width="120"
+                                                  VerticalAlignment="Center"
+                                                  ItemsSource="{Binding StressTestModeOptions}"
+                                                  SelectedItem="{Binding SelectedStressTestMode}"
+                                                  ToolTip.Tip="How the stress test drives each fill level. 'Progressive' (default) builds a realistic multi-turn conversation up to the target, measuring the model's real token count each turn — most faithful to real chat. 'Single prompt' sends one diverse prompt per level (faster)." />
+                                        <Button Grid.Column="1"
+                                                Content="Stress test"
+                                                Margin="6,0,0,0"
+                                                VerticalAlignment="Center"
+                                                Click="OnStressTestButtonClick"
+                                                Command="{Binding RunContextFillStressTestCommand}"
+                                                IsVisible="{Binding StressTestRunning, Converter={x:Static vm:InvertBoolToVisibilityConverter.Instance}}"
+                                                ToolTip.Tip="Runs a context-fill stress test: sends requests at increasing context fill levels (25% to 110% of the profile's context limit) and measures TTFT + tok/s at each. WARNING: this test is intended to run to failure — it deliberately exceeds the context limit to observe the behavior (graceful slowdown, OOM, hang, or crash). Results appear in the log above and are written to context_fill_perf.log." />
+                                        <Button Grid.Column="1"
+                                                Content="Cancel stress test"
+                                                Margin="6,0,0,0"
+                                                VerticalAlignment="Center"
+                                                Command="{Binding CancelContextFillStressTestCommand}"
+                                                IsVisible="{Binding StressTestRunning}"
+                                                ToolTip.Tip="Stop the running context-fill stress test early." />
+                                    </Grid>
+                                </Border>
                                 <Popup x:Name="GpuVramPopup"
                                        DataContext="{Binding #RootWindow.DataContext}"
                                        PlacementTarget="{Binding #GpuVramButton}"
@@ -3223,6 +3869,7 @@
     </Panel>
 
 </Window>
+
 
 
 
