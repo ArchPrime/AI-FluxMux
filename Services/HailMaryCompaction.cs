@@ -728,25 +728,55 @@ public static class HailMaryCompaction
             return false;
         }
 
-        // The oldest index we are allowed to drop. We never drop the system prompt (guarded by
-        // role in the loop) or anything at/after the minimum keep-turns floor. Start by keeping
-        // only the last real user task + any turns after it. Then walk backward from
-        // lastRealUser - 1, dropping turns until the prompt fits under targetTokens, but keep
-        // at least minKeepTurns recent turns.
+        // Protected floor — these are NEVER dropped, regardless of how much we need to cut:
+        //   * index 0 (system prompt)
+        //   * the initial brief (first real user task) — the original request
+        //   * the last real user task + the most recent `minKeepTurns` turns after the floor
+        //
+        // The drop happens from the OLDEST end (just after the initial brief) upward, so the
+        // accumulated context bloat (the oldest middle turns) is what gets removed, while the
+        // recent conversation stays intact for continuity.
+        //
+        // BUG FIX (was): the old loop walked BACKWARD from lastRealUser - 1 down to
+        // (lastRealUser - minKeepTurns + 1), which only ever dropped the `minKeepTurns - 1`
+        // turns immediately before the last task. It never touched the oldest turns — exactly
+        // where the bloat lives — so the prune was a no-op when the prompt was genuinely over
+        // the limit. Now we drop from the oldest end.
 
-        var minKeepStart = Math.Max(1, lastRealUser - minKeepTurns + 1);
+        var firstRealUser = IndexOfFirstRealUser(messages);
+        // The oldest index we may drop. We keep everything up to and including the initial
+        // brief (firstRealUser), so the drop starts just after it. If there is no distinct
+        // first task (e.g. it IS the last task), fall back to index 1 (after the system prompt).
+        var dropStart = (firstRealUser >= 0 && firstRealUser < lastRealUser) ? firstRealUser + 1 : 1;
 
-        // Walk backward from lastRealUser - 1 down to minKeepStart, dropping turns as long as
-        // the prompt still fits under targetTokens after the drop.
         var dropped = 0;
-        for (var i = lastRealUser - 1; i >= minKeepStart; i--)
+        // Walk FORWARD from dropStart, dropping whole turns until the prompt fits under
+        // targetTokens. Dropping from the oldest end means each removal shrinks the prompt by
+        // the oldest (often largest, tool-result-heavy) turns first.
+        //
+        // BOUNDS SAFETY: as we remove elements the array shrinks, so a fixed dropEnd is stale.
+        // The protected floor (initial brief + last task + the most recent `minKeepTurns` turns
+        // before the last task) is at the END of the array and never moves (we only remove from
+        // the front), so we guard with `i < messages.Count` and stop as soon as `i` reaches the
+        // (shifting) index of the keep-floor: lastTask - minKeepTurns.
+        for (var i = dropStart; i < messages.Count; i++)
         {
+            // Stop before we reach the keep-floor. The last task's index shifts down as we
+            // remove older turns, so recompute it each iteration. We keep the last task + the
+            // most recent `minKeepTurns` turns before it, so the floor is (lastTask - minKeepTurns).
+            var lastTaskNow = IndexOfLastRealUser(messages);
+            var keepFloor = Math.Max(dropStart, lastTaskNow - minKeepTurns);
+            if (i >= keepFloor)
+            {
+                break;
+            }
+
             if (messages[i] is not JsonObject message)
             {
                 continue;
             }
 
-            // Keep the system prompt and any tool-result that belongs to a kept call.
+            // Keep the system prompt (defensive — dropStart is already >= 1).
             if (RoleOf(message) == "system")
             {
                 continue;
@@ -754,9 +784,12 @@ public static class HailMaryCompaction
 
             if (LocalToolResultClearing.IsToolResult(message))
             {
-                // Only drop a tool result if its matching call is also being dropped.
-                var call = LocalToolResultClearing.FindMatchingCall(messages, i);
-                if (call is not null)
+                // Only drop a tool result if its matching assistant call is ALSO being dropped
+                // (the call is at or before this index, in the drop range). If the call is kept
+                // (it's at/after the keep-floor, in the protected recent floor), keep the result
+                // too — dropping the result would orphan the call and break the tool-pair.
+                var callIndex = IndexOfMatchingCall(messages, i);
+                if (callIndex >= 0 && callIndex >= keepFloor)
                 {
                     continue; // its call is kept, so keep the result
                 }
@@ -768,6 +801,9 @@ public static class HailMaryCompaction
             // too early.
             messages.RemoveAt(i);
             dropped++;
+            // After removing index i, the indices shift down by one; the next candidate is
+            // the message now at index i (the one that was at i+1).
+            i--;
 
             var est = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);
             if (est <= targetTokens)
@@ -782,7 +818,12 @@ public static class HailMaryCompaction
         }
 
         report.MiddleCutDropped = dropped;
-        report.Stages.Add("middle-cut: dropped " + dropped + " older turn(s) to fit " + targetTokens + " tokens (kept the last real user task + " + (messages.Count - 1 - (IndexOfLastRealUser(messages) >= 0 ? IndexOfLastRealUser(messages) : 0)) + " most recent turns)");
+        report.Stages.Add("middle-cut: dropped " + dropped + " oldest turn(s) to fit " + targetTokens + " tokens (kept system + initial brief + last task + recent turns)");
+
+        // Report whether the prompt still exceeds the target even after dropping everything
+        // down to the protected floor. This feeds the honest "turn too large" messaging.
+        var finalEst = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);
+        report.MiddleCutStillOver = finalEst > targetTokens;
         return true;
     }
 
@@ -816,6 +857,71 @@ public static class HailMaryCompaction
                     return i;
                 }
             }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Index of the FIRST real user task in the conversation (the "initial brief" — the
+    /// original request that started the chat). This is distinct from the system prompt
+    /// (index 0) and from the last real user task. The Hail Mary middle-cut always keeps
+    /// this so the model retains the original intent even after the middle of the
+    /// conversation is dropped. Returns -1 when there is no real user task.
+    /// </summary>
+    private static int IndexOfFirstRealUser(JsonArray messages)
+    {
+        for (var i = 0; i < messages.Count; i++)
+        {
+            if (messages[i] is JsonObject message
+                && RoleOf(message) == "user"
+                && !LocalToolResultClearing.IsToolResult(message))
+            {
+                var text = ExtractText(message["content"]);
+                if (!text.StartsWith("Compressed prior conversation context", StringComparison.Ordinal))
+                {
+                    return i;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>
+    /// Index of the assistant message that issued the tool call matching the tool result at
+    /// <paramref name="resultIndex"/> (matched by <c>tool_call_id</c>). Returns -1 when there
+    /// is no matching call. Used by the middle-cut's tool-pair safety check to decide whether
+    /// dropping a tool result would orphan its call.
+    /// </summary>
+    private static int IndexOfMatchingCall(JsonArray messages, int resultIndex)
+    {
+        if (messages[resultIndex] is not JsonObject result)
+        {
+            return -1;
+        }
+
+        var callId = result["tool_call_id"]?.ToString();
+        for (var i = resultIndex - 1; i >= 0; i--)
+        {
+            if (messages[i] is not JsonObject prior
+                || RoleOf(prior) != "assistant"
+                || prior["tool_calls"] is not JsonArray calls)
+            {
+                continue;
+            }
+
+            foreach (var node in calls.OfType<JsonObject>())
+            {
+                var id = node["id"]?.ToString();
+                if (!string.IsNullOrWhiteSpace(callId)
+                    && string.Equals(id, callId, StringComparison.Ordinal))
+                {
+                    return i;
+                }
+            }
+
+            break; // only the immediately-preceding assistant turn can hold the matching call
         }
 
         return -1;
@@ -997,7 +1103,8 @@ public sealed record HailMaryResult(
     int LoopResultsStubbed = 0,
     int ResultsTruncated = 0,
     int ImagesStripped = 0,
-    int MiddleCutDropped = 0)
+    int MiddleCutDropped = 0,
+    bool MiddleCutStillOver = false)
 {
     public static readonly HailMaryResult None = new(0, 0, 0, false, new List<string>());
 
@@ -1039,6 +1146,14 @@ public sealed class HailMaryReport
     public int ResultsTruncated { get; set; }
     public int ImagesStripped { get; set; }
     public int MiddleCutDropped { get; set; }
+    /// <summary>
+    /// True when the middle-cut dropped turns down to the protected floor (system + initial
+    /// brief + last task + recent turns) but the prompt STILL exceeds the target. This means
+    /// the turn itself is too large to fit even after trimming history — the caller should
+    /// surface an honest "use a bigger-context model or make this turn smaller" message
+    /// instead of silently re-blocking.
+    /// </summary>
+    public bool MiddleCutStillOver { get; set; }
 
     public List<string> Stages { get; } = new();
 
@@ -1054,5 +1169,6 @@ public sealed class HailMaryReport
             LoopResultsStubbed: LoopResultsStubbed,
             ResultsTruncated: ResultsTruncated,
             ImagesStripped: ImagesStripped,
-            MiddleCutDropped: MiddleCutDropped);
+            MiddleCutDropped: MiddleCutDropped,
+            MiddleCutStillOver: MiddleCutStillOver);
 }

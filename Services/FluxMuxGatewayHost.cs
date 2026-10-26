@@ -138,6 +138,21 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// </summary>
     public Action<string>? ReportLog { get; set; }
 
+    /// <summary>
+    /// Raised when a local turn is sent to llama-server and prefill begins (Fix 3 — prefill
+    /// progress indicator). The argument is the measured prompt-token count (0 when unknown),
+    /// which the UI uses to estimate how long the prefill will take. The UI shows
+    /// "Prefilling context… elapsed Xs" from this point until the first byte arrives.
+    /// </summary>
+    public Action<int>? ReportPrefillStarted { get; set; }
+
+    /// <summary>
+    /// Raised when the first byte of a local turn's reply arrives (prefill complete, Fix 3).
+    /// The argument is the elapsed milliseconds since prefill started. The UI stops the
+    /// "Prefilling context…" indicator when this fires.
+    /// </summary>
+    public Action<long>? ReportPrefillFirstByte { get; set; }
+
     public GenerationSpeedTracker? GenerationSpeed
     {
         get => _generationSpeed;
@@ -758,6 +773,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // the prompt fits under the target, keeping at least MiddleCutKeepTurns recent turns
             // for conversational context. This scales with chat length — in a 500-turn chat it
             // drops hundreds of turns; in a 12-turn chat it drops only what is needed.
+            //
+            // hailMaryStillOver: true when the middle-cut dropped turns down to the protected
+            // floor (system + initial brief + last task + recent turns) but the prompt STILL
+            // exceeds the target — i.e. the turn itself is too large to fit even after trimming
+            // history. This feeds the honest "turn too large" block message (Fix 2).
+            var hailMaryStillOver = false;
             if (!isProbeRequest && ConsumeHailMaryMiddleCut is not null)
             {
                 var (hailStop, hailStripImages, hailWasArmed) = ConsumeHailMaryMiddleCut.Invoke();
@@ -776,9 +797,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     // before/target check uses the real count, not the over-counting estimate
                     // (which made the prune a no-op on dense tokenizers like Qwen).
                     var hailMary = HailMaryCompaction.RearContextPrune(payload, hotContextForHailMary, hailStop, hailStripImages, measuredPromptTokens);
+                    hailMaryStillOver = hailMary.MiddleCutStillOver;
                     if (hailMary.MiddleCutDropped > 0 || hailMary.ImagesStripped > 0)
                     {
                         Log("hail-mary (" + hailStop + (hailStripImages ? ", strip-img" : "") + "): " + hailMary.DiagnosticsLine);
+                        if (hailMary.MiddleCutStillOver)
+                        {
+                            Log("hail-mary: still over after trimming to the protected floor — the turn itself is too large to fit");
+                        }
                         var hailInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
                         if (hailInserted > 0)
                         {
@@ -882,7 +908,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         promptChars,
                         lastServed.Kind,
                         lastServed.Label,
-                        fillingDetails),
+                        fillingDetails,
+                        hailMaryStillOver),
                     400,
                     FluxMuxGatewayRouting.LocalFillingBlockedType).ConfigureAwait(false);
                 Log("local_context_filling: blocked llama-server on a filling turn n_ctx="
@@ -1599,6 +1626,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 // load + KV cache allocation) or in the first request (lazy KV allocation).
                 var ttfbStopwatch = Stopwatch.StartNew();
                 var firstByteLogged = false;
+                // Fix 3 — prefill progress indicator: signal the UI that prefill has begun for
+                // this local turn, with the measured prompt-token count so it can estimate how
+                // long the prefill will take. Only for local routes (cloud turns don't prefill
+                // on the user's hardware).
+                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+                {
+                    ReportPrefillStarted?.Invoke(measuredPromptTokens ?? 0);
+                }
                 try
                 {
                     var copy = await OpenAiStreamTelemetryProxy.CopyAsync(
@@ -1616,6 +1651,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
                                 {
                                     firstByteLogged = true;
                                     Log($"ttfb: first byte after {ttfbStopwatch.ElapsedMilliseconds} ms (model={model})");
+                                    // Fix 3 — prefill complete: tell the UI to stop the
+                                    // "Prefilling context…" indicator.
+                                    if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        ReportPrefillFirstByte?.Invoke(ttfbStopwatch.ElapsedMilliseconds);
+                                    }
                                 }
                             }
                             hangClock.NoteByte();

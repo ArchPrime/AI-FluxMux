@@ -444,6 +444,17 @@ public partial class MainViewModel : ViewModelBase
         {
             SafeUiInvoke(() => AppendDiagnosticEntry("GW", line));
         };
+        // Fix 3 — prefill progress indicator: when a local turn is sent to llama-server, show
+        // "Prefilling context… elapsed Xs" with an ETA based on the prompt size. Stop the
+        // indicator when the first byte arrives.
+        _runtimeService.PrefillStartedNotice += promptTokens =>
+        {
+            SafeUiInvoke(() => StartPrefillIndicator(promptTokens));
+        };
+        _runtimeService.PrefillFirstByteNotice += elapsedMs =>
+        {
+            SafeUiInvoke(() => StopPrefillIndicator(elapsedMs));
+        };
 
         var startupNotice = _runtimeService.ConsumeStartupRuntimeNotice();
         if (!string.IsNullOrWhiteSpace(startupNotice))
@@ -3744,6 +3755,87 @@ public partial class MainViewModel : ViewModelBase
     public partial string HailMaryOutcome { get; set; } = string.Empty;
 
     private System.Threading.Timer? _hailMaryOutcomeTimer;
+
+    /// <summary>
+    /// Fix 3 — prefill progress indicator. Live status text shown while a local turn is
+    /// prefilling (e.g. "Prefilling context… elapsed 42s · ~157K tokens · ETA ~2m"). Empty when
+    /// no prefill is in progress. The UI binds a status label to this; it updates every second
+    /// via <see cref="_prefillElapsedTimer"/> while prefill is active.
+    /// </summary>
+    [ObservableProperty]
+    public partial string PrefillStatusText { get; set; } = string.Empty;
+
+    /// <summary>True while a local turn is prefilling (the prefill indicator is active).</summary>
+    [ObservableProperty]
+    public partial bool PrefillInProgress { get; set; }
+
+    private System.Threading.Timer? _prefillElapsedTimer;
+    private DateTime _prefillStartUtc = DateTime.MinValue;
+    private int _prefillPromptTokens = 0;
+
+    /// <summary>
+    /// Fix 3 — start the prefill progress indicator. Called (on the UI thread) when the gateway
+    /// reports that a local turn has been sent to llama-server and prefill has begun. Shows
+    /// "Prefilling context… elapsed Xs" with an ETA based on the prompt size, updating every
+    /// second until <see cref="StopPrefillIndicator"/> is called.
+    /// </summary>
+    private void StartPrefillIndicator(int promptTokens)
+    {
+        _prefillStartUtc = DateTime.UtcNow;
+        _prefillPromptTokens = promptTokens;
+        PrefillInProgress = true;
+        UpdatePrefillStatusText();
+        _prefillElapsedTimer?.Dispose();
+        _prefillElapsedTimer = new System.Threading.Timer(_ =>
+        {
+            SafeUiInvoke(UpdatePrefillStatusText);
+        }, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+    }
+
+    /// <summary>
+    /// Fix 3 — stop the prefill progress indicator. Called (on the UI thread) when the first
+    /// byte of the reply arrives (prefill complete). Clears the status text and stops the timer.
+    /// </summary>
+    private void StopPrefillIndicator(long elapsedMs)
+    {
+        _prefillElapsedTimer?.Dispose();
+        _prefillElapsedTimer = null;
+        PrefillInProgress = false;
+        PrefillStatusText = string.Empty;
+    }
+
+    /// <summary>
+    /// Fix 3 — recompute the prefill status text: elapsed seconds + prompt size + an ETA estimate.
+    /// The ETA is a rough heuristic: prefill speed varies wildly with offload mode (GPU-only is
+    /// fast, GPU+CPU with RAM spill is slow), so we use a conservative ~200 tokens/sec baseline
+    /// for the estimate and label it "~" to signal it's a guess, not a promise.
+    /// </summary>
+    private void UpdatePrefillStatusText()
+    {
+        if (!PrefillInProgress)
+        {
+            return;
+        }
+
+        var elapsed = (int)(DateTime.UtcNow - _prefillStartUtc).TotalSeconds;
+        var text = "Prefilling context… elapsed " + elapsed + "s";
+        if (_prefillPromptTokens > 0)
+        {
+            text += " · ~" + FormatTokenCount(_prefillPromptTokens) + " tokens";
+            // Conservative ETA: ~200 tokens/sec (a slow GPU+CPU offload with RAM spill). This is
+            // a lower bound on time (i.e. an upper bound on speed) so the ETA is a realistic
+            // "at least this long" estimate, not an optimistic one.
+            var etaSeconds = (int)Math.Ceiling(_prefillPromptTokens / 200.0);
+            text += " · ETA ~" + FormatDuration(etaSeconds);
+        }
+        PrefillStatusText = text;
+    }
+
+    private static string FormatTokenCount(int tokens)
+        => tokens >= 1000 ? (tokens / 1000) + "K" : tokens.ToString();
+
+    private static string FormatDuration(int seconds)
+        => seconds >= 60 ? (seconds / 60) + "m" + (seconds % 60 > 0 ? " " + (seconds % 60) + "s" : "") : seconds + "s";
 
     // When the Hail Mary button becomes visible, re-evaluate its command's CanExecute so the
     // button is enabled (and shows its tooltip). Without this, the button renders visible but

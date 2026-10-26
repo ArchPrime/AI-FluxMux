@@ -5,13 +5,15 @@
 
 Current version: **0.3.1 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs` → `FluxMuxAppInfo`).
 
-## ⚠️ ACTIVE: YaRN mid-chat switch failure — see `YARN_SWITCH_DIAG.md`
+## ✅ RESOLVED: YaRN mid-chat switch "failure" — see `YARN_SWITCH_DIAG.md`
 
-Switching to a YaRN profile part-way through a chat now fails/times out (regression). Under
-diagnosis. **If resuming this: read `YARN_SWITCH_DIAG.md` first** — it has the log-capture
-command (offset 60,256,015 in `c:\AI_Workbench\Logs\Proxy_Cloud_Handshake.log`), the 4
-hypotheses, and the key code locations. The gateway log is written by the running app, so it
-persists even if the triggering chat drops.
+The YaRN switch was **never a bug** — it's a ~7.3-min cold prefill of a ~157K-token prompt on a
+GPU+CPU offload profile after KV cache is destroyed on switch. Three fixes landed (10/27):
+(1) Hail Mary middle-cut now drops the **oldest** turns (was dropping the wrong end — a no-op when
+needed), preserving system + initial brief + last task + recent turns; (2) honest "turn too large"
+messaging when even a trim can't fit the turn; (3) live prefill progress indicator with ETA.
+**Full suite: 1717 passed, 0 failed. Deploy state: compiled/tested in `artifacts\testrun\`, NOT
+deployed** — close app → `build-fluxmux.bat clean` → restart.
 
 ## Context fixes: YaRN switch + per-turn forward-prune + Hail Mary (10/26)
 

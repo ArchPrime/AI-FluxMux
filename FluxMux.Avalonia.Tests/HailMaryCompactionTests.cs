@@ -272,15 +272,16 @@ public sealed class HailMaryCompactionTests
     }
 
     [Fact]
-    public void RearContextPrune_drops_older_turns_to_headroom_and_preserves_task_and_toolpair()
+    public void RearContextPrune_drops_oldest_turns_to_headroom_and_preserves_brief_task_and_recent()
     {
-        // A long conversational history with a tool pair near the start and a final user task.
+        // A long conversational history: system + initial brief + many middle turns + final task.
+        // The middle turns are where the bloat lives; the fix must drop the OLDEST of them,
+        // keeping the system prompt, the initial brief (first user task), the last task, and
+        // the most recent turns.
         var messages = new List<JsonObject>
         {
             new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." },
             User("Original task: fix the bug."),
-            AssistantWithCall("k1", "run_command", "{\"command\":\"dotnet test\"}"),
-            ToolResult("tests passed", "k1"),
         };
         for (var i = 0; i < 20; i++)
         {
@@ -298,17 +299,25 @@ public sealed class HailMaryCompactionTests
         var before = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
         Assert.True(before > contextTokens * 0.6, "setup: prompt must exceed the aggressive target (before=" + before + ")");
         var result = HailMaryCompaction.RearContextPrune(payload, contextTokens, HailMaryCompaction.HailMaryAggression.Aggressive, stripImages: false);
-        Assert.True(result.MiddleCutDropped > 0, "expected older turns dropped, got " + result.MiddleCutDropped);
+        Assert.True(result.MiddleCutDropped > 0, "expected oldest turns dropped, got " + result.MiddleCutDropped);
         // The prune must free space: the result is smaller than the original prompt.
-        // (It may not reach the exact headroom target if the protected floor — system prompt +
-        // last task + tool-pair + min keep-turns — is itself larger than the target.)
         Assert.True(result.AfterTokens < before, "after " + result.AfterTokens + " should be < before " + before);
-        // System prompt + last real user task + the tool result are preserved.
+
         var kept = payload["messages"]!.AsArray();
+        // System prompt preserved.
         Assert.Contains(kept, m => m!["role"]!.ToString() == "system");
-        Assert.Contains(kept, m => m!["role"]!.ToString() == "tool");
+        // Initial brief (first user task) preserved — the original request.
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "user"
+            && m!["content"]!.ToString().Contains("Original task"));
+        // Last real user task preserved.
         Assert.Contains(kept, m => m!["role"]!.ToString() == "user"
             && m!["content"]!.ToString().Contains("Final task"));
+        // The OLDEST middle turns are the ones dropped: "Turn 0" should be gone, while a
+        // recent middle turn (e.g. "Turn 18") should be kept.
+        Assert.DoesNotContain(kept, m => m!["role"]!.ToString() == "user"
+            && m!["content"]!.ToString().Contains("Turn 0 "));
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "user"
+            && m!["content"]!.ToString().Contains("Turn 18 "));
 
         // Both stops drop turns and free space. (The exact count depends on where the prompt
         // crosses the headroom target relative to the keep-turns floor, so we assert the
@@ -337,19 +346,24 @@ public sealed class HailMaryCompactionTests
     [Fact]
     public void Stage5_middle_cut_is_button_gated_and_tool_pair_safe()
     {
-        // A long conversational history with a tool pair near the start.
+        // A long conversational history. The tool-pair sits in the RECENT floor (just before
+        // the last task), so it must survive the middle-cut (tool-pair safety: a kept call's
+        // result is never dropped). The oldest turns (after the initial brief) are the ones
+        // dropped.
         var messages = new List<JsonObject>
         {
             new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." },
             User("Original task: fix the bug."),
-            AssistantWithCall("k1", "run_command", "{\"command\":\"dotnet test\"}"),
-            ToolResult("tests passed", "k1"),
         };
         for (var i = 0; i < 20; i++)
         {
             messages.Add(User("Turn " + i + " " + new string('n', 300)));
             messages.Add(Assistant("Reply " + i + " " + new string('n', 300)));
         }
+        // A tool-pair in the recent floor, then the final task.
+        messages.Add(AssistantWithCall("k1", "run_command", "{\"command\":\"dotnet test\"}"));
+        messages.Add(ToolResult("tests passed", "k1"));
+        messages.Add(User("Final task: now do X."));
 
         var payload = Payload(messages.ToArray());
         // Without the button, stage 5 must NOT run.
@@ -357,16 +371,20 @@ public sealed class HailMaryCompactionTests
         Assert.Equal(0, autoResult.MiddleCutDropped);
         Assert.DoesNotContain("middle-cut", autoResult.DiagnosticsLine);
 
-        // With the button, the middle-cut drops older turns but keeps the system prompt,
-        // the last real user task, and the tool pair.
+        // With the button, the middle-cut drops the oldest turns but keeps the system prompt,
+        // the initial brief, the last task, and the recent tool-pair.
         var payload2 = Payload(messages.Select(m => (JsonObject)m.DeepClone()).ToArray());
         var buttonResult = HailMaryCompaction.Salvage(payload2, contextTokens: 10, allowMiddleCut: true);
         Assert.True(buttonResult.MiddleCutDropped > 0);
         var kept = payload2["messages"]!.AsArray();
         // System prompt survives.
         Assert.Contains(kept, m => m!["role"]!.ToString() == "system");
-        // The tool result survives (its call is kept).
-        Assert.Contains(kept, m => m!["role"]!.ToString() == "tool");
+        // The recent tool result survives (its call is kept — tool-pair safety).
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "tool"
+            && m!["content"]!.ToString().Contains("tests passed"));
+        // The oldest turns are dropped.
+        Assert.DoesNotContain(kept, m => m!["role"]!.ToString() == "user"
+            && m!["content"]!.ToString().Contains("Turn 0 "));
         Assert.Contains("middle-cut", buttonResult.DiagnosticsLine);
     }
 
@@ -422,6 +440,154 @@ public sealed class HailMaryCompactionTests
             stripImages: false,
             measuredTokens: aggressiveHeadroom + 1000);
         Assert.True(byMeasured.MiddleCutDropped > 0, "rear prune must drop turns when the measured count exceeds the headroom target");
+    }
+
+    [Fact]
+    public void MiddleCut_drops_oldest_turns_first_not_recent()
+    {
+        // A long history where the OLDEST turns are large (tool-result-heavy) and the recent
+        // turns are small. The fix must drop the oldest large turns first, keeping the recent
+        // small turns intact.
+        var messages = new List<JsonObject>
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." },
+            User("Original task: fix the bug."),
+        };
+        // 10 large oldest turns (each ~400 tokens of filler).
+        for (var i = 0; i < 10; i++)
+        {
+            messages.Add(User("Old turn " + i + " " + new string('o', 1600)));
+            messages.Add(Assistant("Old reply " + i + " " + new string('r', 1600)));
+        }
+        // 4 small recent turns.
+        for (var i = 0; i < 4; i++)
+        {
+            messages.Add(User("Recent " + i));
+            messages.Add(Assistant("Recent reply " + i));
+        }
+        messages.Add(User("Final task: now do X."));
+
+        const int contextTokens = 2000;
+        var payload = Payload(messages.Select(m => (JsonObject)m.DeepClone()).ToArray());
+        var before = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        Assert.True(before > contextTokens, "setup: prompt must exceed the window (before=" + before + ")");
+
+        var result = HailMaryCompaction.RearContextPrune(payload, contextTokens, HailMaryCompaction.HailMaryAggression.Aggressive, stripImages: false);
+        Assert.True(result.MiddleCutDropped > 0, "expected oldest turns dropped, got " + result.MiddleCutDropped);
+
+        var kept = payload["messages"]!.AsArray();
+        // The oldest large turns are dropped.
+        Assert.DoesNotContain(kept, m => m!["role"]!.ToString() == "user" && m!["content"]!.ToString().Contains("Old turn 0 "));
+        Assert.DoesNotContain(kept, m => m!["role"]!.ToString() == "user" && m!["content"]!.ToString().Contains("Old turn 1 "));
+        // The recent small turns are kept verbatim.
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "user" && m!["content"]!.ToString().Contains("Recent 3"));
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "assistant" && m!["content"]!.ToString().Contains("Recent reply 3"));
+        // Initial brief + last task preserved.
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "user" && m!["content"]!.ToString().Contains("Original task"));
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "user" && m!["content"]!.ToString().Contains("Final task"));
+    }
+
+    [Fact]
+    public void MiddleCut_preserves_initial_brief_even_when_many_middle_turns_dropped()
+    {
+        // Even when the prune drops many middle turns, the initial brief (first user task)
+        // must survive so the model retains the original intent.
+        var messages = new List<JsonObject>
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." },
+            User("Original task: build the feature."),
+        };
+        for (var i = 0; i < 30; i++)
+        {
+            messages.Add(User("Turn " + i + " " + new string('n', 400)));
+            messages.Add(Assistant("Reply " + i + " " + new string('n', 400)));
+        }
+        messages.Add(User("Final task: ship it."));
+
+        const int contextTokens = 1500;
+        var payload = Payload(messages.Select(m => (JsonObject)m.DeepClone()).ToArray());
+        var result = HailMaryCompaction.RearContextPrune(payload, contextTokens, HailMaryCompaction.HailMaryAggression.Aggressive, stripImages: false);
+        Assert.True(result.MiddleCutDropped > 0, "expected turns dropped, got " + result.MiddleCutDropped);
+
+        var kept = payload["messages"]!.AsArray();
+        // The initial brief survives even though many middle turns were dropped.
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "user"
+            && m!["content"]!.ToString().Contains("Original task: build the feature."));
+        // The last task survives.
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "user"
+            && m!["content"]!.ToString().Contains("Final task: ship it."));
+    }
+
+    [Fact]
+    public void MiddleCut_reports_still_over_when_a_single_turn_alone_exceeds_window()
+    {
+        // A single huge new turn + enough history that some turns CAN be dropped. Even after
+        // dropping all droppable history down to the protected floor, the prompt still exceeds
+        // the target because the new turn itself is too big. The result must flag
+        // MiddleCutStillOver so the caller can surface an honest "turn too large" message.
+        var messages = new List<JsonObject>
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." },
+            User("Original task: small."),
+        };
+        // 6 history turns (more than minKeepTurns=2, so some can be dropped).
+        for (var i = 0; i < 6; i++)
+        {
+            messages.Add(User("Turn " + i + " " + new string('n', 200)));
+            messages.Add(Assistant("Reply " + i + " " + new string('n', 200)));
+        }
+        // A single huge final turn — bigger than the whole window.
+        messages.Add(User("Final task: " + new string('x', 8000)));
+
+        const int contextTokens = 1000;
+        var payload = Payload(messages.Select(m => (JsonObject)m.DeepClone()).ToArray());
+        var result = HailMaryCompaction.RearContextPrune(payload, contextTokens, HailMaryCompaction.HailMaryAggression.Aggressive, stripImages: false);
+
+        // Some history turns were dropped (there were 6, more than the keep floor of 2).
+        Assert.True(result.MiddleCutDropped > 0, "expected some history turns dropped, got " + result.MiddleCutDropped);
+        // The huge final turn alone exceeds the window, so even after trimming history the
+        // prompt is still over. The flag must be set.
+        Assert.True(result.MiddleCutStillOver,
+            "expected MiddleCutStillOver when the final turn alone exceeds the window (after=" + result.AfterTokens + ", target=" + result.TargetTokens + ")");
+        // The last task (the huge turn) is preserved — it's the protected floor.
+        var kept = payload["messages"]!.AsArray();
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "user" && m!["content"]!.ToString().StartsWith("Final task:"));
+    }
+
+    [Fact]
+    public void MiddleCut_tool_pair_safety_across_drop_boundary()
+    {
+        // A tool-pair straddling the drop boundary must stay intact: if the assistant call is
+        // kept (in the protected recent floor), its tool result must NOT be dropped (orphaned).
+        var messages = new List<JsonObject>
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." },
+            User("Original task: run tests."),
+        };
+        // 6 large oldest turns to force a drop.
+        for (var i = 0; i < 6; i++)
+        {
+            messages.Add(User("Old " + i + " " + new string('o', 800)));
+            messages.Add(Assistant("Old reply " + i + " " + new string('r', 800)));
+        }
+        // A tool-pair in the recent floor: assistant call + tool result, then the final task.
+        messages.Add(AssistantWithCall("k1", "run_command", "{\"command\":\"dotnet test\"}"));
+        messages.Add(ToolResult("tests passed", "k1"));
+        messages.Add(User("Final task: now do X."));
+
+        const int contextTokens = 2000;
+        var payload = Payload(messages.Select(m => (JsonObject)m.DeepClone()).ToArray());
+        var before = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        Assert.True(before > contextTokens, "setup: prompt must exceed the window (before=" + before + ")");
+
+        var result = HailMaryCompaction.RearContextPrune(payload, contextTokens, HailMaryCompaction.HailMaryAggression.Aggressive, stripImages: false);
+        Assert.True(result.MiddleCutDropped > 0, "expected oldest turns dropped, got " + result.MiddleCutDropped);
+
+        var kept = payload["messages"]!.AsArray();
+        // The tool result in the recent floor must be kept (its call is kept).
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "tool" && m!["content"]!.ToString().Contains("tests passed"));
+        // Its matching assistant call must also be kept (no orphaned call or result).
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "assistant" && m!["tool_calls"] is JsonArray tc && tc.Count > 0);
     }
 }
 

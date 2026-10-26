@@ -390,6 +390,21 @@ public sealed class FluxMuxRuntimeService
 	public event Action<string>? GatewayLogLine;
 
 	/// <summary>
+	/// Raised when a local turn is sent to llama-server and prefill begins (Fix 3 — prefill
+	/// progress indicator). The argument is the measured prompt-token count (0 when unknown),
+	/// which the UI uses to estimate how long the prefill will take. The UI shows
+	/// "Prefilling context… elapsed Xs" from this point until <see cref="PrefillFirstByteNotice"/>.
+	/// </summary>
+	public event Action<int>? PrefillStartedNotice;
+
+	/// <summary>
+	/// Raised when the first byte of a local turn's reply arrives (prefill complete, Fix 3).
+	/// The argument is the elapsed milliseconds since prefill started. The UI stops the
+	/// "Prefilling context…" indicator when this fires.
+	/// </summary>
+	public event Action<long>? PrefillFirstByteNotice;
+
+	/// <summary>
 	/// When armed, the next local forward applies the Hail Mary REAR-context prune to the
 	/// payload before sending, using the chosen one-off aggression stop + image-strip choice.
 	/// Set by <see cref="RequestHailMaryMiddleCut"/>, cleared after one use. Not persisted —
@@ -655,6 +670,11 @@ public sealed class FluxMuxRuntimeService
 				GatewayLogLine?.Invoke(line);
 			}
 		};
+		// Fix 3 — prefill progress indicator: forward the gateway's prefill-start / first-byte
+		// signals to the UI so it can show "Prefilling context… elapsed Xs" with an ETA based
+		// on the prompt size.
+		host.ReportPrefillStarted = promptTokens => PrefillStartedNotice?.Invoke(promptTokens);
+		host.ReportPrefillFirstByte = elapsedMs => PrefillFirstByteNotice?.Invoke(elapsedMs);
 		host.PortRules = _portForwardingRules;
 		TryCaptureAndRedactExistingRuntimeState();
 		return host;

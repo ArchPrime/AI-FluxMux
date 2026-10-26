@@ -103,6 +103,72 @@ Why it "never used to happen" (to confirm with user):
 Which fix direction? (F1 warning is the safest/cheapest; F2 auto-trim is more aggressive.)
 Also confirm: was the chat smaller before, or did the YaRN profile's offload mode change?
 
+## RESOLVED (10/27) — Three fixes implemented, tested, NOT deployed
+
+The user confirmed the scope: **three fixes**, preserving continuity (system prompt + initial
+user task + most recent user task + recent turns), with a prefill progress indicator (with ETA).
+The "aggressive trim / re-anchor on press" idea was **dropped** — it's auto-compact in disguise
+and doesn't solve the "big next turn" problem. No llama-server KV-cache trimming (not possible
+with `--no-slots`).
+
+### Fix 1 — Hail Mary middle-cut drops the OLDEST turns (the actual bug)
+**File:** `Services/HailMaryCompaction.cs` (`MiddleCutOlderTurns`).
+- **Was:** the loop walked BACKWARD from `lastRealUser - 1` down to `lastRealUser - minKeepTurns + 1`,
+  dropping only the `minKeepTurns - 1` turns immediately before the last task. It never touched the
+  oldest turns — exactly where the bloat lives — so the prune was a no-op when the prompt was
+  genuinely over the limit.
+- **Now:** drops from the OLDEST end (just after the initial brief) upward, until the prompt fits
+  under the target or the protected floor is reached. Protected floor (never dropped):
+  - index 0 (system prompt)
+  - the **initial brief** (first real user task) — the original request
+  - the **last real user task** + the most recent `minKeepTurns` turns before it
+- Tool-pair safety preserved: a tool result is only dropped if its matching assistant call is also
+  in the drop range (a kept call's result is never orphaned).
+- Bounds-safe: the loop guards with `i < messages.Count` and recomputes the keep-floor each
+  iteration (the array shrinks as turns are dropped).
+- New `MiddleCutStillOver` flag on `HailMaryReport`/`HailMaryResult`: true when the prune dropped
+  turns down to the protected floor but the prompt STILL exceeds the target (the turn itself is too
+  big). Feeds Fix 2.
+
+### Fix 2 — Honest "turn too large" messaging
+**Files:** `Services/FluxMuxGatewayRouting.cs` + `Services/FluxMuxGatewayHost.cs`.
+- New `LocalTurnTooLargeAfterTrimMessage` constant: tells the user Hail Mary already trimmed the
+  older context (keeping system + initial brief + recent turns) but the turn is still too large to
+  fit, and points to the real options (bigger-context model, or a smaller turn).
+- `FormatFillingBlockedMessage` / `FormatBlockedLocalTurnMessage` now take a `hailMaryStillOver`
+  param and append the message when true.
+- `FluxMuxGatewayHost` captures `hailMaryStillOver` from the `RearContextPrune` result and passes
+  it to the block message.
+
+### Fix 3 — Prefill progress indicator (with ETA)
+**Files:** `Services/FluxMuxGatewayHost.cs`, `Services/FluxMuxRuntimeService.cs`,
+`ViewModels/MainViewModel.cs`, `Views/MainWindow.axaml`.
+- Gateway fires `ReportPrefillStarted(promptTokens)` when a local turn is sent to llama-server
+  (prefill begins) and `ReportPrefillFirstByte(elapsedMs)` when the first byte arrives (prefill
+  complete). Only for local routes.
+- `FluxMuxRuntimeService` forwards these to `PrefillStartedNotice` / `PrefillFirstByteNotice` events.
+- `MainViewModel` shows a live "Prefilling context… elapsed Xs · ~N tokens · ETA ~Y" label (updates
+  every second via a timer) while prefill is in progress; clears it on first byte. The ETA uses a
+  conservative ~200 tokens/sec baseline (slow GPU+CPU offload with RAM spill) and is labeled "~"
+  (a guess, not a promise).
+- XAML: a `TextBlock` bound to `PrefillStatusText`, visible when `PrefillInProgress`, in the
+  diagnostics row (Grid.Column 5, next to the Hail Mary outcome).
+
+### Tests
+**File:** `FluxMux.Avalonia.Tests/HailMaryCompactionTests.cs`.
+- Updated `RearContextPrune_drops_oldest_turns_to_headroom_and_preserves_brief_task_and_recent`
+  (was `..._preserves_task_and_toolpair`): asserts oldest turns dropped, system + initial brief +
+  last task + recent turns preserved.
+- Updated `Stage5_middle_cut_is_button_gated_and_tool_pair_safe`: tool-pair now in the recent floor
+  (protected), oldest turns dropped.
+- Added `MiddleCut_drops_oldest_turns_first_not_recent`, `MiddleCut_preserves_initial_brief_even_when_many_middle_turns_dropped`,
+  `MiddleCut_reports_still_over_when_a_single_turn_alone_exceeds_window`,
+  `MiddleCut_tool_pair_safety_across_drop_boundary`.
+- **Full suite: 1717 passed, 0 failed.**
+
+### Deploy state
+- **Compiled/tested in `artifacts\testrun\`, NOT deployed.** User must: close app →
+  `build-fluxmux.bat clean` → restart.
 
 ## Do NOT
 - Do NOT close/kill the running app to test (see AGENTS.md "Testing FluxMux Changes").
