@@ -23,6 +23,8 @@
         Background="{DynamicResource FluxPaneBackground}">
 
     <Window.Resources>
+        <vm:StringToVisibilityConverter x:Key="StringToVisibility" />
+        <vm:HailMaryStopToBoolConverter x:Key="HailMaryStopToBool" />
         <x:String x:Key="IdleTimeoutTooltip">Set how many idle minutes before AI-FluxMux stops the local model. This saves power, and frees VRAM for other apps. A reply that is still being prepared does not count as idle, even if that turn takes a long time. While a reply is being worked on, AI-FluxMux asks Windows to stay awake so the turn can finish. Note however that if using a laptop, closing the lid can still trigger sleep. Windows can also sleep when no reply is in progress. After the PC wakes, idle time includes the time spent asleep. After an idle timeout, when you send the next chat, the local model must reload and rebuild the context from the chat history, which is slower and risks reduced model understanding of what was most pertinent. Leave the idle timeout setting off to keep the local model loaded and ready in memory.</x:String>
         <DataTemplate x:Key="CloudProviderOptionTemplate" x:DataType="x:String">
             <TextBlock Text="{Binding Converter={x:Static vm:CloudProviderDisplayConverter.Instance}}" />
@@ -402,6 +404,13 @@
                                                                              <TextBlock Text="Context management:"
                                                                                         FontSize="11"
                                                                                         FontWeight="SemiBold" />
+                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                  <CheckBox IsChecked="{Binding LocalForwardPruneEnabled}"
+                                                                                            VerticalAlignment="Center"
+                                                                                            Content="Trim waste per turn (forward pruning)"
+                                                                                            ToolTip.Tip="Forward pruning: on every turn, trim this turn's own waste (duplicate messages, repeated tool loops, oversized older tool results) so the context fills more slowly. Conservative — it never touches your current task. A per-turn throttle, separate from Compaction (which summarizes older turns). Toggle takes effect on the next turn, no reload needed." />
+                                                                              </StackPanel>
+
                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
                                                                                  <CheckBox IsChecked="{Binding LocalAutoCompactEnabled}"
                                                                                            VerticalAlignment="Center"
@@ -1039,6 +1048,7 @@
                 <TabStripItem ToolTip.Tip="Create model profiles for each local model or cloud model, then test that they actually answer before they appear in Quick Select.">Model Profiles</TabStripItem>
                 <TabStripItem ToolTip.Tip="Lab tests: how well a chat survives switching between two tested models (two locals, local and cloud, or two clouds). This unloads and reloads; it is not everyday routing.">Live-Switch Testing</TabStripItem>
                 <TabStripItem ToolTip.Tip="Checks llama-server, the model folder, the graphics card, paths, and cloud keys.">Environment</TabStripItem>
+                <TabStripItem ToolTip.Tip="Configure GPU &amp; VRAM, idle timeout, UI scale, theme, and window width preferences.">Settings</TabStripItem>
                 <TabStripItem>Help</TabStripItem>
             </TabStrip>
             <Panel x:Name="CaptionButtonSpacer"
@@ -2689,6 +2699,354 @@
                 </ScrollViewer>
             </TabItem>
 
+            <TabItem Header="Settings"
+                     ToolTip.Tip="Configure GPU &amp; VRAM, idle timeout, UI scale, theme, and window width preferences.">
+                <ScrollViewer HorizontalScrollBarVisibility="Disabled"
+                              VerticalScrollBarVisibility="Auto"
+                              Margin="0,8,0,8">
+                    <StackPanel Spacing="16">
+                        <!-- GPU & VRAM -->
+                        <GroupBox Header="GPU &amp; VRAM">
+                            <StackPanel Margin="8" Spacing="8">
+                                <TextBlock IsVisible="{Binding GpuVramScanning}"
+                                           Opacity="0.82"
+                                           Text="{x:Static vm:MainViewModel.GpuVramScanningText}" />
+                                <TextBlock IsVisible="{Binding !GpuVramScanning}"
+                                           Text="{Binding VramStatusText}"
+                                           TextWrapping="Wrap" />
+                                <Button HorizontalAlignment="Left"
+                                        Content="Refresh GPU &amp; apps info"
+                                        Command="{Binding RefreshVramStatusCommand}"
+                                        IsEnabled="{Binding !GpuVramScanning}"
+                                        ToolTip.Tip="Update graphics-memory numbers and app list after you close apps or move the display." />
+
+                                <StackPanel Spacing="4">
+                                    <TextBlock Text="Display adapters"
+                                               FontSize="12"
+                                               FontWeight="SemiBold"
+                                               Opacity="0.7" />
+                                    <ItemsControl ItemsSource="{Binding GpuAdapterRows}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Padding="6,4"
+                                                        CornerRadius="4"
+                                                        Background="{DynamicResource FluxCardBackground}"
+                                                        Margin="0,2">
+                                                    <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="12">
+                                                        <TextBlock Grid.Column="0"
+                                                                   Text="{Binding NameLabel}"
+                                                                   TextWrapping="Wrap"
+                                                                   TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock Grid.Column="1"
+                                                                   Text="{Binding StatusLabel}"
+                                                                   HorizontalAlignment="Right"
+                                                                   Margin="0,0,12,0" />
+                                                        <TextBlock Grid.Column="2"
+                                                                   Text="{Binding NotesLabel}"
+                                                                   Margin="12,0,0,0"
+                                                                   TextWrapping="Wrap" />
+                                                    </Grid>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                </StackPanel>
+
+                                <!-- Batch Windows affinity switcher -->
+                                <StackPanel Spacing="4"
+                                            Margin="0,10,0,0"
+                                            IsVisible="{Binding ShowDesktopGpuPreference}">
+                                    <TextBlock Text="Batch Windows affinity switcher"
+                                               FontSize="13"
+                                               FontWeight="SemiBold"
+                                               Opacity="0.85" />
+                                    <Grid ColumnDefinitions="*,Auto"
+                                          ColumnSpacing="8">
+                                        <ComboBox MinWidth="200"
+                                                  HorizontalAlignment="Left"
+                                                  VerticalAlignment="Center"
+                                                  ItemsSource="{Binding DesktopGpuChoices}"
+                                                  SelectedItem="{Binding SelectedDesktopGpu}"
+                                                  IsEnabled="{Binding !DesktopGpuBusy}"
+                                                  ToolTip.Tip="Sets the default GPU for eligible desktop apps. Only eligible apps &amp; processes are switched — pinned apps (llama-server) and system/background processes are protected and stay on their current GPU. Click **Apply**, then restart Windows." />
+                                        <Button Grid.Column="1"
+                                                Content="Apply"
+                                                Command="{Binding ApplyDesktopGpuCommand}"
+                                                ToolTip.Tip="Write the Windows GPU affinity, then restart Windows so apps pick it up." />
+                                    </Grid>
+                                    <TextBlock Text="{Binding DesktopGpuStatusText}"
+                                               TextWrapping="Wrap"
+                                               Opacity="0.85" />
+                                </StackPanel>
+
+                                <!-- GPU / dedicated VRAM using apps (user-facing, switchable) -->
+                                <Border Margin="0,10,0,0"
+                                        Padding="8,6"
+                                        CornerRadius="6"
+                                        Background="{DynamicResource FluxMutedBackground}">
+                                    <StackPanel Spacing="4">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <TextBlock Text="GPU / dedicated VRAM using apps"
+                                                       FontSize="13"
+                                                       FontWeight="SemiBold"
+                                                       Opacity="0.85" />
+                                            <TextBlock Text="{Binding VramGpuAppsCountText}"
+                                                       FontSize="12"
+                                                       Opacity="0.5" />
+                                        </StackPanel>
+                                        <TextBlock IsVisible="{Binding !HasVramGpuAppRows}"
+                                                   Text="No user-facing apps are using the dedicated GPU right now."
+                                                   Opacity="0.6"
+                                                   FontSize="12" />
+                                        <ItemsControl ItemsSource="{Binding VramGpuAppRows}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="svc:GpuAppListItem">
+                                                    <Border Padding="6,4"
+                                                            CornerRadius="4"
+                                                            Background="{DynamicResource FluxCardBackground}"
+                                                            Margin="0,2">
+                                                        <Grid ColumnDefinitions="*,Auto,Auto"
+                                                              ColumnSpacing="10">
+                                                            <TextBlock Grid.Column="0"
+                                                                       Text="{Binding DisplayName}"
+                                                                       FontWeight="SemiBold"
+                                                                       TextWrapping="Wrap"
+                                                                       TextTrimming="CharacterEllipsis"
+                                                                       VerticalAlignment="Center" />
+                                                            <TextBlock Grid.Column="1"
+                                                                       Text="{Binding MemoryLabel}"
+                                                                       VerticalAlignment="Center"
+                                                                       HorizontalAlignment="Right"
+                                                                       Opacity="0.8"
+                                                                       FontSize="11" />
+                                                            <ctrl:GpuPillToggle Grid.Column="2"
+                                                                                IsOnMotherboard="{Binding IsOnMotherboardGpu}"
+                                                                                IsSwitchable="{Binding CanToggle}"
+                                                                                ToggleCommand="{Binding $parent[Window].DataContext.ToggleGpuAppCommand}"
+                                                                                ToolTip.Tip="Move this app to the Motherboard GPU (iGPU). Click the other side to return it to the Discrete GPU." />
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- iGPU / shared RAM using apps (user-facing, switchable) -->
+                                <Border Margin="0,10,0,0"
+                                        Padding="8,6"
+                                        CornerRadius="6"
+                                        Background="{DynamicResource FluxTintBlueBackground}">
+                                    <StackPanel Spacing="4">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <TextBlock Text="iGPU / shared RAM using apps"
+                                                       FontSize="13"
+                                                       FontWeight="SemiBold"
+                                                       Opacity="0.85" />
+                                            <TextBlock Text="{Binding IgpuGpuAppsCountText}"
+                                                       FontSize="12"
+                                                       Opacity="0.5" />
+                                        </StackPanel>
+                                        <TextBlock IsVisible="{Binding !HasIgpuGpuAppRows}"
+                                                   Text="No user-facing apps are on the Motherboard GPU (iGPU) right now."
+                                                   Opacity="0.6"
+                                                   FontSize="12" />
+                                        <ItemsControl ItemsSource="{Binding IgpuGpuAppRows}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="svc:GpuAppListItem">
+                                                    <Border Padding="6,4"
+                                                            CornerRadius="4"
+                                                            Background="{DynamicResource FluxCardBackground}"
+                                                            Margin="0,2">
+                                                        <Grid ColumnDefinitions="*,Auto,Auto"
+                                                              ColumnSpacing="10">
+                                                            <TextBlock Grid.Column="0"
+                                                                       Text="{Binding DisplayName}"
+                                                                       FontWeight="SemiBold"
+                                                                       TextWrapping="Wrap"
+                                                                       TextTrimming="CharacterEllipsis"
+                                                                       VerticalAlignment="Center" />
+                                                            <TextBlock Grid.Column="1"
+                                                                       Text="{Binding MemoryLabel}"
+                                                                       VerticalAlignment="Center"
+                                                                       HorizontalAlignment="Right"
+                                                                       Opacity="0.8"
+                                                                       FontSize="11" />
+                                                            <ctrl:GpuPillToggle Grid.Column="2"
+                                                                                IsOnMotherboard="{Binding IsOnMotherboardGpu}"
+                                                                                IsSwitchable="{Binding CanToggle}"
+                                                                                ToggleCommand="{Binding $parent[Window].DataContext.ToggleGpuAppCommand}"
+                                                                                ToolTip.Tip="Move this app to the Discrete GPU (dedicated VRAM). Click the other side to return it to the Motherboard GPU." />
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Protected apps (pinned, not switchable — listed individually, greyed) -->
+                                <Border Margin="0,10,0,0"
+                                        Padding="8,6"
+                                        CornerRadius="6"
+                                        Background="{DynamicResource FluxTintAmberBackground}"
+                                        IsVisible="{Binding HasProtectedGpuApps}">
+                                    <StackPanel Spacing="4">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <TextBlock Text="Protected apps"
+                                                       FontSize="13"
+                                                       FontWeight="SemiBold"
+                                                       Opacity="0.85" />
+                                            <TextBlock Text="{Binding ProtectedGpuAppsCountText}"
+                                                       FontSize="12"
+                                                       Opacity="0.5" />
+                                        </StackPanel>
+                                        <TextBlock Text="These apps are pinned to a GPU by AI-FluxMux and cannot be switched here."
+                                                   Opacity="0.6"
+                                                   FontSize="12"
+                                                   TextWrapping="Wrap" />
+                                        <ItemsControl ItemsSource="{Binding ProtectedGpuAppRows}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="svc:GpuAppListItem">
+                                                    <Border Padding="6,4"
+                                                            CornerRadius="4"
+                                                            Background="{DynamicResource FluxCardBackground}"
+                                                            Margin="0,2"
+                                                            Opacity="0.55">
+                                                        <Grid ColumnDefinitions="*,Auto,Auto"
+                                                              ColumnSpacing="10">
+                                                            <TextBlock Grid.Column="0"
+                                                                       Text="{Binding DisplayName}"
+                                                                       FontWeight="SemiBold"
+                                                                       TextWrapping="Wrap"
+                                                                       TextTrimming="CharacterEllipsis"
+                                                                       VerticalAlignment="Center" />
+                                                            <TextBlock Grid.Column="1"
+                                                                       Text="{Binding MemoryLabel}"
+                                                                       VerticalAlignment="Center"
+                                                                       HorizontalAlignment="Right"
+                                                                       Opacity="0.8"
+                                                                       FontSize="11" />
+                                                            <TextBlock Grid.Column="2"
+                                                                       Text="{Binding StatusLabel}"
+                                                                       VerticalAlignment="Center"
+                                                                       Opacity="0.7"
+                                                                       FontSize="11"
+                                                                       ToolTip.Tip="Pinned by AI-FluxMux — not switchable." />
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- System & background processes (listed individually, greyed, not switchable) -->
+                                <Border Margin="0,10,0,0"
+                                        Padding="8,6"
+                                        CornerRadius="6"
+                                        Background="{DynamicResource FluxMutedBackground}"
+                                        IsVisible="{Binding HasSystemGpuApps}">
+                                    <StackPanel Spacing="4">
+                                        <StackPanel Orientation="Horizontal" Spacing="6">
+                                            <TextBlock Text="System &amp; background processes"
+                                                       FontSize="13"
+                                                       FontWeight="SemiBold"
+                                                       Opacity="0.85" />
+                                            <TextBlock Text="{Binding SystemGpuAppsCountText}"
+                                                       FontSize="12"
+                                                       Opacity="0.5" />
+                                        </StackPanel>
+                                        <TextBlock Text="OS compositing and background processes. These cannot be switched."
+                                                   Opacity="0.6"
+                                                   FontSize="12"
+                                                   TextWrapping="Wrap" />
+                                        <ItemsControl ItemsSource="{Binding SystemGpuAppRows}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="svc:GpuAppListItem">
+                                                    <Border Padding="6,4"
+                                                            CornerRadius="4"
+                                                            Background="{DynamicResource FluxCardBackground}"
+                                                            Margin="0,2"
+                                                            Opacity="0.55">
+                                                        <Grid ColumnDefinitions="*,Auto,Auto"
+                                                              ColumnSpacing="10">
+                                                            <TextBlock Grid.Column="0"
+                                                                       Text="{Binding DisplayName}"
+                                                                       FontWeight="SemiBold"
+                                                                       TextWrapping="Wrap"
+                                                                       TextTrimming="CharacterEllipsis"
+                                                                       VerticalAlignment="Center" />
+                                                            <TextBlock Grid.Column="1"
+                                                                       Text="{Binding MemoryLabel}"
+                                                                       VerticalAlignment="Center"
+                                                                       HorizontalAlignment="Right"
+                                                                       Opacity="0.8"
+                                                                       FontSize="11" />
+                                                            <TextBlock Grid.Column="2"
+                                                                       Text="{Binding StatusLabel}"
+                                                                       VerticalAlignment="Center"
+                                                                       Opacity="0.7"
+                                                                       FontSize="11"
+                                                                       ToolTip.Tip="System process — not switchable." />
+                                                        </Grid>
+                                                    </Border>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <!-- Idle Timeout -->
+                        <GroupBox Header="Idle Timeout">
+                            <StackPanel Margin="8" Spacing="8">
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="8"
+                                            VerticalAlignment="Center">
+                                    <CheckBox VerticalAlignment="Center"
+                                              Content="Enable idle timeout"
+                                              IsChecked="{Binding IdleTimeoutEnabled}"
+                                              ToolTip.Tip="Automatically stop the model after a period of inactivity to save resources." />
+                                    <NumericUpDown MinWidth="72"
+                                                   Value="{Binding IdleTimeoutMinutes}"
+                                                   Minimum="1"
+                                                   Maximum="240"
+                                                   IsEnabled="{Binding IdleTimeoutEnabled}"
+                                                   ToolTip.Tip="{StaticResource IdleTimeoutTooltip}" />
+                                    <TextBlock VerticalAlignment="Center" Text="min" />
+                                </StackPanel>
+                            </StackPanel>
+                        </GroupBox>
+
+                        <!-- UI Preferences -->
+                        <GroupBox Header="UI Preferences">
+                            <StackPanel Margin="8" Spacing="8">
+                                <StackPanel Orientation="Horizontal"
+                                            Spacing="8"
+                                            VerticalAlignment="Center">
+                                    <TextBlock VerticalAlignment="Center" Opacity="0.6" Text="UI scale" />
+                                    <ComboBox VerticalAlignment="Center"
+                                              ItemsSource="{Binding UiScaleOptions}"
+                                              SelectedItem="{Binding SelectedUiScale}"
+                                              ToolTip.Tip="Make the whole window smaller so more fits on screen. Nothing is hidden." />
+                                    <TextBlock VerticalAlignment="Center" Opacity="0.6" Text="UI theme" />
+                                    <ComboBox VerticalAlignment="Center"
+                                              ItemsSource="{Binding UiThemeOptions}"
+                                              SelectedItem="{Binding SelectedUiTheme}"
+                                              ToolTip.Tip="Light or dark window chrome. Diagnostics log stays dark either way." />
+                                    <CheckBox VerticalAlignment="Center"
+                                              Content="UI enforce clean width"
+                                              IsChecked="{Binding EnforceCleanWidth}"
+                                              ToolTip.Tip="Limits how narrow the window can be shrunk, to protect the visibility of controls on all tabs. At Normal UI scale this sets a 1024px minimum width; smaller UI scales reduce it proportionally. When unchecked, the window can shrink much smaller and controls may wrap or compress." />
+                                </StackPanel>
+                            </StackPanel>
+                        </GroupBox>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
             <TabItem Header="Help">
                 <Grid ColumnDefinitions="260,10,*" Margin="0,8,0,8" Loaded="OnHelpChromeLoaded">
                     <Grid RowDefinitions="Auto,Auto,*" RowSpacing="8">
@@ -2758,7 +3116,7 @@
                 BorderThickness="0,1,0,0">
             <Grid RowDefinitions="Auto,*" RowSpacing="3">
                 <StackPanel Grid.Row="0" Spacing="4">
-                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,*,Auto" ColumnSpacing="6" ClipToBounds="True">
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,*,Auto,Auto,Auto" ColumnSpacing="6" ClipToBounds="True">
                         <TextBlock Grid.Column="0" VerticalAlignment="Center" FontWeight="SemiBold" Text="Diagnostics" />
                         <shapes:Ellipse Grid.Column="1"
                                         Width="14"
@@ -2793,6 +3151,71 @@
                                    Text="{Binding GenerationSpeedText}"
                                    IsVisible="{Binding ShowGenerationSpeedText}" />
                         <Button Grid.Column="5"
+                                x:Name="HailMaryButton"
+                                Classes="hailMary"
+                                IsVisible="{Binding HailMaryButtonVisible}"
+                                VerticalAlignment="Center"
+                                FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                Content="🙏&#xFE0E; Hail Mary Compactor"
+                                Background="#7C3AED"
+                                Foreground="White"
+                                BorderBrush="#5B21B6"
+                                Click="HailMaryButton_Click"
+                                ToolTip.Tip="Prunes the older turns from this chat's forwarded history so the current turn has room to complete in the model's context window. Recent turns and your last task are kept; your chat app still has the full conversation.&#10;&#10;Click to choose how much to prune (Gentle / Balanced / Aggressive) and whether to also strip older images, then confirm.&#10;&#10;Trade-off: the model forgets the pruned turns, so it may repeat work or lose track of early decisions. Use this when you want to keep this chat on the local model but don't have a bigger-context model to switch to." />
+                        <Popup x:Name="HailMaryPickerPopup"
+                                IsOpen="False"
+                                PlacementTarget="{Binding ElementName=HailMaryButton}"
+                                Placement="Bottom"
+                                ClipToBounds="False">
+                            <Border Background="White"
+                                    BorderBrush="#5B21B6"
+                                    BorderThickness="1"
+                                    CornerRadius="4"
+                                    Padding="0">
+                                <StackPanel Spacing="8" Margin="8" MinWidth="240">
+                                <TextBlock Text="Hail Mary — rear-context prune" FontWeight="SemiBold" FontSize="12" />
+                                <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.85"
+                                           Text="Drop older turns so the reply has room to complete. The system prompt, your last task, and the active tool-pair are always kept." />
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="Prune strength:" FontSize="11" FontWeight="SemiBold" />
+                                    <RadioButton Content="Gentle — keep ~8 recent turns, just fit"
+                                                 GroupName="HailMaryDiagStop"
+                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Gentle}"
+                                                 FontSize="11" />
+                                    <RadioButton Content="Balanced — keep ~4 recent turns, ~20% room"
+                                                 GroupName="HailMaryDiagStop"
+                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Balanced}"
+                                                 FontSize="11" />
+                                    <RadioButton Content="Aggressive — keep ~2 recent turns, ~40% room"
+                                                 GroupName="HailMaryDiagStop"
+                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Aggressive}"
+                                                 FontSize="11" />
+                                </StackPanel>
+                                <CheckBox Content="Also strip older embedded images"
+                                          IsChecked="{Binding HailMaryStripImages}"
+                                          FontSize="11"
+                                          ToolTip.Tip="Independent of the prune strength. Keeps the most recent image." />
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Content="Armed — prune on next turn"
+                                            Command="{Binding HailMaryShrinkTurnCommand}"
+                                            FontSize="11" Padding="10,4"
+                                            Click="HailMaryPickerArm_Click" />
+                                    <Button Content="Cancel"
+                                            Click="HailMaryPickerCancel_Click"
+                                            FontSize="11" Padding="10,4" />
+                                </StackPanel>
+                            </StackPanel>
+                            </Border>
+                        </Popup>
+                        <TextBlock Grid.Column="5"
+                                   IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
+                                   VerticalAlignment="Center"
+                                   FontSize="10"
+                                   Foreground="#7C3AED"
+                                   HorizontalAlignment="Left"
+                                   Opacity="0.9"
+                                   Text="{Binding HailMaryOutcome}" />
+                        <Button Grid.Column="6"
                                 VerticalAlignment="Center"
                                 MinWidth="72"
                                 Padding="10,4"
@@ -2926,10 +3349,32 @@
                                            TextWrapping="Wrap"
                                            FontSize="12" />
                                 <WrapPanel>
+                                    <TextBlock Text="Prune:" VerticalAlignment="Center" Margin="0,0,4,4" FontSize="12" />
+                                    <RadioButton Content="Gentle"
+                                                 GroupName="HailMaryBannerStop"
+                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Gentle}"
+                                                 Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
+                                                 ToolTip.Tip="Keep ~8 recent turns; just fit under the window." />
+                                    <RadioButton Content="Balanced"
+                                                 GroupName="HailMaryBannerStop"
+                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Balanced}"
+                                                 Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
+                                                 ToolTip.Tip="Keep ~4 recent turns; leave ~20% room for the reply." />
+                                    <RadioButton Content="Aggressive"
+                                                 GroupName="HailMaryBannerStop"
+                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Aggressive}"
+                                                 Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
+                                                 ToolTip.Tip="Keep ~2 recent turns; leave ~40% room for the reply." />
+                                    <CheckBox Content="also strip older images"
+                                              IsChecked="{Binding HailMaryStripImages}"
+                                              Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
+                                              ToolTip.Tip="Also strip older embedded images (keeps the most recent). Independent of the prune stop." />
+                                </WrapPanel>
+                                <WrapPanel>
                                     <Button Content="Hail Mary: shrink this turn"
                                             Margin="0,0,8,4"
                                             Command="{Binding HailMaryShrinkTurnCommand}"
-                                            ToolTip.Tip="Cuts the middle of this chat's forwarded history (keeping the most recent turns and the last user task) to make room for the reply, then re-sends the turn. The Client app still has the full chat." />
+                                            ToolTip.Tip="Prunes the older turns from this chat's forwarded history (keeping the system prompt, your last task, and the chosen number of recent turns) so the reply has room to complete, then re-sends the turn. The Client app still has the full chat." />
                                     <Button Content="Dismiss"
                                             Margin="0,0,8,4"
                                             Command="{Binding DismissHailMaryBannerCommand}"
@@ -3052,7 +3497,7 @@
                                     BorderThickness="1"
                                     CornerRadius="4"
                                     Padding="8,6">
-                        <Grid RowSpacing="6">
+                        <Grid RowSpacing="0">
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
                                 <!-- TTFT plot area: * with a light MinHeight so it never collapses
@@ -3257,8 +3702,8 @@
                                      bar-value labels). -->
                                 <Canvas x:Name="TtftXAxisLabelCanvas"
                                         Grid.Row="1" Grid.Column="1"
-                                        Height="16"
-                                        Margin="2,2,2,0"
+                                        Height="11"
+                                        Margin="0,-6,0,0"
                                         ClipToBounds="True">
                                     <!-- Match the Y-axis tick label style (FontSize 9, Opacity 0.72,
                                          #D0D5DD, Normal weight) so both axes read consistently. -->
@@ -3296,10 +3741,10 @@
                                            IsVisible="False" />
                                 <TextBlock Grid.Column="1"
                                            Text="{Binding TelemetryGraph.XLabel}"
-                                           FontSize="11"
+                                           FontSize="10"
                                            FontWeight="SemiBold"
                                            Foreground="#E4E7EC"
-                                           HorizontalAlignment="Center"
+                                           HorizontalAlignment="Right"
                                            VerticalAlignment="Center" />
                             </Grid>
                             <!-- Throughput graph (tok/s) -->
@@ -3459,8 +3904,8 @@
                                      XAxisLabels collection (same pattern as the TTFT graph). -->
                                 <Canvas x:Name="ThroughputXAxisLabelCanvas"
                                         Grid.Row="1" Grid.Column="1"
-                                        Height="16"
-                                        Margin="2,2,2,0"
+                                        Height="11"
+                                        Margin="0,-6,0,0"
                                         ClipToBounds="True">
                                     <!-- Match the Y-axis tick label style (FontSize 9, Opacity 0.72,
                                          #D0D5DD, Normal weight) so both axes read consistently. -->
@@ -3510,10 +3955,10 @@
                                            IsVisible="False" />
                                 <TextBlock Grid.Column="1"
                                            Text="{Binding TelemetryGraphThroughput.XLabel}"
-                                           FontSize="11"
+                                           FontSize="10"
                                            FontWeight="SemiBold"
                                            Foreground="#E4E7EC"
-                                           HorizontalAlignment="Center"
+                                           HorizontalAlignment="Right"
                                            VerticalAlignment="Center" />
                             </Grid>
                         </Grid>
@@ -3557,13 +4002,7 @@
                         </Border>
                         </Grid>
                         <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="8" MinHeight="48">
-                            <WrapPanel Grid.Column="0" VerticalAlignment="Center">
-                                <Button x:Name="GpuVramButton"
-                                        Content="GPU &amp; VRAM"
-                                        Margin="0,0,10,0"
-                                        VerticalAlignment="Center"
-                                        Click="GpuVramButton_Click"
-                                        ToolTip.Tip="VRAM usage, display adapters, and tips for freeing graphics memory." />
+                            <WrapPanel Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Right">
                                 <!-- Stress-test control group: the mode dropdown and the "Stress test"
                                      button are wrapped in a single border so they read as one linked
                                      control. The ComboBox has a FIXED width (120) so the group's
@@ -3605,224 +4044,6 @@
                                                 ToolTip.Tip="Stop the running context-fill stress test early." />
                                     </Grid>
                                 </Border>
-                                <Popup x:Name="GpuVramPopup"
-                                       DataContext="{Binding #RootWindow.DataContext}"
-                                       PlacementTarget="{Binding #GpuVramButton}"
-                                       Placement="Top"
-                                       IsLightDismissEnabled="False"
-                                       OverlayDismissEventPassThrough="True"
-                                       Opened="GpuVramPopup_Opened">
-                                    <ThemeVariantScope x:Name="GpuVramThemeScope">
-                                    <Border Padding="10"
-                                            CornerRadius="6"
-                                            BorderThickness="1"
-                                            BorderBrush="{DynamicResource FluxMutedBorder}"
-                                            Background="{DynamicResource FluxCardBackground}"
-                                            BoxShadow="0 8 24 0 #40000000">
-                                        <LayoutTransformControl>
-                                            <LayoutTransformControl.LayoutTransform>
-                                                <ScaleTransform ScaleX="{Binding UiScaleFactor}"
-                                                                ScaleY="{Binding UiScaleFactor}" />
-                                            </LayoutTransformControl.LayoutTransform>
-                                            <ScrollViewer MaxWidth="520"
-                                                          MaxHeight="420"
-                                                          HorizontalScrollBarVisibility="Disabled"
-                                                          VerticalScrollBarVisibility="Auto">
-                                                <StackPanel Spacing="8" Margin="2">
-                                                    <TextBlock Text="GPU &amp; VRAM"
-                                                               FontSize="15"
-                                                               FontWeight="SemiBold" />
-                                                    <Border Height="1"
-                                                            Margin="0,0,0,2"
-                                                            Background="{DynamicResource FluxMutedBorder}" />
-                                                    <TextBlock IsVisible="{Binding GpuVramScanning}"
-                                                               Opacity="0.82"
-                                                               Text="{x:Static vm:MainViewModel.GpuVramScanningText}" />
-                                                    <views:OptionInfoNote IsVisible="{Binding ShowDesktopGpuPreference}"
-                                                                          InfoId="gpuvram.desktop_gpu"
-                                                                          StartDismissed="True"
-                                                                          NoteText="Local AI models benefit from as much VRAM as possible.&#10;&#8226; To stop Windows allocating your main GPU card's VRAM to other apps and system processes, you can try the experimental tool below, to make them use your motherboard GPU &amp; shared ordinary system RAM instead, next time they are launched.&#10;&#8226; In the Windows GPU affinity setting below, select **Motherboard GPU**, click **Apply**, then restart Windows (for best results - you can instead just restart individual apps, but this is usually less thorough).&#10;&#8226; A BIOS setting change is usually required before the motherboard graphics chip can run alongside the main graphics card. Do this first.&#10;&#8226; Monitors should be plugged into the motherboard graphics ports, not the main GPU ports. Typically they can be left there even when you switch back – in normal **Discrete GPU** mode, Windows can still usually route everything to the main GPU card via those ports (with a very small performance hit).&#10;&#8226; If you can't or don't wish to use your on-board motherboard graphics, you can still try closing any unused browser windows and idle apps you started, then click **Refresh VRAM** below to see how much memory comes free. Only close web pages and apps you opened yourself. Ending Windows background processes could freeze or crash your PC.&#10;&#8226; Note that AI-FluxMux will show up as a VRAM using process (for obvious reasons) whichever GPU affinity mode is set. Don't close this!&#10;&#8226; Your motherboard graphics chip and its ports will likely not match the performance or features of your discrete graphics card for 3D speed, refresh rate, HDR, or how many displays you can connect. Apply **Discrete GPU** mode and restart again, when you need that extra functionality back." />
-                                                    <StackPanel Spacing="8"
-                                                                IsVisible="{Binding !ShowDesktopGpuPreference}">
-                                                        <TextBlock TextWrapping="Wrap" Opacity="0.82"
-                                                                   views:MarkedText.Source="If you can't or don't wish to use your on-board motherboard graphics, you can still try closing any unused browser windows and idle apps you started, then click **Refresh VRAM** below to see how much memory comes free. Only close web pages and apps you opened yourself. Ending Windows background processes could freeze or crash your PC." />
-                                                        <TextBlock TextWrapping="Wrap" Opacity="0.82"
-                                                                   views:MarkedText.Source="Note that AI-FluxMux will show up as a VRAM using process (for obvious reasons) whichever GPU affinity mode is set. Don't close this!" />
-                                                    </StackPanel>
-                                                    <StackPanel Spacing="4">
-                                                        <TextBlock FontWeight="SemiBold" Text="Display adapters (currently detected)" />
-                                                        <Border BorderThickness="1"
-                                                                CornerRadius="4"
-                                                                Padding="8"
-                                                                BorderBrush="{DynamicResource TextControlBorderBrush}">
-                                                            <StackPanel Spacing="4">
-                                                                <Grid ColumnSpacing="8">
-                                                                    <Grid.ColumnDefinitions>
-                                                                        <ColumnDefinition Width="1.6*" />
-                                                                        <ColumnDefinition Width="{Binding ShowGpuAdapterStatusColumn, Converter={x:Static vm:BoolToCollapsedGridLengthConverter.Instance}}" />
-                                                                        <ColumnDefinition Width="2.4*" />
-                                                                    </Grid.ColumnDefinitions>
-                                                                    <TextBlock FontWeight="SemiBold" Text="Adapter" />
-                                                                    <TextBlock Grid.Column="1"
-                                                                               FontWeight="SemiBold"
-                                                                               Text="Status"
-                                                                               Margin="0,0,8,0"
-                                                                               IsVisible="{Binding ShowGpuAdapterStatusColumn}" />
-                                                                    <TextBlock Grid.Column="2"
-                                                                               FontWeight="SemiBold"
-                                                                               Text="Comments" />
-                                                                </Grid>
-                                                                <TextBlock IsVisible="{Binding GpuVramScanning}"
-                                                                           Opacity="0.82"
-                                                                           Text="{x:Static vm:MainViewModel.GpuVramScanningText}" />
-                                                                <ItemsControl IsVisible="{Binding ShowGpuAdapterList}"
-                                                                              ItemsSource="{Binding GpuAdapterRows}">
-                                                                    <ItemsControl.ItemTemplate>
-                                                                        <DataTemplate x:DataType="svc:DisplayAdapterListItem">
-                                                                            <Grid ColumnSpacing="8" Margin="0,2">
-                                                                                <Grid.ColumnDefinitions>
-                                                                                    <ColumnDefinition Width="1.6*" />
-                                                                                    <ColumnDefinition Width="Auto" />
-                                                                                    <ColumnDefinition Width="2.4*" />
-                                                                                </Grid.ColumnDefinitions>
-                                                                                <TextBlock Text="{Binding NameLabel}"
-                                                                                           TextWrapping="Wrap" />
-                                                                                <TextBlock Grid.Column="1"
-                                                                                           Text="{Binding StatusLabel}"
-                                                                                           Margin="0,0,8,0"
-                                                                                           Opacity="0.85"
-                                                                                           IsVisible="{Binding DataContext.ShowGpuAdapterStatusColumn, ElementName=RootWindow}" />
-                                                                                <TextBlock Grid.Column="2"
-                                                                                           Text="{Binding NotesLabel}"
-                                                                                           TextWrapping="Wrap"
-                                                                                           Opacity="0.85" />
-                                                                            </Grid>
-                                                                        </DataTemplate>
-                                                                    </ItemsControl.ItemTemplate>
-                                                                </ItemsControl>
-                                                                <TextBlock IsVisible="{Binding ShowGpuAdapterEmptyMessage}"
-                                                                           Opacity="0.82"
-                                                                           TextWrapping="Wrap"
-                                                                           Text="No display adapters detected, or PowerShell query failed." />
-                                                            </StackPanel>
-                                                        </Border>
-                                                    </StackPanel>
-                                                    <StackPanel Spacing="4"
-                                                                IsVisible="{Binding ShowDesktopGpuPreference}">
-                                                        <TextBlock FontWeight="SemiBold"
-                                                                   Text="{x:Static svc:WindowsGpuPreference.AffinityModeLabel}" />
-                                                        <Grid ColumnDefinitions="*,Auto"
-                                                              ColumnSpacing="8">
-                                                            <ComboBox MinWidth="200"
-                                                                      HorizontalAlignment="Left"
-                                                                      VerticalAlignment="Center"
-                                                                      ItemsSource="{Binding DesktopGpuChoices}"
-                                                                      SelectedItem="{Binding SelectedDesktopGpu}"
-                                                                      IsEnabled="{Binding !DesktopGpuBusy}"
-                                                                      views:MarkedText.Tip="Select **Motherboard GPU** or **Discrete GPU**. Click **Apply**, then restart Windows. llama-server stays on **Discrete GPU** mode." />
-                                                            <Button Grid.Column="1"
-                                                                    Content="Apply"
-                                                                    Command="{Binding ApplyDesktopGpuCommand}"
-                                                                    views:MarkedText.Tip="Write **Windows GPU affinity**, then restart Windows so apps pick it up." />
-                                                        </Grid>
-                                                        <TextBlock views:MarkedText.Source="{Binding DesktopGpuStatusText}"
-                                                                   TextWrapping="Wrap"
-                                                                   Opacity="0.85"
-                                                                   IsVisible="{Binding DesktopGpuStatusText, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}" />
-                                                    </StackPanel>
-                                                    <StackPanel Spacing="4">
-                                                        <TextBlock FontWeight="SemiBold" Text="VRAM usage" />
-                                                        <Border BorderThickness="1"
-                                                                CornerRadius="4"
-                                                                Padding="8"
-                                                                MinHeight="120"
-                                                                BorderBrush="{DynamicResource TextControlBorderBrush}">
-                                                            <ScrollViewer VerticalScrollBarVisibility="Auto"
-                                                                          HorizontalScrollBarVisibility="Disabled"
-                                                                          views:MarkedText.Tip="How full each graphics card is, and which programs are using graphics memory. Close unused apps, then click **Refresh VRAM** to see the change.">
-                                                                <StackPanel Grid.IsSharedSizeScope="True">
-                                                                    <TextBlock IsVisible="{Binding GpuVramScanning}"
-                                                                               Opacity="0.82"
-                                                                               Text="{x:Static vm:MainViewModel.GpuVramScanningText}" />
-                                                                    <TextBlock IsVisible="{Binding !GpuVramScanning}"
-                                                                               Text="{Binding VramStatusText}"
-                                                                               TextWrapping="Wrap" />
-                                                                    <TextBlock Margin="0,16,0,4"
-                                                                               IsVisible="{Binding GpuVramScanning}"
-                                                                               Text="Programs using the main graphics card:"
-                                                                               TextWrapping="Wrap" />
-                                                                    <TextBlock Margin="0,0,0,10"
-                                                                               IsVisible="{Binding GpuVramScanning}"
-                                                                               Opacity="0.82"
-                                                                               Text="{x:Static vm:MainViewModel.GpuVramScanningText}" />
-                                                                    <TextBlock Margin="0,16,0,10"
-                                                                               IsVisible="{Binding HasVramProcessList}"
-                                                                               Text="{Binding VramProcessListHeaderText}"
-                                                                               TextWrapping="Wrap" />
-                                                                    <ItemsControl IsVisible="{Binding !GpuVramScanning}"
-                                                                                  ItemsSource="{Binding VramProcessRows}">
-                                                                        <ItemsControl.ItemTemplate>
-                                                                            <DataTemplate x:DataType="svc:VramProcessListItem">
-                                                                                <Grid Margin="0,1"
-                                                                                      Classes.vramCaution="{Binding IsCaution}">
-                                                                                    <Grid.ColumnDefinitions>
-                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="VramMb" />
-                                                                                        <ColumnDefinition Width="*" />
-                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="VramCount" />
-                                                                                    </Grid.ColumnDefinitions>
-                                                                                    <TextBlock Grid.Column="0"
-                                                                                               Text="{Binding MemoryLabel}"
-                                                                                               HorizontalAlignment="Right"
-                                                                                               Margin="0,0,12,0" />
-                                                                                    <TextBlock Grid.Column="1"
-                                                                                               Text="{Binding NameLabel}"
-                                                                                               TextWrapping="Wrap"
-                                                                                               TextTrimming="CharacterEllipsis" />
-                                                                                    <TextBlock Grid.Column="2"
-                                                                                               Text="{Binding CountLabel}"
-                                                                                               Margin="12,0,0,0"
-                                                                                               TextWrapping="Wrap" />
-                                                                                </Grid>
-                                                                            </DataTemplate>
-                                                                        </ItemsControl.ItemTemplate>
-                                                                    </ItemsControl>
-                                                                </StackPanel>
-                                                            </ScrollViewer>
-                                                        </Border>
-                                                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                                                            <Button Grid.Column="0"
-                                                                    HorizontalAlignment="Left"
-                                                                    Content="Refresh VRAM"
-                                                                    Command="{Binding RefreshVramStatusCommand}"
-                                                                    IsEnabled="{Binding !GpuVramScanning}"
-                                                                    views:MarkedText.Tip="Update graphics-memory numbers after you close apps or move the display." />
-                                                            <Button Grid.Column="1"
-                                                                    HorizontalAlignment="Right"
-                                                                    Content="Close"
-                                                                    Click="GpuVramPopupClose_Click"
-                                                                    ToolTip.Tip="Close this panel. It stays open while you close apps and refresh VRAM." />
-                                                        </Grid>
-                                                    </StackPanel>
-                                                </StackPanel>
-                                            </ScrollViewer>
-                                        </LayoutTransformControl>
-                                    </Border>
-                                    </ThemeVariantScope>
-                                </Popup>
-                                <StackPanel Orientation="Horizontal"
-                                            Spacing="8"
-                                            Margin="0,0,10,0"
-                                            VerticalAlignment="Center"
-                                            ToolTip.Tip="{StaticResource IdleTimeoutTooltip}">
-                                    <CheckBox VerticalAlignment="Center" Content="Idle timeout" IsChecked="{Binding IdleTimeoutEnabled}" ToolTip.Tip="{StaticResource IdleTimeoutTooltip}" />
-                                    <NumericUpDown MinWidth="72"
-                                                   Value="{Binding IdleTimeoutMinutes}"
-                                                   Minimum="1"
-                                                   Maximum="240"
-                                                   IsEnabled="{Binding IdleTimeoutEnabled}"
-                                                   ToolTip.Tip="{StaticResource IdleTimeoutTooltip}" />
-                                    <TextBlock VerticalAlignment="Center" Text="min" />
-                                </StackPanel>
                                 <Button Content="Health"
                                         Margin="0,0,6,0"
                                         Command="{Binding CheckConnectionHealthCommand}"
@@ -3847,16 +4068,6 @@
                                     <TextBlock Opacity="0.4" FontSize="10"
                                                Text="{x:Static upc:FluxMuxAppInfo.Copyright}" />
                                 </StackPanel>
-                                <TextBlock VerticalAlignment="Center" Opacity="0.6" Text="UI scale" />
-                                <ComboBox VerticalAlignment="Center"
-                                          ItemsSource="{Binding UiScaleOptions}"
-                                          SelectedItem="{Binding SelectedUiScale}"
-                                          ToolTip.Tip="Make the whole window smaller so more fits on screen. Nothing is hidden." />
-                                <TextBlock VerticalAlignment="Center" Opacity="0.6" Text="UI theme" />
-                                <ComboBox VerticalAlignment="Center"
-                                          ItemsSource="{Binding UiThemeOptions}"
-                                          SelectedItem="{Binding SelectedUiTheme}"
-                                          ToolTip.Tip="Light or dark window chrome. Diagnostics log stays dark either way." />
                             </StackPanel>
                         </Grid>
                     </Grid>

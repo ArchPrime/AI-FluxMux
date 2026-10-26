@@ -394,10 +394,9 @@ public static class PortRulesPostMortem
         if (!portRulesActive)
         {
             return ChatTurnCannotContinue
-                + "this turn was too large for the loaded Context — the prompt already fills the window. "
-                + RaiseContextAdvice
-                + " "
-                + SmallerNextStepAdvice;
+                + "it was too large to fit into the remaining Context space. "
+                + "You can try recovering the chat by launching a model profile with larger **Context**, if you have one, then hitting retry. "
+                + "Otherwise start a new chat. Consider a simpler request.";
         }
 
         var compactBit = compactApplied
@@ -408,7 +407,7 @@ public static class PortRulesPostMortem
         // number right after "too large for the loaded Context" reads as if it were the cause.
         // State the cause plainly, then describe Headroom as what it actually is.
         return ChatTurnCannotContinue
-            + "this turn was too large for the loaded Context — the prompt already fills the window. "
+            + "it was too large to fit into the remaining Context space. "
             + compactBit
             + " "
             + NamePortRule(Headroom)
@@ -446,6 +445,18 @@ public static class PortRulesPostMortem
         }
 
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
+        // Long-load / YaRN spill prefill: when the first-byte deadline is the long-load
+        // thinking window (ThinkingFirstByteSeconds, default 600s) rather than the normal
+        // think budget, the hang is "llama-server was still prefilling a large / RAM-spilled
+        // prompt and produced no first byte", NOT "the model was thinking past its budget".
+        // Reporting it as "Max think first-byte (limit 180)" is misleading: the 180 is just
+        // the think-budget cap, while the real deadline was the much longer long-load window.
+        // Name it as a long-load first-byte timeout and report the actual deadline.
+        if (firstByteDeadlineSeconds >= live.ThinkingFirstByteSeconds)
+        {
+            return "Long-load first-byte";
+        }
+
         if (firstByteDeadlineSeconds >= live.MaxThinkFirstByteSeconds)
         {
             return MaxThinkFirstByte;
@@ -466,6 +477,12 @@ public static class PortRulesPostMortem
 
     private static int HangLimitValue(string limitName, int firstByteDeadlineSeconds, PortForwardingRules live)
     {
+        if (limitName == "Long-load first-byte")
+        {
+            // Report the actual long-load deadline, not a cap.
+            return firstByteDeadlineSeconds;
+        }
+
         if (limitName == WaitLongerSeconds)
         {
             return live.WaitLongerSeconds;
@@ -496,6 +513,13 @@ public static class PortRulesPostMortem
 
     private static string HangWhatHappened(string limitName, bool localModelReady)
     {
+        if (limitName == "Long-load first-byte")
+        {
+            // A large / RAM-spilled (YaRN) prompt was still being prefilled when the
+            // long-load first-byte window elapsed — llama-server produced no first byte.
+            return "llama-server was still prefilling a large (RAM-spilled) prompt and did not start a reply in time.";
+        }
+
         if (limitName == WaitLongerSeconds)
         {
             return "you chose to keep this turn open, and llama-server stayed quiet.";
@@ -520,6 +544,17 @@ public static class PortRulesPostMortem
 
     private static string HangChangeAdvice(string limitName, bool localModelReady)
     {
+        if (limitName == "Long-load first-byte")
+        {
+            return "This is a large / RAM-spilled (YaRN) prompt that took too long to prefill. "
+                + "You can raise "
+                + NamePortRule(MaxThinkFirstByte)
+                + " in "
+                + PortRulesLocation
+                + " to give the long-load prefill more time, or start a new Client-app chat with a narrower ask so less context has to be prefilled. "
+                + NextTurnAfterRaise;
+        }
+
         if (limitName == WaitLongerSeconds)
         {
             return RaiseSettingAdvice(WaitLongerSeconds);

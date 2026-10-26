@@ -288,6 +288,11 @@ public partial class MainViewModel : ViewModelBase
     // stage. Aligned with the launchStartedUtc baseline that the recorded launch
     // telemetry (readyMs) is measured against.
     private DateTime _localLaunchCountdownStartUtc = DateTime.MinValue;
+    // The actual time the local model launch started. Set when the launch begins
+    // (e.g., in LaunchLocalAsync) and used to initialize _localLaunchCountdownStartUtc
+    // when the countdown monitor starts. This ensures the countdown shows the correct
+    // elapsed time even if the countdown monitor is started after the launch has begun.
+    private DateTime _localLaunchActualStartUtc = DateTime.MinValue;
     private CancellationTokenSource? _localValidateCts;
     private CancellationTokenSource? _activeEndpointHealthCts;
     private bool _benchmarkStatusActive;
@@ -418,6 +423,26 @@ public partial class MainViewModel : ViewModelBase
         _runtimeService.HailMaryOffered += line =>
         {
             SafeUiInvoke(() => ApplyHailMaryOffer(line));
+        };
+        // When an armed Hail Mary rear-prune is actually consumed on a turn, clear the "queued"
+        // pulse (the button is a one-off) and refresh the context gauge with the new, smaller
+        // prompt-token count. This is the "clear pulsing when the action has actually occurred"
+        // fix: previously HailMaryQueued was only cleared on a failure report, so a successful
+        // (or no-op) armed prune left the pulse running forever.
+        _runtimeService.HailMaryAppliedNotice += tokens =>
+        {
+            SafeUiInvoke(() =>
+            {
+                HailMaryQueued = false;
+                SetHailMaryOutcome("Rear-context prune applied — context gauge updated");
+            });
+        };
+        // Surface every gateway log line (Hail Mary results, forward-prune results, context
+        // measurements, route decisions) into the live diagnostic terminal so the user can see
+        // what is happening, especially during significant delays.
+        _runtimeService.GatewayLogLine += line =>
+        {
+            SafeUiInvoke(() => AppendDiagnosticEntry("GW", line));
         };
 
         var startupNotice = _runtimeService.ConsumeStartupRuntimeNotice();
@@ -3197,6 +3222,7 @@ public partial class MainViewModel : ViewModelBase
                 ContextGauge.Badge = string.IsNullOrEmpty(model) ? string.Empty : model.Length > 18 ? model[..18] + "…" : model;
                 ContextGauge.Tooltip = "Context fill: " + ContextGauge.DetailText
                     + " (" + ContextGauge.PercentText + "). Measured by the model's tokenizer each turn.";
+                HailMaryButtonVisible = true;
             }
             else
             {
@@ -3205,6 +3231,7 @@ public partial class MainViewModel : ViewModelBase
                 ContextGauge.DetailText = "Waiting for a turn…";
                 ContextGauge.Badge = string.Empty;
                 ContextGauge.Tooltip = "Context fill updates after each turn is measured by the model's tokenizer.";
+                HailMaryButtonVisible = false;
             }
         }
         catch
@@ -3235,6 +3262,19 @@ public partial class MainViewModel : ViewModelBase
         }
 
         OnPropertyChanged(nameof(ShowGenerationSpeedText));
+
+        // Plot one point on the live telemetry graphs when a turn completes (active -> idle
+        // transition). The snapshot's UpdatedUtc marks when the turn finished; plot it once.
+        if (snapshot is not null
+            && !snapshot.Active
+            && _lastTurnTelemetryActive
+            && snapshot.UpdatedUtc != _lastPlottedTurnUtc)
+        {
+            _lastPlottedTurnUtc = snapshot.UpdatedUtc;
+            PlotTurnTelemetry(snapshot);
+        }
+
+        _lastTurnTelemetryActive = snapshot?.Active ?? false;
     }
 
     private void RefreshLastRouteExplanation()
@@ -3681,6 +3721,42 @@ public partial class MainViewModel : ViewModelBase
         OnPropertyChanged(nameof(HailMaryBannerBackgroundBrush));
     }
 
+    /// <summary>
+    /// Always-visible Hail Mary button in Diagnostics. Shown when a local model is loaded
+    /// and the Context gauge is tracking a real prompt (promptTokens > 0). The operator can
+    /// click it proactively to run the destructive stage-5 middle-cut on the next forward,
+    /// or it appears automatically after a context-overflow 400.
+    /// </summary>
+    [ObservableProperty]
+    public partial bool HailMaryButtonVisible { get; set; }
+
+    [ObservableProperty]
+    public partial bool HailMaryQueued { get; set; }
+
+    /// <summary>
+    /// One-shot, human-readable result of the last Hail Mary middle-cut attempt, shown next to
+    /// the button so the operator gets immediate feedback (the gateway applies the cut on the
+    /// next forward and reports back). Empty when no attempt has run yet. Auto-clears after a few
+    /// seconds so the Diagnostics row stays uncluttered.
+    /// </summary>
+    [ObservableProperty]
+    public partial string HailMaryOutcome { get; set; } = string.Empty;
+
+    private System.Threading.Timer? _hailMaryOutcomeTimer;
+
+    // When the Hail Mary button becomes visible, re-evaluate its command's CanExecute so the
+    // button is enabled (and shows its tooltip). Without this, the button renders visible but
+    // disabled (greyed out, no tooltip) because the [RelayCommand] CanExecute is not
+    // automatically re-queried when the observable property changes.
+    partial void OnHailMaryButtonVisibleChanged(bool value)
+    {
+        if (value)
+        {
+            ResetHailMaryPicker();
+        }
+        HailMaryShrinkTurnCommand.NotifyCanExecuteChanged();
+    }
+
     public IBrush HailMaryBannerAccentBrush
     {
         get
@@ -3764,20 +3840,17 @@ public partial class MainViewModel : ViewModelBase
 
     partial void OnStressTestRunningChanged(bool value)
     {
-        // When the stress test starts, expand the diagnostics panel row to roughly double its
-        // default pixel height. The main tabs row is 1* with MinHeight=160, so a 0.45*
-        // diagnostics row gets ~31% of the shared space. To get ~double the pixel height,
-        // the diagnostics row needs a much larger star weight: 1.8* gives ~64% of the shared
-        // space, which is roughly double the 31% the default gets. When the test stops,
-        // restore the default split.
-        DiagnosticsRowHeight = value ? new GridLength(1.8, GridUnitType.Star) : new GridLength(0.45, GridUnitType.Star);
+        // The diagnostics panel now defaults to 1.5* (doubled from the old 0.45*), so the
+        // stress test no longer needs to resize the panel. The panel is already large enough
+        // to show the live telemetry graph with room for the bars and axes.
     }
 
-    // The height of the diagnostics panel row (Row 3 of MainLayoutGrid). Normally 0.45* so the
-    // main tabs get more space; expands to 1.8* (~double the default pixel height) when the
-    // stress test is running so the live telemetry graph has room to show the bars and axes.
+    // The height of the diagnostics panel row (Row 3 of MainLayoutGrid). Defaults to 1.5* so
+    // the panel gets ~60% of the shared space (roughly double the old 0.45* default). This
+    // gives the live telemetry graph enough room to show the bars and axes without needing
+    // to resize when the stress test starts.
     [ObservableProperty]
-    public partial GridLength DiagnosticsRowHeight { get; set; } = new(0.45, GridUnitType.Star);
+    public partial GridLength DiagnosticsRowHeight { get; set; } = new(1.0, GridUnitType.Star);
 
     // How the context-fill stress test drives each fill level. Progressive (default) builds a
     // realistic multi-turn conversation up to the target, measuring the model's real token
@@ -3885,16 +3958,69 @@ public partial class MainViewModel : ViewModelBase
         RefreshLocalReloadRecommendBanner();
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanHailMaryShrinkTurn))]
     private void HailMaryShrinkTurn()
     {
         // The non-destructive prune pipeline (stages 1-4) already ran automatically when the
-        // turn 400'd on context overflow. This button runs the destructive stage-5 middle-cut
-        // and asks the gateway to re-send the turn. The gateway applies the middle-cut to the
-        // last payload it saw and retries.
+        // turn 400'd on context overflow. This button runs a one-off REAR-context prune: it
+        // drops older conversational turns (the "rear") so the full forward turn can complete
+        // with the headroom the chosen stop requests. The system prompt, last real user task,
+        // and active tool-pair are always preserved. Not persisted — a one-off emergency choice.
+        System.Diagnostics.Debug.WriteLine("[HailMary] Button clicked, requesting rear-context prune stop=" + HailMaryAggressionStop + " stripImages=" + HailMaryStripImages);
         HailMaryBannerVisible = false;
-        StatusMessage = "Hail Mary: cutting the middle of this chat's history to make room. Re-sending the turn…";
-        _runtimeService.RequestHailMaryMiddleCut();
+        HailMaryQueued = true;
+        var stopName = HailMaryAggressionStop switch
+        {
+            HailMaryCompaction.HailMaryAggression.Gentle => "Gentle",
+            HailMaryCompaction.HailMaryAggression.Aggressive => "Aggressive",
+            _ => "Balanced"
+        };
+        var imgBit = HailMaryStripImages ? ", strip older images" : string.Empty;
+        SetHailMaryOutcome("Armed (" + stopName + imgBit + ") — will prune on the next turn you send");
+        StatusMessage = "Hail Mary armed (" + stopName + imgBit + "): the next turn you send will have its older history pruned to make room. Send your reply now.";
+        _runtimeService.RequestHailMaryMiddleCut(HailMaryAggressionStop, HailMaryStripImages);
+        ResetHailMaryPicker();
+    }
+
+    private bool CanHailMaryShrinkTurn => HailMaryButtonVisible;
+
+    /// <summary>
+    /// One-off Hail Mary aggression stop chosen on the button (default Balanced). Not
+    /// persisted — resets each time the button/banner becomes visible.
+    /// </summary>
+    [ObservableProperty]
+    public partial HailMaryCompaction.HailMaryAggression HailMaryAggressionStop { get; set; } = HailMaryCompaction.HailMaryAggression.Balanced;
+
+    /// <summary>
+    /// One-off Hail Mary choice: also strip older embedded images (independent of the stop).
+    /// Default off. Not persisted.
+    /// </summary>
+    [ObservableProperty]
+    public partial bool HailMaryStripImages { get; set; }
+
+    /// <summary>
+    /// Resets the one-off Hail Mary picker to its defaults (Balanced, no image-strip). Called
+    /// when the button/banner becomes visible so each emergency choice starts fresh.
+    /// </summary>
+    private void ResetHailMaryPicker()
+    {
+        HailMaryAggressionStop = HailMaryCompaction.HailMaryAggression.Balanced;
+        HailMaryStripImages = false;
+    }
+
+    /// <summary>
+    /// Shows a one-shot result message next to the Hail Mary button and auto-clears it after a few
+    /// seconds. Marshals onto the UI thread because it can be raised from the gateway's worker
+    /// thread (via <c>HailMaryOffered</c>) or from the UI thread (button click).
+    /// </summary>
+    private void SetHailMaryOutcome(string text)
+    {
+        HailMaryOutcome = text;
+        _hailMaryOutcomeTimer?.Dispose();
+        _hailMaryOutcomeTimer = new System.Threading.Timer(_ =>
+        {
+            SafeUiInvoke(() => HailMaryOutcome = string.Empty);
+        }, null, TimeSpan.FromSeconds(8), System.Threading.Timeout.InfiniteTimeSpan);
     }
 
     [RelayCommand]
@@ -4081,16 +4207,111 @@ public partial class MainViewModel : ViewModelBase
     // alongside TTFT (latency). This shows the tradeoff between speed and context fill.
     public TelemetryGraphViewModel TelemetryGraphThroughput { get; } = new();
 
+    // --- Live chat-turn telemetry (separate mode from the stress test) ---
+    // When "Reply speed" is on, each completed Client-app turn plots one point on each graph:
+    // TTFT (s) vs turn index, and tok/s vs turn index. This reuses the same two graph panels so
+    // no new UI is needed; the stress test and the turn view are mutually exclusive because the
+    // stress test's SetSeries() call re-titles and clears the axes.
+    private int _turnTelemetryIndex;
+    private bool _turnTelemetryArmed;
+    private bool _lastTurnTelemetryActive;
+    private DateTimeOffset _lastPlottedTurnUtc = DateTimeOffset.MinValue;
+    private const int TurnTelemetryWindow = 20;
+
+    /// <summary>
+    /// Plots one point per completed chat turn on the two telemetry graphs. Called from
+    /// <see cref="RefreshGenerationSpeedTelemetry"/> when a turn finishes. Gated on the
+    /// "Reply speed" telemetry switch, so it is off by default and adds no overhead until the
+    /// operator turns it on.
+    /// </summary>
+    private void PlotTurnTelemetry(Services.GenerationSpeedSnapshot snapshot)
+    {
+        if (!GenerationSpeedTelemetryEnabled)
+        {
+            return;
+        }
+
+        // Only plot a meaningful point when the turn actually produced tokens.
+        if (snapshot.CompletionTokens <= 0 && snapshot.TokensPerSecond <= 0)
+        {
+            return;
+        }
+
+        _turnTelemetryIndex++;
+        var x = _turnTelemetryIndex;
+
+        // Re-title the axes for the turn view the first time it is used in this session, so the
+        // stress-test axis titles ("Context (tok)") are replaced by "Turn". SetSeries clears the
+        // points, so only call it when we are starting a fresh turn series (not mid-series).
+        // Also, don't switch to telemetry mode if the stress test is running — the stress test
+        // has already taken over the graphs, and switching back would cause residual text.
+        if (!_turnTelemetryArmed && !StressTestRunning)
+        {
+            TelemetryGraph.SetSeries("TTFT (s)", "Chat Turn", "TTFT (s)",
+                "TTFT = Time To First Token (latency from turn start to first token)");
+            TelemetryGraphThroughput.SetSeries("(tok/s)", "Chat Turn", "tok/s",
+                "tok/s = tokens per second (generation speed after the first token)");
+            // Enter scroll mode: the per-turn view shows a smooth right-to-left scrolling window
+            // of the last few turns (new bars enter at the right, old bars exit off the left).
+            // The stress test disarms this via EndScrollMode when it takes over the panels.
+            TelemetryGraph.BeginScrollMode();
+            TelemetryGraphThroughput.BeginScrollMode();
+            // Set the Y-axis minimum offset so the Y-axis starts at a non-zero baseline:
+            // 200 for TTFT (seconds) and 180 for tok/s. This makes small variations above
+            // the baseline more visible instead of compressing them near the bottom.
+            TelemetryGraph.SetYAxisMinOffset(200.0);
+            TelemetryGraphThroughput.SetYAxisMinOffset(180.0);
+            _turnTelemetryArmed = true;
+        }
+
+        // Don't add telemetry data points if the stress test is running — the stress test
+        // has taken over the graphs, and adding telemetry points would cause residual text.
+        if (!StressTestRunning)
+        {
+            TelemetryGraph.AddPoint(x, snapshot.TtftSeconds,
+                $"turn {x}: {snapshot.TtftSeconds:0.##}s");
+            TelemetryGraphThroughput.AddPoint(x, snapshot.TokensPerSecond,
+                $"turn {x}: {snapshot.TokensPerSecond:0.##} tok/s");
+
+            // Keep a rolling window so the graphs stay readable over a long session. The graph VM
+            // holds points in a public collection; trim the oldest so only the last N turns show.
+            TrimTurnTelemetryWindow(TelemetryGraph);
+            TrimTurnTelemetryWindow(TelemetryGraphThroughput);
+        }
+    }
+
+    private static void TrimTurnTelemetryWindow(TelemetryGraphViewModel graph)
+    {
+        var points = graph.Points;
+        if (points.Count > TurnTelemetryWindow)
+        {
+            var remove = points.Count - TurnTelemetryWindow;
+            for (var i = 0; i < remove; i++)
+            {
+                points.RemoveAt(0);
+            }
+
+            // Re-derive the axis bounds and re-render after trimming.
+            graph.RefreshAfterTrim();
+        }
+    }
+
     public const string GpuVramScanningText = "scanning....";
 
     [ObservableProperty]
     public partial string VramStatusText { get; set; } = "Open this panel to load graphics-card memory and display adapters.";
 
     [ObservableProperty]
-    public partial string VramProcessListHeaderText { get; set; } = "Programs using the main graphics card (high to low):";
+    public partial string VramProcessListHeaderText { get; set; } = "Programs using graphics memory (high to low):";
 
     [ObservableProperty]
     public partial ObservableCollection<VramProcessListItem> VramProcessRows { get; set; } = new();
+
+    [ObservableProperty]
+    public partial ObservableCollection<VramProcessListItem> VramProcessRowsVram { get; set; } = new();
+
+    [ObservableProperty]
+    public partial ObservableCollection<VramProcessListItem> VramProcessRowsRam { get; set; } = new();
 
     [ObservableProperty]
     public partial bool HasVramProcessList { get; set; }
@@ -4105,6 +4326,9 @@ public partial class MainViewModel : ViewModelBase
     public partial bool GpuVramScanning { get; set; }
 
     [ObservableProperty]
+    public partial bool GpuVramSectionExpanded { get; set; }
+
+    [ObservableProperty]
     public partial bool ShowGpuAdapterEmptyMessage { get; set; }
 
     [ObservableProperty]
@@ -4112,6 +4336,74 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     public partial ObservableCollection<DisplayAdapterListItem> GpuAdapterRows { get; set; } = new();
+
+    // --- Monitor ports in use (display topology) ---
+    // Populated by DisplayTopologyService during the GPU/VRAM scan. Shows which GPU
+    // physically drives each monitor and the resulting topology advice.
+    [ObservableProperty]
+    public partial ObservableCollection<MonitorPortRow> MonitorPortRows { get; set; } = new();
+
+    [ObservableProperty]
+    public partial bool HasMonitorPortRows { get; set; }
+
+    [ObservableProperty]
+    public partial bool ShowMonitorPortTable { get; set; }
+
+    [ObservableProperty]
+    public partial string MonitorTopologySummary { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string MonitorTopologyAdvice { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial bool ShowMonitorTopologyAdvice { get; set; }
+
+    [ObservableProperty]
+    public partial bool ShowMonitorTopologyUnknown { get; set; }
+
+    // --- "Other display arrangements" expandable text ---
+    // Describes the alternative topologies (and their tradeoffs) so the user can compare
+    // before moving cables. Bound to an OptionInfoNote ("more info / hide" pattern) in
+    // MainWindow.axaml, so dismissal persists across sessions via OptionInfoDismissalStore.
+    // Built eagerly in ApplyDisplayTopologyResult() when a scan completes; empty otherwise
+    // (which hides the note).
+    [ObservableProperty]
+    public partial string MonitorTopologyOtherOptionsText { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Builds the "Other display arrangements" text: a description of each topology that
+    /// is NOT the currently-detected one, so the user can compare tradeoffs. Falls back to
+    /// a full overview when the topology is unknown.
+    /// </summary>
+    private string BuildMonitorTopologyOtherOptionsText()
+    {
+        // Determine the current topology from the populated MonitorPortRows.
+        var topology = DisplayTopologyService.ClassifyTopology(MonitorPortRows);
+
+        var sections = new List<string>();
+        switch (topology)
+        {
+            case DisplayTopology.AllOnIgpu:
+                sections.Add("**All monitors on the Discrete GPU:** " + DisplayTopologyService.BuildAllOnDgpuAdvice());
+                sections.Add("**Hybrid (one or more monitors on each GPU):** " + DisplayTopologyService.BuildHybridAdviceGeneric());
+                break;
+            case DisplayTopology.AllOnDgpu:
+                sections.Add("**All monitors on the iGPU:** " + DisplayTopologyService.BuildAllOnIgpuAdvice());
+                sections.Add("**Hybrid (one or more monitors on each GPU):** " + DisplayTopologyService.BuildHybridAdviceGeneric());
+                break;
+            case DisplayTopology.Hybrid:
+                sections.Add("**All monitors on the iGPU:** " + DisplayTopologyService.BuildAllOnIgpuAdvice());
+                sections.Add("**All monitors on the Discrete GPU:** " + DisplayTopologyService.BuildAllOnDgpuAdvice());
+                break;
+            default:
+                sections.Add("**All monitors on the iGPU:** " + DisplayTopologyService.BuildAllOnIgpuAdvice());
+                sections.Add("**All monitors on the Discrete GPU:** " + DisplayTopologyService.BuildAllOnDgpuAdvice());
+                sections.Add("**Hybrid (one or more monitors on each GPU):** " + DisplayTopologyService.BuildHybridAdviceGeneric());
+                break;
+        }
+
+        return string.Join("\n\n", sections);
+    }
 
     [ObservableProperty]
     public partial bool ShowDesktopGpuPreference { get; set; }
@@ -4125,7 +4417,49 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial bool DesktopGpuBusy { get; set; }
 
+    [ObservableProperty]
+    public partial ObservableCollection<GpuAppListItem> VramGpuAppRows { get; set; } = new();
+
+    [ObservableProperty]
+    public partial ObservableCollection<GpuAppListItem> IgpuGpuAppRows { get; set; } = new();
+
+    [ObservableProperty]
+    public partial ObservableCollection<GpuAppListItem> ProtectedGpuAppRows { get; set; } = new();
+
+    [ObservableProperty]
+    public partial ObservableCollection<GpuAppListItem> SystemGpuAppRows { get; set; } = new();
+
+    [ObservableProperty]
+    public partial string SystemGpuAppSummary { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial bool HasVramGpuAppRows { get; set; }
+
+    [ObservableProperty]
+    public partial bool HasIgpuGpuAppRows { get; set; }
+
+    [ObservableProperty]
+    public partial bool HasProtectedGpuApps { get; set; }
+
+    [ObservableProperty]
+    public partial bool HasSystemGpuApps { get; set; }
+
+    [ObservableProperty]
+    public partial string VramGpuAppsCountText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string IgpuGpuAppsCountText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string ProtectedGpuAppsCountText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string SystemGpuAppsCountText { get; set; } = string.Empty;
+
     public IReadOnlyList<string> DesktopGpuChoices { get; } = WindowsGpuPreference.Choices;
+
+    private DateTime _lastGpuVramScanUtc = DateTime.MinValue;
+    private static readonly TimeSpan GpuVramScanCooldown = TimeSpan.FromSeconds(30);
 
     private bool CanScanGpuVram() => !GpuVramScanning;
 
@@ -4142,6 +4476,14 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        // Skip the scan if one completed within the last 30 seconds. This avoids redundant
+        // scans at startup when the Settings tab selection, GPU/VRAM section expand, and
+        // popup open all trigger the scan in quick succession.
+        if (DateTime.UtcNow - _lastGpuVramScanUtc < GpuVramScanCooldown)
+        {
+            return;
+        }
+
         BeginGpuVramScan();
         try
         {
@@ -4149,15 +4491,19 @@ public partial class MainViewModel : ViewModelBase
             await Task.Yield();
             var adapters = default(RuntimeActionResult);
             var result = default(RuntimeActionResult);
+            var topology = default(DisplayTopologyService.TopologyResult);
             await Task.Run(() =>
             {
                 adapters = _runtimeService.GetGpuAdaptersAsync().GetAwaiter().GetResult();
                 result = _runtimeService.GetVramStatusAsync().GetAwaiter().GetResult();
+                topology = DisplayTopologyService.Detect();
             }).ConfigureAwait(true);
             ApplyGpuAdapterResult(adapters!);
             RefreshDesktopGpuPreferenceFromRegistry();
             ApplyVramStatusResult(result!);
+            ApplyDisplayTopologyResult(topology!);
             StatusMessage = result!.IsSuccess ? "Graphics cards and memory updated" : result.Status;
+            _lastGpuVramScanUtc = DateTime.UtcNow;
         }
         finally
         {
@@ -4174,6 +4520,10 @@ public partial class MainViewModel : ViewModelBase
         ShowGpuAdapterList = false;
         GpuAdapterRows.Clear();
         VramProcessRows.Clear();
+        MonitorPortRows.Clear();
+        ShowMonitorPortTable = false;
+        ShowMonitorTopologyAdvice = false;
+        ShowMonitorTopologyUnknown = false;
         VramStatusText = GpuVramScanningText;
         RefreshVramStatusCommand.NotifyCanExecuteChanged();
     }
@@ -4190,15 +4540,29 @@ public partial class MainViewModel : ViewModelBase
     {
         VramStatusText = result.Details;
         VramProcessListHeaderText = result.GpuCardCount > 1
-            ? "Programs using main graphics cards (combined, high to low):"
-            : "Programs using the main graphics card (high to low):";
+            ? "Programs using graphics memory (combined, high to low):"
+            : "Programs using graphics memory (high to low):";
         VramProcessRows.Clear();
+        VramProcessRowsVram.Clear();
+        VramProcessRowsRam.Clear();
         foreach (var row in result.VramProcessItems)
         {
             VramProcessRows.Add(row);
+            if (row.GpuKind == GpuKind.DiscreteVram)
+            {
+                VramProcessRowsVram.Add(row);
+            }
+            else if (row.GpuKind == GpuKind.MotherboardRam)
+            {
+                VramProcessRowsRam.Add(row);
+            }
         }
 
+        System.Diagnostics.Debug.WriteLine($"[VramProcess] Total={VramProcessRows.Count}, VRAM={VramProcessRowsVram.Count}, RAM={VramProcessRowsRam.Count}");
         HasVramProcessList = VramProcessRows.Count > 0;
+
+        // Refresh the unified GPU app list now that VramProcessRows is populated.
+        RefreshGpuAppRows();
     }
 
     private void ApplyGpuAdapterResult(RuntimeActionResult result)
@@ -4220,6 +4584,39 @@ public partial class MainViewModel : ViewModelBase
         ApplyDesktopGpuCommand.NotifyCanExecuteChanged();
     }
 
+    /// <summary>
+    /// Populates the "Monitor ports in use" table and the topology advice block from a
+    /// DisplayTopologyService result. Degrades to the Unknown state when detection failed.
+    /// </summary>
+    private void ApplyDisplayTopologyResult(DisplayTopologyService.TopologyResult topology)
+    {
+        MonitorPortRows.Clear();
+        if (topology is null || !topology.Detected)
+        {
+            HasMonitorPortRows = false;
+            ShowMonitorPortTable = false;
+            ShowMonitorTopologyAdvice = false;
+            ShowMonitorTopologyUnknown = true;
+            MonitorTopologySummary = string.Empty;
+            MonitorTopologyAdvice = DisplayTopologyService.BuildAdvice(DisplayTopology.Unknown, []);
+            MonitorTopologyOtherOptionsText = string.Empty;
+            return;
+        }
+
+        foreach (var row in topology.Monitors)
+        {
+            MonitorPortRows.Add(row);
+        }
+
+        HasMonitorPortRows = MonitorPortRows.Count > 0;
+        ShowMonitorPortTable = HasMonitorPortRows;
+        ShowMonitorTopologyUnknown = false;
+        ShowMonitorTopologyAdvice = true;
+        MonitorTopologySummary = topology.TopologySummary;
+        MonitorTopologyAdvice = topology.Advice;
+        MonitorTopologyOtherOptionsText = BuildMonitorTopologyOtherOptionsText();
+    }
+
     private void RefreshDesktopGpuPreferenceFromRegistry()
     {
         if (!ShowDesktopGpuPreference)
@@ -4232,9 +4629,7 @@ public partial class MainViewModel : ViewModelBase
         {
             var current = WindowsGpuPreference.Read();
             SelectedDesktopGpu = current.Label;
-            DesktopGpuStatusText = "Current "
-                + WindowsGpuPreference.AffinityModeLabel
-                + ": "
+            DesktopGpuStatusText = "Current default Windows GPU affinity: "
                 + ControlLabelMarkup.Mark(current.Label)
                 + ".";
         }
@@ -4245,6 +4640,214 @@ public partial class MainViewModel : ViewModelBase
                 + ". "
                 + ex.Message;
         }
+
+        RefreshGpuAppRows();
+    }
+
+    private void RefreshGpuAppRows()
+    {
+        VramGpuAppRows.Clear();
+        IgpuGpuAppRows.Clear();
+        ProtectedGpuAppRows.Clear();
+        SystemGpuAppRows.Clear();
+        HasVramGpuAppRows = false;
+        HasIgpuGpuAppRows = false;
+        HasProtectedGpuApps = false;
+        HasSystemGpuApps = false;
+        VramGpuAppsCountText = string.Empty;
+        IgpuGpuAppsCountText = string.Empty;
+        ProtectedGpuAppsCountText = string.Empty;
+        SystemGpuAppsCountText = string.Empty;
+        SystemGpuAppSummary = string.Empty;
+
+        try
+        {
+            // Build a lookup of registry GPU affinity by raw process name (case-insensitive)
+            // so we can show which GPU each currently-running app is on.
+            var affinityByRawName = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var entries = WindowsGpuPreference.GetAllAppAffinities();
+            foreach (var entry in entries)
+            {
+                var rawName = Path.GetFileNameWithoutExtension(entry.AppName);
+                if (!string.IsNullOrWhiteSpace(rawName) && !affinityByRawName.ContainsKey(rawName))
+                {
+                    affinityByRawName[rawName] = entry.Preference;
+                }
+            }
+
+            int vramCount = 0;
+            int igpuCount = 0;
+            int protectedCount = 0;
+            int systemCount = 0;
+            long systemMemoryMb = 0;
+
+            foreach (var row in VramProcessRows)
+            {
+                var rawName = row.RawName;
+                var displayName = row.NameLabel;
+
+                // Determine which GPU this app is on (from registry, or default to Discrete).
+                var isOnMotherboard = false;
+                if (affinityByRawName.TryGetValue(rawName, out var pref) ||
+                    affinityByRawName.TryGetValue(displayName, out pref))
+                {
+                    isOnMotherboard = pref == WindowsGpuPreference.PowerSaving;
+                }
+
+                var isPinned = WindowsGpuPreference.IsPinnedName(rawName);
+                var isSystem = IsSystemBackgroundGpuApp(rawName);
+                var canToggle = !isPinned && !isSystem && row.CanToggle;
+
+                var item = new GpuAppListItem
+                {
+                    AppName = rawName,
+                    DisplayName = displayName,
+                    StatusLabel = isOnMotherboard
+                        ? WindowsGpuPreference.MotherboardGraphicsLabel
+                        : WindowsGpuPreference.MainGraphicsCardLabel,
+                    MemoryLabel = row.MemoryLabel,
+                    IsOnMotherboardGpu = isOnMotherboard,
+                    CanToggle = canToggle
+                };
+
+                if (isSystem)
+                {
+                    // OS compositing / driver / background buckets — list individually, greyed, not switchable.
+                    systemCount++;
+                    SystemGpuAppRows.Add(item);
+                    continue;
+                }
+
+                if (isPinned)
+                {
+                    // Pinned apps (e.g. llama-server) — list individually, greyed, not switchable.
+                    protectedCount++;
+                    ProtectedGpuAppRows.Add(item);
+                    continue;
+                }
+
+                if (!canToggle)
+                {
+                    // Headless / no-VRAM processes that are neither pinned nor system — exclude
+                    // from the user-facing lists (they need no dedicated VRAM to be visible).
+                    continue;
+                }
+
+                if (isOnMotherboard)
+                {
+                    igpuCount++;
+                    IgpuGpuAppRows.Add(item);
+                }
+                else
+                {
+                    vramCount++;
+                    VramGpuAppRows.Add(item);
+                }
+            }
+
+            HasVramGpuAppRows = VramGpuAppRows.Count > 0;
+            HasIgpuGpuAppRows = IgpuGpuAppRows.Count > 0;
+            HasProtectedGpuApps = ProtectedGpuAppRows.Count > 0;
+            HasSystemGpuApps = SystemGpuAppRows.Count > 0;
+
+            if (HasVramGpuAppRows)
+            {
+                VramGpuAppsCountText = vramCount == 1 ? "1 app" : $"{vramCount} apps";
+            }
+
+            if (HasIgpuGpuAppRows)
+            {
+                IgpuGpuAppsCountText = igpuCount == 1 ? "1 app" : $"{igpuCount} apps";
+            }
+
+            if (HasProtectedGpuApps)
+            {
+                ProtectedGpuAppsCountText = protectedCount == 1 ? "1 app" : $"{protectedCount} apps";
+            }
+
+            if (HasSystemGpuApps)
+            {
+                SystemGpuAppsCountText = systemCount == 1 ? "1 app" : $"{systemCount} apps";
+            }
+        }
+        catch (Exception ex)
+        {
+            SystemGpuAppSummary = "Could not read GPU affinity list. " + ex.Message;
+        }
+    }
+
+    private static string FormatMb(long mb)
+    {
+        if (mb >= 1024)
+        {
+            return $"{mb / 1024.0:F1} GB";
+        }
+
+        return mb > 0 ? $"{mb} MB" : "0 MB";
+    }
+
+    private static bool IsSystemBackgroundGpuApp(string rawName)
+    {
+        if (string.IsNullOrWhiteSpace(rawName))
+        {
+            return false;
+        }
+
+        var key = rawName.ToLowerInvariant();
+        return key switch
+        {
+            "dwm" or "explorer" or "csrss" or "winlogon" or "smss" or "searchhost"
+                or "startmenuexperiencehost" or "shellexperiencehost" or "textinputhost"
+                or "applicationframehost" or "lockapp" or "shellhost" or "crossdeviceresume"
+                or "nvcontainer" or "nvsphelper64" or "nvidia web helper" or "nvidia overlay"
+                or "runtimebroker" or "sihost" or "taskhostw" or "fontdrvhost"
+                or "unlisted" or "windows desktop" or "windows background processes"
+                or "nvidia overlay" => true,
+            _ => false
+        };
+    }
+
+    public void RefreshGpuAppRowsForUi()
+    {
+        RefreshGpuAppRows();
+    }
+
+    /// <summary>
+    /// Toggles the GPU affinity of a single user-facing app. The pill's DataContext is the
+    /// <see cref="GpuAppListItem"/>; clicking flips it to the opposite GPU.
+    /// </summary>
+    [RelayCommand]
+    private async Task ToggleGpuAppAsync(GpuAppListItem? item)
+    {
+        if (item is null || !item.CanToggle)
+        {
+            return;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var target = item.IsOnMotherboardGpu
+            ? WindowsGpuPreference.HighPerformance
+            : WindowsGpuPreference.PowerSaving;
+
+        string statusMsg;
+        try
+        {
+            var success = await Task.Run(() => WindowsGpuPreference.ApplyForApp(item.AppName, target)).ConfigureAwait(true);
+            statusMsg = success
+                ? $"{item.DisplayName} moved to {WindowsGpuPreference.LabelFor(target)}."
+                : $"Could not change GPU affinity for {item.DisplayName}.";
+        }
+        catch (Exception ex)
+        {
+            statusMsg = $"Could not change GPU affinity for {item.DisplayName}. {ex.Message}";
+        }
+
+        StatusMessage = statusMsg;
+        RefreshGpuAppRows();
     }
 
     private bool CanApplyDesktopGpu()
@@ -4280,11 +4883,11 @@ public partial class MainViewModel : ViewModelBase
             DesktopGpuStatusText =
                 "Desktop apps are now set to "
                 + ControlLabelMarkup.Mark(result.Label)
-                + ". Restart Windows so they pick this up";
+                + ". Applied after Windows restart.";
             StatusMessage = WindowsGpuPreference.AffinityModeLabel
                 + " set to "
                 + result.Label
-                + ". Restart Windows.";
+                + ". Applied after Windows restart.";
         }
         catch (Exception ex)
         {
@@ -4298,6 +4901,7 @@ public partial class MainViewModel : ViewModelBase
         {
             DesktopGpuBusy = false;
             ApplyDesktopGpuCommand.NotifyCanExecuteChanged();
+            RefreshGpuAppRows();
         }
     }
 
@@ -4829,6 +5433,15 @@ public partial class MainViewModel : ViewModelBase
         _              => 1.0
     };
 
+    [ObservableProperty]
+    public partial bool EnforceCleanWidth { get; set; } = true;
+
+    partial void OnEnforceCleanWidthChanged(bool value)
+    {
+        _config.SetBool("EnforceCleanWidth", value);
+        _configService.Save(_config);
+    }
+
     partial void OnSelectedUiScaleChanged(string value)
     {
         OnPropertyChanged(nameof(UiScaleFactor));
@@ -4854,6 +5467,8 @@ public partial class MainViewModel : ViewModelBase
         if (UiThemeOptions.Contains(savedTheme))
             SelectedUiTheme = savedTheme;
         global::FluxMux.Avalonia.App.ApplyRequestedTheme(SelectedUiTheme);
+
+        EnforceCleanWidth = _config.GetBool("EnforceCleanWidth", true);
     }
 
     public void SaveWindowGeometry(int x, int y, int width, int height)
@@ -6079,6 +6694,17 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     private string _localAutoCompactMode = "port-rules";
+
+    /// <summary>
+    /// Per-profile forward-prune toggle ("LocalForwardPruneEnabled", default on). When on, every
+    /// local turn has its own waste trimmed (dedupe, collapse repeated tool loops, truncate
+    /// oversized older tool results) so the context fills more slowly. A per-turn throttle,
+    /// distinct from Compaction (summarize older turns) and Hail Mary (one-off emergency
+    /// rear-prune). Read live each turn, so toggling takes effect on the next turn without a
+    /// reload. Persisted per profile in the config.
+    /// </summary>
+    [ObservableProperty]
+    private bool _localForwardPruneEnabled = true;
 
     public ObservableCollection<LocalAutoCompactModeOption> LocalAutoCompactModeOptions { get; } =
     [
@@ -7421,6 +8047,7 @@ public partial class MainViewModel : ViewModelBase
         _runtimeService.ResetLocalRequestOverlays();
 
         var launchStartedUtc = DateTime.UtcNow;
+        _localLaunchActualStartUtc = launchStartedUtc;
         StartLocalLaunchCountdownMonitor(model, variant, longLoadProfile: longLoadProfile, launchStartedUtc: launchStartedUtc);
         var keepCountdownRunning = false;
         var vision = GetLocalVisionLaunchSettings(model, variant);
@@ -7455,6 +8082,8 @@ public partial class MainViewModel : ViewModelBase
             {
                 StopLocalLaunchCountdownMonitor();
             }
+            // Reset the actual launch start time so the next launch starts fresh.
+            _localLaunchActualStartUtc = DateTime.MinValue;
         }
     }
 
@@ -8994,9 +9623,18 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        TelemetryGraph.SetSeries("TTFT (s)", "Context (tok)", "TTFT (s)", isLogScaleY: true,
-            "TTFT = Time To First Token (latency from prompt to first token)");
+        // The stress test takes over the two telemetry graphs with its own axis titles
+        // ("Context (tok)"). Disarm the live chat-turn view so the next completed turn re-titles
+        // the axes back to "Turn" instead of appending onto the stress-test series. Also exit
+        // scroll mode so the sliding-window positioning is disabled and the stress test's fixed
+        // axis range (evenly-spaced fill-level bars) is used instead.
+        _turnTelemetryArmed = false;
+        _turnTelemetryIndex = 0;
+        TelemetryGraph.EndScrollMode();
+        TelemetryGraphThroughput.EndScrollMode();
 
+        TelemetryGraph.SetSeries("TTFT (s)", "Context (tok)", "TTFT (s)",
+            "TTFT = Time To First Token (latency from prompt to first token)");
         // Compute the fill levels in absolute tokens based on the context limit and VRAM context.
         var vramContext = _runtimeService.ManagedLocalVramContext;
         var fillLevels = Services.ContextFillStressProbe.ComputeFillLevels(contextLimit, vramContext);
@@ -9015,7 +9653,7 @@ public partial class MainViewModel : ViewModelBase
 
         // Throughput graph: plots tok/s (generation speed) alongside TTFT. Same X-axis range
         // (absolute tokens), Y-axis is tok/s (starts at 0, grows as faster readings arrive).
-        TelemetryGraphThroughput.SetSeries("(tok/s)", "Context (tok)", "tok/s", isLogScaleY: false,
+        TelemetryGraphThroughput.SetSeries("(tok/s)", "Context (tok)", "tok/s",
             "tok/s = tokens per second (generation speed after the first token)");
         TelemetryGraphThroughput.SetAxisRange(0.0, xAxisMax, 0.0, 350.0);
         TelemetryGraphThroughput.SetFillLevels(fillLevels);
@@ -9284,38 +9922,27 @@ public partial class MainViewModel : ViewModelBase
             // the client app, which will use a fresh context.
             _ = Task.Run(() => ClearLocalModelContextAfterStressTestAsync(model, variant));
 
-            // Reset the telemetry graphs so the "No telemetry" placeholder reappears when
+            // Clear the telemetry graphs so the "No telemetry" placeholder reappears when
             // the graph is empty. Without this, IsActive stays true after the first stress
-            // test and the placeholder is permanently hidden.
+            // test and the placeholder is permanently hidden. Use Clear() (not Deactivate())
+            // so the stress-test bars/labels are wiped and do not linger as residual text
+            // when the panel returns to normal telemetry mode.
             SafeUiInvoke(() =>
             {
-                TelemetryGraph.Deactivate();
-                TelemetryGraphThroughput.Deactivate();
+                TelemetryGraph.Clear();
+                TelemetryGraphThroughput.Clear();
+                // Reset the context gauge so it doesn't show a stale high value from the
+                // stress test. The context gauge reads from the model's tokenizer, which
+                // may still report the stress test's context usage until the next turn.
+                UpdateContextGauge();
             });
 
             // Clear any stale local-reload recommendation so it doesn't block the next turn.
             _runtimeService.ClearLocalReloadRecommend();
 
-            // Keep the diagnostics panel expanded for 8 seconds so the user can read the
-            // results and compare the ghost bars, then collapse it back to the default size.
-            // StressTestRunning is already false (set above), so we directly manipulate
-            // DiagnosticsRowHeight to keep the panel expanded without affecting the buttons.
-            SafeUiInvoke(() =>
-            {
-                DiagnosticsRowHeight = new GridLength(1.8, GridUnitType.Star);
-            });
-            _ = Task.Delay(TimeSpan.FromSeconds(8)).ContinueWith(_ =>
-            {
-                SafeUiInvoke(() =>
-                {
-                    // Only collapse if the test is still not running (the user may have
-                    // started a new test in the meantime).
-                    if (!StressTestRunning)
-                    {
-                        DiagnosticsRowHeight = new GridLength(0.45, GridUnitType.Star);
-                    }
-                });
-            });
+            // Note: The diagnostics panel now defaults to 1.8* (doubled from the old 0.45*),
+            // so there's no need to expand/collapse it after the stress test. The panel is
+            // already large enough to show the results and the live telemetry graph.
         }
     }
 
@@ -13528,9 +14155,12 @@ public partial class MainViewModel : ViewModelBase
         }
 
         HailMaryBannerText = text;
-        HailMaryBannerTooltip = "Cuts the middle of this chat's forwarded history (keeping the most recent turns and the last user task) to make room for the reply. The Client app still has the full chat. This is destructive to the forwarded context — the model loses the older turns it was working from.";
+        HailMaryBannerTooltip = "What it does: deletes the older turns from the middle of this chat's forwarded history so the current turn fits in the model's context window. The most recent turns and your last task are kept. Your chat app still has the full conversation — only what is sent to the model is shortened.\n\nTrade-off: the model will not remember the deleted turns, so it may repeat work or lose track of early decisions. This keeps the conversation going, which is less disruptive than starting a new chat (where the model loses everything). If you have a cloud model ready, switching to it now is safer — the local model keeps its full context. Use this button when you want to keep this chat on the local model.";
         HailMaryBannerUrgency = 0; // red — this is a failure state
         HailMaryBannerVisible = true;
+        ResetHailMaryPicker(); // one-off: each emergency choice starts fresh
+        HailMaryQueued = false; // the queued attempt is over; show the result instead
+        SetHailMaryOutcome(text);
         AppendDiagnosticEntry("HAIL-MARY", text, "AI-FluxMux");
     }
 
@@ -16323,18 +16953,22 @@ public partial class MainViewModel : ViewModelBase
 
         // Continuous launch-start baseline. Use the caller's launchStartedUtc when
         // provided (it matches the baseline the recorded launch telemetry uses),
-        // otherwise fall back to now. This is set ONCE and never reset on phase
-        // changes, so the timer spans the entire launch.
-        _localLaunchCountdownStartUtc = launchStartedUtc ?? DateTime.UtcNow;
+        // otherwise fall back to _localLaunchActualStartUtc (the actual time the launch
+        // began) if it's set, otherwise fall back to now. This is set ONCE and never
+        // reset on phase changes, so the timer spans the entire launch.
+        _localLaunchCountdownStartUtc = launchStartedUtc
+            ?? (_localLaunchActualStartUtc > DateTime.MinValue ? _localLaunchActualStartUtc : DateTime.UtcNow);
 
         var estimateMs = includeLoadEstimate ? _runtimeService.GetLocalLaunchEstimateMs(model, variant) : 0;
         // When no launch telemetry has been recorded yet (estimateMs == 0) and this is a
         // long-load profile (YaRN / extended-context / GPU+CPU), use a conservative default
         // estimate so the countdown shows "estimated time left" and the "taking longer than
-        // expected" warning instead of just "elapsed Xs". A cold YaRN load can take minutes.
+        // expected" warning instead of just "elapsed Xs". A cold YaRN load can take minutes,
+        // but a warm load is typically 10-30 seconds. Use 30 seconds as a reasonable default
+        // that's not stuck at a historical worst-case value.
         if (estimateMs <= 0 && longLoadProfile)
         {
-            estimateMs = 200000; // 200 seconds: a realistic cold-load floor for extended-context profiles
+            estimateMs = 30000; // 30 seconds: a reasonable default for warm extended-context profiles
         }
         var target = string.IsNullOrWhiteSpace(variant) ? model : $"{model} / {variant}";
         _localLaunchPhase = dualHotAlongsideLocal
@@ -18957,6 +19591,7 @@ public partial class MainViewModel : ViewModelBase
         settings["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled;
         settings["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled;
         settings["LocalAutoCompactMode"] = LocalAutoCompactMode;
+        settings["LocalForwardPruneEnabled"] = LocalForwardPruneEnabled;
         settings["LocalAutoCompactTriggerPercent"] = ((int)LocalAutoCompactTriggerPercent).ToString();
         settings["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString();
         settings["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString();
@@ -19558,6 +20193,8 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantAutoCompressEnabled = ParseBool(settings["AutoCompressEnabled"]?.ToString() ?? string.Empty, true);
         LocalAutoCompactEnabled = ParseBool(settings["LocalAutoCompactEnabled"]?.ToString() ?? string.Empty, true);
         LocalAutoCompactMode = CoerceLocalAutoCompactMode(settings["LocalAutoCompactMode"]?.ToString());
+        // Forward-prune toggle: default on, so only an explicit "false" disables it.
+        LocalForwardPruneEnabled = ParseBool(settings["LocalForwardPruneEnabled"]?.ToString() ?? string.Empty, true);
         SelectedLocalAutoCompactModeOption = LocalAutoCompactModeOptions.FirstOrDefault(o =>
             string.Equals(o.Value, LocalAutoCompactMode, StringComparison.OrdinalIgnoreCase))
             ?? LocalAutoCompactModeOptions.FirstOrDefault(o =>
@@ -20977,6 +21614,7 @@ public partial class MainViewModel : ViewModelBase
         LocalAutoCompactKeepTurns = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactKeepTurns", LocalAutoCompactKeepTurns.ToString()), 6d), 4m, 12m);
         LocalAutoCompactKeepToolResults = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactKeepToolResults", LocalAutoCompactKeepToolResults.ToString()), 8d), 4m, 16m);
         LocalAutoCompactPinUserChars = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactPinUserChars", LocalAutoCompactPinUserChars.ToString()), 2000d), 500m, 5000m);
+        LocalForwardPruneEnabled = ParseBool(settings.GetValueOrDefault("LocalForwardPruneEnabled", LocalForwardPruneEnabled.ToString()), true);
         LocalMaxForwardedImages = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalMaxForwardedImages", LocalMaxForwardedImages.ToString()), 1d), 1m, 8m);
         LocalVariantAutoCompressEnabled = !string.Equals(LocalAutoCompactMode, "none", StringComparison.OrdinalIgnoreCase);
         RefreshLocalVisionHint();
@@ -21293,6 +21931,7 @@ public partial class MainViewModel : ViewModelBase
             ["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled,
             ["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled,
             ["LocalAutoCompactMode"] = LocalAutoCompactMode,
+            ["LocalForwardPruneEnabled"] = LocalForwardPruneEnabled,
             ["LocalAutoCompactTriggerPercent"] = ((int)LocalAutoCompactTriggerPercent).ToString(),
             ["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString(),
             ["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString(),

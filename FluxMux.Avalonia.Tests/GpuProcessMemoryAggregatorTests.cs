@@ -67,8 +67,8 @@ public sealed class GpuProcessMemoryAggregatorTests
     public void UnionPreferringLargerMegabytes_adds_compute_apps_windows_did_not_name()
     {
         var merged = GpuProcessMemoryAggregator.UnionPreferringLargerMegabytes(
-            [(11, "AI-FluxMux", 40)],
-            [(22, "llama-server", 18000)]);
+            [(11, "AI-FluxMux", 40, "fluxmux.avalonia")],
+            [(22, "llama-server", 18000, "llama-server")]);
 
         Assert.Equal(40, merged[11].Megabytes);
         Assert.Equal("AI-FluxMux", merged[11].Name);
@@ -80,8 +80,8 @@ public sealed class GpuProcessMemoryAggregatorTests
     public void UnionPreferringLargerMegabytes_keeps_the_larger_count_for_the_same_pid()
     {
         var merged = GpuProcessMemoryAggregator.UnionPreferringLargerMegabytes(
-            [(22, "llama-server", 12)],
-            [(22, "llama-server", 18000)]);
+            [(22, "llama-server", 12, "llama-server")],
+            [(22, "llama-server", 18000, "llama-server")]);
 
         Assert.Equal(18000, Assert.Single(merged).Value.Megabytes);
     }

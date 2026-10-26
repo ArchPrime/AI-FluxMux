@@ -350,11 +350,10 @@ public static class LocalReloadRouting
                 return FormatCloudContextLead(lastServedCloudLabel);
             }
 
-            return PortRulesPostMortem.ChatTurnCannotContinue
-                + "the loaded model profile's Context is too small. "
-                + PortRulesPostMortem.RaiseContextAdvice
-                + " "
-                + PortRulesPostMortem.SmallerNextStepAdvice;
+            return "The loaded model profile's context is about to spill from VRAM to RAM. This will reduce performance. "
+                + "If your endpoint offers manual compaction (e.g. Cline's Compact button), you can try that, but be aware it may be aggressive (Cline typically cuts context down to ~20%). "
+                + "The Hail Mary option is a more targeted last resort that keeps your most recent turns. "
+                + "Or switch to a model with larger VRAM-based context, or switch to a cloud model.";
         }
 
         return "This chat turn cannot continue.";

@@ -42,6 +42,8 @@ public partial class MainWindow : Window
     private Timer? _helpReloadTimer;
     private DispatcherTimer? _stressBarPulseTimer;
     private double _stressBarPulsePhase;
+    private DispatcherTimer? _hailMaryPulseTimer;
+    private double _hailMaryPulsePhase;
 
     static MainWindow()
     {
@@ -238,9 +240,129 @@ public partial class MainWindow : Window
         {
             path2.Opacity = opacity;
         }
+        // Drive the scroll animation FIRST so the bars, bar value labels, and X-axis labels
+        // are all positioned based on the same (newest) scroll offset. Previously the labels
+        // were positioned before the scroll advanced, causing them to lag one frame behind
+        // the bars during the smooth right-to-left glide.
+        DriveScrollAnimation();
         PositionXAxisLabels();
         PositionYAxisLabels();
         PositionBarValueLabels();
+    }
+
+    private void StartHailMaryPulse()
+    {
+        if (_hailMaryPulseTimer is not null)
+        {
+            return;
+        }
+
+        _hailMaryPulseTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(80)
+        };
+        _hailMaryPulseTimer.Tick += OnHailMaryPulseTick;
+        _hailMaryPulseTimer.Start();
+    }
+
+    private void StopHailMaryPulse()
+    {
+        _hailMaryPulseTimer?.Stop();
+        _hailMaryPulseTimer = null;
+        if (HailMaryButton is not null)
+        {
+            HailMaryButton.Opacity = 1.0;
+        }
+    }
+
+    private void OnHailMaryPulseTick(object? sender, EventArgs e)
+    {
+        _hailMaryPulsePhase += 0.1;
+        if (_hailMaryPulsePhase > Math.PI * 2.0)
+        {
+            _hailMaryPulsePhase -= Math.PI * 2.0;
+        }
+
+        if (HailMaryButton is { IsVisible: true })
+        {
+            HailMaryButton.Opacity = 0.5 + 0.5 * Math.Sin(_hailMaryPulsePhase);
+        }
+    }
+
+    /// <summary>
+    /// Toggles the Hail Mary picker popup on the Diagnostics bar. Clicking the button opens
+    /// the picker (if closed) or closes it (if open). The picker's radio buttons / checkbox
+    /// update the ViewModel bindings; arming only happens on the "Armed" button.
+    /// </summary>
+    private void HailMaryButton_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (HailMaryPickerPopup is not null)
+        {
+            HailMaryPickerPopup.IsOpen = !HailMaryPickerPopup.IsOpen;
+        }
+    }
+
+    /// <summary>
+    /// Closes the Hail Mary picker popup after the user arms the prune (the "Armed" button
+    /// already ran the command; this just dismisses the popup).
+    /// </summary>
+    private void HailMaryPickerArm_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (HailMaryPickerPopup is not null)
+        {
+            HailMaryPickerPopup.IsOpen = false;
+        }
+    }
+
+    /// <summary>
+    /// Closes the Hail Mary picker popup without arming the prune. The picker's radio buttons /
+    /// checkbox already updated the ViewModel bindings, so the choice is retained for next time
+    /// the popup opens (it is still one-off — arming only happens on the "Armed" button).
+    /// </summary>
+    private void HailMaryPickerCancel_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (HailMaryPickerPopup is not null)
+        {
+            HailMaryPickerPopup.IsOpen = false;
+        }
+    }
+
+    /// <summary>
+    /// Drives the smooth right-to-left scroll of the live per-turn telemetry graphs. For each
+    /// graph in scroll mode, computes the eased scroll offset from the time elapsed since its
+    /// last turn was plotted and advances the sliding window accordingly. The easing is a
+    /// smoothstep over ~1.2s: the newest bar starts at the right edge and glides left by one slot
+    /// as the offset reaches 1, so new bars appear to the right of the most-recent bar and old
+    /// bars (with their turn numbers and value labels) exit off the left edge. No-op for graphs
+    /// not in scroll mode (the stress test and idle graphs are untouched).
+    /// </summary>
+    private void DriveScrollAnimation()
+    {
+        if (DataContext is not MainViewModel vm)
+        {
+            return;
+        }
+
+        AdvanceScroll(vm.TelemetryGraph);
+        AdvanceScroll(vm.TelemetryGraphThroughput);
+    }
+
+    private static void AdvanceScroll(TelemetryGraphViewModel graph)
+    {
+        if (!graph.IsScrollMode || graph.LastPointAddedUtc == DateTime.MinValue)
+        {
+            return;
+        }
+
+        const double scrollDurationSeconds = 1.2; // time for the window to slide one full slot
+        var elapsed = (DateTime.UtcNow - graph.LastPointAddedUtc).TotalSeconds;
+        var t = Math.Clamp(elapsed / scrollDurationSeconds, 0.0, 1.0);
+        // Linear easing: constant speed from start to finish. The previous smoothstep easing
+        // (t*t*(3-2t)) started and ended very slowly (derivative=0 at t=0 and t=1), which
+        // caused a visible "flicker" or "pause" just as the bars were about to scroll. A
+        // linear glide is smoother and more predictable.
+        var offset = t;
+        graph.ScrollTo(offset);
     }
 
     private void PositionYAxisLabels()
@@ -309,17 +431,62 @@ public partial class MainWindow : Window
         }
 
         var cw = canvas.Bounds.Width;
+        if (cw <= 0)
+        {
+            return;
+        }
+
+        // Reserve a top + bottom buffer zone (otherwise empty) so the top (0%) and bottom (100%)
+        // Y-axis numbers can sit CENTERED on their tick marks without being clipped by the plot's
+        // edge. The buffer is derived from the Y-labels' own rendered height (DesiredSize.Height),
+        // which already reflects DPI scaling and the active font — so the buffer scales with DPI
+        // and font size rather than being a static pixel constant. Half the tallest label's height
+        // is exactly enough for a centered label at the top/bottom tick to fit within the buffer.
+        double maxLabelHeight = 0;
+        foreach (var l in labels)
+        {
+            if (l is { } lb && lb.DesiredSize.Height > maxLabelHeight)
+            {
+                maxLabelHeight = lb.DesiredSize.Height;
+            }
+        }
+
+        // The effective buffer: half the tallest label's height, rounded up. If the labels aren't
+        // measured yet (first frame right after IsVisible flips), fall back to the plot border's
+        // current top margin so positioning still works with whatever buffer is already applied;
+        // the next tick (after layout) measures the labels and applies the correct buffer.
+        var currentMargin = plotBorder.Margin;
+        var buffer = maxLabelHeight > 0
+            ? Math.Ceiling(maxLabelHeight / 2.0)
+            : currentMargin.Top;
+
+        // Apply the buffer as a top/bottom margin on the plot border so its drawing area insets,
+        // leaving the buffer space above and below within the shared Row 0. Only update the margin
+        // when the buffer actually changes (e.g. after a DPI or font-scale change) to avoid a
+        // layout pass on every 50 ms timer tick.
+        if (maxLabelHeight > 0 && (currentMargin.Top != buffer || currentMargin.Bottom != buffer))
+        {
+            plotBorder.Margin = new Thickness(currentMargin.Left, buffer, currentMargin.Right, buffer);
+        }
+
+        // The Y-axis label canvas fills the full Row 0 (plot + buffers), so its top-left is at the
+        // row's top-left. The plot border is inset from the row's top by its top margin (= buffer),
+        // so in canvas coordinates the border's outer top edge sits at y = buffer. Control.Bounds
+        // EXCLUDES the margin, so plotBounds.Height is the border's rendered height (row height
+        // minus the top+bottom margins) — the buffer is already accounted for and must NOT be
+        // subtracted again. The inner drawing area is inset from the border's outer top by
+        // BorderThickness.Top.
         var plotBounds = plotBorder.Bounds;
         var borderThickness = plotBorder.BorderThickness;
-        var innerTop = borderThickness.Top;
+        var innerTop = buffer + borderThickness.Top;
         var innerHeight = plotBounds.Height - borderThickness.Top - borderThickness.Bottom;
-        if (innerHeight <= 0 || cw <= 0)
+        if (innerHeight <= 0)
         {
             return;
         }
 
         var fractions = new[] { 0.0, 0.25, 0.50, 0.75, 1.0 };
-        const double gap = 2.0;
+        const double gap = 6.0; // gap between the tick's outer edge and the number (ticks are 4px wide)
 
         for (int i = 0; i < 5; i++)
         {
@@ -331,9 +498,10 @@ public partial class MainWindow : Window
             label.Text = texts[i];
             var centerY = innerTop + fractions[i] * innerHeight;
             var labelHeight = label.DesiredSize.Height;
+            // Center the label on its tick mark. The buffer guarantees the top (0%) and bottom
+            // (100%) labels — centered on ticks at the inset drawing area's edges — fit within the
+            // buffer zone, so no clamping is needed and the numbers stay aligned with the ticks.
             var top = centerY - labelHeight / 2.0;
-            if (top < 0) top = 0;
-            if (top + labelHeight > canvas.Bounds.Height) top = canvas.Bounds.Height - labelHeight;
             var labelWidth = label.DesiredSize.Width;
             var left = cw - gap - labelWidth;
             if (left < 0) left = 0;
@@ -344,8 +512,6 @@ public partial class MainWindow : Window
             {
                 tick.IsVisible = isActive;
                 var tickY = innerTop + fractions[i] * innerHeight - 0.5;
-                if (tickY < 0) tickY = 0;
-                if (tickY + 1 > canvas.Bounds.Height) tickY = canvas.Bounds.Height - 1;
                 Canvas.SetTop(tick, tickY);
                 var tickWidth = tick.DesiredSize.Width > 0 ? tick.DesiredSize.Width : 4.0;
                 Canvas.SetLeft(tick, cw - tickWidth);
@@ -444,9 +610,21 @@ public partial class MainWindow : Window
             label.IsVisible = true;
             var x = item.Position / 100.0 * cw;
             var labelWidth = label.DesiredSize.Width;
-            var left = x - labelWidth / 2.0;
-            if (left < 0) left = 0;
-            if (left + labelWidth > cw) left = cw - labelWidth;
+            double left;
+            if (item.IsAxisMax)
+            {
+                // Right-align the axis-max (end) label: its right edge sits at the axis end instead
+                // of centering under the tick. This pushes the "end" label flush against the right
+                // edge of the plot so it reads as the axis terminus.
+                left = x - labelWidth;
+                if (left < 0) left = 0;
+            }
+            else
+            {
+                left = x - labelWidth / 2.0;
+                if (left < 0) left = 0;
+                if (left + labelWidth > cw) left = cw - labelWidth;
+            }
             Canvas.SetLeft(label, left);
         }
     }
@@ -502,9 +680,34 @@ public partial class MainWindow : Window
             return;
         }
 
-        var xPositions = new[] { graph.XAxisPos1, graph.XAxisPos2, graph.XAxisPos3, graph.XAxisPos4, graph.XAxisPos5, graph.XAxisPos6 };
+        // Use the bar's own center X (BarValueX1-6), NOT the axis tick positions (XAxisPos1-6).
+        // The axis ticks are evenly spaced, but the bars sit at the actual data-point X values.
+        // In the per-turn view that's turn indices spaced by the padded range, so the axis-tick X
+        // would offset each value label from its bar. BarValueX keeps each label centered on its
+        // own bar. In the stress test the bars are evenly spaced at the fill levels, so
+        // BarValueX == XAxisPos and this is a no-op there (stress-test alignment unchanged).
+        var xPositions = new[] { graph.BarValueX1, graph.BarValueX2, graph.BarValueX3, graph.BarValueX4, graph.BarValueX5, graph.BarValueX6 };
         var yPositions = new[] { graph.BarValueY1, graph.BarValueY2, graph.BarValueY3, graph.BarValueY4, graph.BarValueY5, graph.BarValueY6 };
         var texts = new[] { graph.BarValueText1, graph.BarValueText2, graph.BarValueText3, graph.BarValueText4, graph.BarValueText5, graph.BarValueText6 };
+
+        // Compute the label headroom fraction: the fraction of the chart height reserved for
+        // the tallest bar's value label. This is the tallest label's height (plus a 2px gap)
+        // divided by the chart height. The Y-axis rescales to ensure this headroom is available
+        // above the tallest bar, so the label is never forced to overlap the bar or the top.
+        // The headroom is applied in the correct space (linear or log) by GetEffectiveYAxisRange.
+        // For log-scale graphs, the log compression pushes the tallest bar closer to the top,
+        // so use a larger headroom (3x) to account for this.
+        double maxLabelHeight = 0;
+        foreach (var l in labels)
+        {
+            if (l is { } lb && lb.DesiredSize.Height > maxLabelHeight)
+            {
+                maxLabelHeight = lb.DesiredSize.Height;
+            }
+        }
+        var baseHeadroom = (maxLabelHeight + 2.0) / ch;
+        var headroomFraction = baseHeadroom;
+        graph.SetLabelHeadroomFraction(headroomFraction);
 
         for (int i = 0; i < 6; i++)
         {
@@ -512,11 +715,11 @@ public partial class MainWindow : Window
 
             if (string.IsNullOrEmpty(texts[i]))
             {
-                label.IsVisible = false;
+                // The label's IsVisible is controlled by the XAML binding (StringToVisibilityConverter),
+                // so no need to set it here. Just skip positioning.
                 continue;
             }
 
-            label.IsVisible = true;
             var x = xPositions[i] / 100.0 * cw;
             var y = yPositions[i] / 100.0 * ch;
             var labelWidth = label.DesiredSize.Width;
@@ -528,6 +731,29 @@ public partial class MainWindow : Window
             if (top < 0) top = 0;
             Canvas.SetLeft(label, left);
             Canvas.SetTop(label, top);
+        }
+    }
+
+    /// <summary>
+    /// Resets the diagnostics panel row height to the bound <c>DiagnosticsRowHeight</c> value.
+    /// The GridSplitter at Row 2 can override the RowDefinition's Height with a pixel value
+    /// (breaking the binding), so when the stress test starts we clear that override and
+    /// re-apply the star-based height so the panel expands correctly.
+    /// </summary>
+    public void ResetDiagnosticsPanelHeight()
+    {
+        var grid = this.FindControl<Grid>("MainLayoutGrid");
+        if (grid is null || grid.RowDefinitions.Count < 4)
+        {
+            return;
+        }
+
+        var rowDef = grid.RowDefinitions[3];
+        // Clear any pixel-based height set by the GridSplitter, then re-apply the binding.
+        rowDef.Height = new GridLength(1.0, GridUnitType.Star); // temporary to break the pixel override
+        if (DataContext is MainViewModel vm)
+        {
+            rowDef.Height = vm.DiagnosticsRowHeight;
         }
     }
 
@@ -565,6 +791,11 @@ public partial class MainWindow : Window
             ApplyScale(vm.UiScaleFactor);
         }
 
+        if (e.PropertyName == nameof(MainViewModel.EnforceCleanWidth))
+        {
+            UpdateMinWidthForSelectedTab(this.FindControl<TabControl>("MainTabs"));
+        }
+
         if (e.PropertyName == nameof(MainViewModel.SelectedUiTheme))
         {
             ApplyThemeToOwnedOverlays();
@@ -581,6 +812,22 @@ public partial class MainWindow : Window
         {
             ReloadHelpFromFile(force: false);
         }
+
+        if (e.PropertyName == nameof(MainViewModel.HailMaryQueued) && sender is MainViewModel hailVm)
+        {
+            if (hailVm.HailMaryQueued)
+            {
+                StartHailMaryPulse();
+            }
+            else
+            {
+                StopHailMaryPulse();
+            }
+        }
+
+        // Note: The diagnostics panel now defaults to 1.8* (doubled from the old 0.45*), so
+        // there's no need to reset its height when the stress test starts. The panel is always
+        // large enough to show the live telemetry graph.
 
         if (e.PropertyName == nameof(MainViewModel.DiagnosticTerminalText))
         {
@@ -717,20 +964,73 @@ public partial class MainWindow : Window
     private void OnProfileExpanderRevealRequested(CloudVariantTreeItemViewModel item, bool focusNameBox)
         => ProfileExpanderReveal.Schedule(this, item, focusNameBox);
 
-    private void GpuVramButton_Click(object? sender, RoutedEventArgs e)
+    private void GpuVramSectionToggle_Click(object? sender, RoutedEventArgs e)
     {
-        if (GpuVramPopup is not null && !GpuVramPopup.IsOpen)
+        if (DataContext is MainViewModel vm)
         {
-            GpuVramPopup.IsOpen = true;
+            vm.GpuVramSectionExpanded = !vm.GpuVramSectionExpanded;
+            if (vm.GpuVramSectionExpanded)
+            {
+                _ = vm.LoadGpuVramFlyoutCommand.ExecuteAsync(null);
+            }
         }
     }
 
-    private void GpuVramPopup_Opened(object? sender, EventArgs e)
+    private void OnGpuAppToggle_Click(object? sender, RoutedEventArgs e)
     {
-        ApplyThemeToOwnedOverlays();
-        if (DataContext is MainViewModel vm)
+        if (sender is not CheckBox checkBox || checkBox.DataContext is not GpuAppListItem item)
         {
-            _ = vm.LoadGpuVramFlyoutCommand.ExecuteAsync(null);
+            return;
+        }
+
+        // After the Click event, IsChecked reflects the new state the user selected.
+        // IsOnMotherboardGpu in the item is the OLD state (before the toggle).
+        // If the checkbox is now checked, the user wants Motherboard GPU.
+        // If unchecked, the user wants Discrete GPU.
+        var targetIsMotherboard = checkBox.IsChecked == true;
+
+        // Only act if the state actually changed.
+        if (targetIsMotherboard == item.IsOnMotherboardGpu)
+        {
+            return;
+        }
+
+        _ = ToggleGpuAppAsync(item, targetIsMotherboard);
+    }
+
+    private async Task ToggleGpuAppAsync(GpuAppListItem item, bool toMotherboard)
+    {
+        if (!item.CanToggle)
+        {
+            return;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var target = toMotherboard
+            ? WindowsGpuPreference.PowerSaving
+            : WindowsGpuPreference.HighPerformance;
+
+        string? statusMsg;
+        try
+        {
+            var success = await Task.Run(() => WindowsGpuPreference.ApplyForApp(item.AppName, target)).ConfigureAwait(true);
+            statusMsg = success
+                ? $"{item.DisplayName} moved to {WindowsGpuPreference.LabelFor(target)}."
+                : $"Could not change GPU affinity for {item.DisplayName}.";
+        }
+        catch (Exception ex)
+        {
+            statusMsg = $"Could not change GPU affinity for {item.DisplayName}. {ex.Message}";
+        }
+
+        if (DataContext is MainViewModel mainVm)
+        {
+            mainVm.StatusMessage = statusMsg;
+            mainVm.RefreshGpuAppRowsForUi();
         }
     }
 
@@ -741,18 +1041,121 @@ public partial class MainWindow : Window
         {
             _interventionPopup.RequestedThemeVariant = variant;
         }
+    }
 
-        if (GpuVramThemeScope is not null)
+    private void VramProcessGpuToggle_Checked(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox checkBox || checkBox.Tag is not string appName)
         {
-            GpuVramThemeScope.RequestedThemeVariant = variant;
+            return;
+        }
+
+        // Apply the GPU affinity change to Discrete GPU (high performance).
+        var success = Services.WindowsGpuPreference.ApplyForApp(appName, Services.WindowsGpuPreference.HighPerformance);
+        if (success)
+        {
+            // Show a status message.
+            if (DataContext is MainViewModel vm)
+            {
+                vm.StatusMessage = $"GPU affinity for {appName} changed to Discrete GPU. Applied after Windows restart.";
+            }
+        }
+        else
+        {
+            // Revert the checkbox if the change failed.
+            checkBox.IsChecked = false;
+            // Show a status message.
+            if (DataContext is MainViewModel vm)
+            {
+                vm.StatusMessage = $"Could not change GPU affinity for {appName}. The app may be pinned.";
+            }
         }
     }
 
-    private void GpuVramPopupClose_Click(object? sender, RoutedEventArgs e)
+    private void VramProcessGpuToggle_Unchecked(object? sender, RoutedEventArgs e)
     {
-        if (GpuVramPopup is not null)
+        if (sender is not CheckBox checkBox || checkBox.Tag is not string appName)
         {
-            GpuVramPopup.IsOpen = false;
+            return;
+        }
+
+        // Apply the GPU affinity change to Motherboard GPU (power saving).
+        var success = Services.WindowsGpuPreference.ApplyForApp(appName, Services.WindowsGpuPreference.PowerSaving);
+        if (success)
+        {
+            // Show a status message.
+            if (DataContext is MainViewModel vm)
+            {
+                vm.StatusMessage = $"GPU affinity for {appName} changed to Motherboard GPU. Applied after Windows restart.";
+            }
+        }
+        else
+        {
+            // Revert the checkbox if the change failed.
+            checkBox.IsChecked = true;
+            // Show a status message.
+            if (DataContext is MainViewModel vm)
+            {
+                vm.StatusMessage = $"Could not change GPU affinity for {appName}. The app may be pinned.";
+            }
+        }
+    }
+
+    private void VramProcessGpuToggle_Click(object? sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox checkBox || checkBox.Tag is not string appName)
+        {
+            return;
+        }
+
+        // Get the current state of the checkbox
+        bool isChecked = checkBox.IsChecked == true;
+
+        if (isChecked)
+        {
+            // Apply the GPU affinity change to Discrete GPU (high performance).
+            var success = Services.WindowsGpuPreference.ApplyForApp(appName, Services.WindowsGpuPreference.HighPerformance);
+            if (success)
+            {
+                // Show a status message.
+                if (DataContext is MainViewModel vm)
+                {
+                    vm.StatusMessage = $"GPU affinity for {appName} changed to Discrete GPU.";
+                }
+            }
+            else
+            {
+                // Revert the checkbox if the change failed.
+                checkBox.IsChecked = false;
+                // Show a status message.
+                if (DataContext is MainViewModel vm)
+                {
+                    vm.StatusMessage = $"Could not change GPU affinity for {appName}. The app may be pinned.";
+                }
+            }
+        }
+        else
+        {
+            // Apply the GPU affinity change to Motherboard GPU (power saving).
+            var success = Services.WindowsGpuPreference.ApplyForApp(appName, Services.WindowsGpuPreference.PowerSaving);
+            if (success)
+            {
+                // Show a status message.
+                if (DataContext is MainViewModel vm)
+                {
+                    vm.StatusMessage = $"GPU affinity for {appName} changed to Motherboard GPU. Applied after Windows restart.";
+                }
+            }
+            else
+            {
+                // Revert the checkbox if the change failed.
+                checkBox.IsChecked = true;
+                // Show a status message.
+                if (DataContext is MainViewModel vm)
+                {
+                    vm.StatusMessage = $"Could not change GPU affinity for {appName}. The app may be pinned.";
+                }
+            }
         }
     }
 
@@ -762,6 +1165,9 @@ public partial class MainWindow : Window
             return;
         _uiScaleTransform.ScaleX = factor;
         _uiScaleTransform.ScaleY = factor;
+
+        // Update the window's minimum width based on the selected tab and the new scale factor.
+        UpdateMinWidthForSelectedTab(this.FindControl<TabControl>("MainTabs"));
     }
 
     private void HeaderChrome_LayoutUpdated(object? sender, EventArgs e)
@@ -1195,6 +1601,76 @@ public partial class MainWindow : Window
         if (IsHelpTabSelected(sender as TabControl))
         {
             ReloadHelpFromFile(force: false);
+        }
+
+        if (IsSettingsTabSelected(sender as TabControl))
+        {
+            if (DataContext is MainViewModel vm)
+            {
+                _ = vm.LoadGpuVramFlyoutCommand.ExecuteAsync(null);
+            }
+        }
+
+        // Update the window's minimum width based on the selected tab. Different tabs
+        // have different minimum width requirements to prevent compression or word wrap.
+        UpdateMinWidthForSelectedTab(sender as TabControl);
+    }
+
+    private bool IsSettingsTabSelected(TabControl? tabs = null)
+    {
+        tabs ??= this.FindControl<TabControl>("MainTabs");
+        return tabs?.SelectedItem is TabItem item
+            && Convert.ToString(item.Header) == "Settings";
+    }
+
+    private void UpdateMinWidthForSelectedTab(TabControl? tabs)
+    {
+        if (tabs?.SelectedItem is not TabItem item)
+        {
+            System.Diagnostics.Debug.WriteLine("[MinWidth] No selected tab found");
+            return;
+        }
+
+        var header = Convert.ToString(item.Header);
+        double baseMinWidth = header switch
+        {
+            "Quick Select" => 700.0,
+            "Servers" => 800.0,
+            "Model Profiles" => 750.0,
+            "Live-Switch Testing" => 700.0,
+            "Environment" => 700.0,
+            "Settings" => 700.0,
+            "Help" => 600.0,
+            _ => 640.0
+        };
+
+        // The "UI enforce clean width" setting limits how narrow the window can be shrunk,
+        // to protect the visibility of controls on all tabs. At Normal UI scale this is 1024px;
+        // smaller UI scales reduce it proportionally (via the scale factor applied below).
+        const double enforceCleanWidthBase = 1024.0;
+
+        // Use the maximum of the tab's minimum width and the enforce-clean-width base.
+        var effectiveMinWidth = Math.Max(baseMinWidth, enforceCleanWidthBase);
+
+        // Apply the UI scale factor to the base minimum width.
+        var mainVm = DataContext as MainViewModel;
+        var scale = mainVm?.UiScaleFactor ?? 1.0;
+        var newMinWidth = effectiveMinWidth * scale;
+        
+        // Only enforce the minimum width if "UI enforce clean width" is checked.
+        if (mainVm != null && mainVm.EnforceCleanWidth)
+        {
+            System.Diagnostics.Debug.WriteLine($"[MinWidth] Tab={header}, base={baseMinWidth}, enforce={enforceCleanWidthBase}, scale={scale}, newMinWidth={newMinWidth}, currentMinWidth={MinWidth}");
+            MinWidth = newMinWidth;
+            System.Diagnostics.Debug.WriteLine($"[MinWidth] Set MinWidth to {MinWidth}");
+        }
+        else
+        {
+            // If "UI enforce clean width" is unchecked, use a smaller minimum width to allow
+            // the window to shrink much smaller, at the cost of controls wrapping or compressing.
+            var wrapMinWidth = 500.0 * scale;
+            System.Diagnostics.Debug.WriteLine($"[MinWidth] Wrap mode: Tab={header}, scale={scale}, wrapMinWidth={wrapMinWidth}");
+            MinWidth = wrapMinWidth;
         }
     }
 

@@ -69,11 +69,11 @@ public static class GpuProcessMemoryAggregator
     /// Windows GPU Process Memory often omits CUDA compute apps. Same PID keeps the
     /// larger megabyte count; a PID only nvidia-smi names is added.
     /// </summary>
-    public static Dictionary<int, (string Name, int Megabytes)> UnionPreferringLargerMegabytes(
-        IEnumerable<(int Pid, string Name, int Megabytes)> windows,
-        IEnumerable<(int Pid, string Name, int Megabytes)> computeApps)
+    public static Dictionary<int, (string Name, int Megabytes, string RawName)> UnionPreferringLargerMegabytes(
+        IEnumerable<(int Pid, string Name, int Megabytes, string RawName)> windows,
+        IEnumerable<(int Pid, string Name, int Megabytes, string RawName)> computeApps)
     {
-        var byPid = new Dictionary<int, (string Name, int Megabytes)>();
+        var byPid = new Dictionary<int, (string Name, int Megabytes, string RawName)>();
         foreach (var row in windows)
         {
             if (row.Pid <= 0 || row.Megabytes <= 0)
@@ -81,7 +81,7 @@ public static class GpuProcessMemoryAggregator
                 continue;
             }
 
-            byPid[row.Pid] = (row.Name, row.Megabytes);
+            byPid[row.Pid] = (row.Name, row.Megabytes, row.RawName);
         }
 
         foreach (var row in computeApps)
@@ -93,14 +93,15 @@ public static class GpuProcessMemoryAggregator
 
             if (!byPid.TryGetValue(row.Pid, out var existing))
             {
-                byPid[row.Pid] = (row.Name, row.Megabytes);
+                byPid[row.Pid] = (row.Name, row.Megabytes, row.RawName);
                 continue;
             }
 
             if (row.Megabytes > existing.Megabytes)
             {
                 var name = string.IsNullOrWhiteSpace(existing.Name) ? row.Name : existing.Name;
-                byPid[row.Pid] = (name, row.Megabytes);
+                var rawName = string.IsNullOrWhiteSpace(existing.RawName) ? row.RawName : existing.RawName;
+                byPid[row.Pid] = (name, row.Megabytes, rawName);
             }
         }
 

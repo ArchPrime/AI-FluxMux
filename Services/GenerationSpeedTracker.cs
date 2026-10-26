@@ -14,7 +14,8 @@ public sealed record GenerationSpeedSnapshot(
     double TokensPerSecond,
     int CompletionTokens,
     string DisplayText,
-    DateTimeOffset UpdatedUtc);
+    DateTimeOffset UpdatedUtc,
+    double TtftSeconds = 0.0);
 
 /// <summary>
 /// Tracks reply generation speed from gateway chat responses. Disabled by default in UI until the operator turns it on.
@@ -25,6 +26,7 @@ public sealed class GenerationSpeedTracker
     private bool _enabled;
     private bool _active;
     private string _routeKind = string.Empty;
+    private DateTimeOffset _turnStartUtc;
     private DateTimeOffset _firstTokenUtc;
     private DateTimeOffset _lastTokenUtc;
     private int _completionTokens;
@@ -32,6 +34,7 @@ public sealed class GenerationSpeedTracker
     private double _lastTokensPerSecond;
     private int _lastCompletionTokens;
     private string _lastRouteKind = string.Empty;
+    private double _lastTtftSeconds;
     private DateTimeOffset _lastUpdatedUtc = DateTimeOffset.MinValue;
 
     public void SetEnabled(bool enabled)
@@ -59,6 +62,7 @@ public sealed class GenerationSpeedTracker
         {
             _active = true;
             _routeKind = NormalizeRouteKind(routeKind);
+            _turnStartUtc = DateTimeOffset.UtcNow;
             _firstTokenUtc = default;
             _lastTokenUtc = default;
             _completionTokens = 0;
@@ -133,7 +137,8 @@ public sealed class GenerationSpeedTracker
                     active: true,
                     routeKind: _routeKind,
                     tokensPerSecond: _liveTokensPerSecond,
-                    completionTokens: _completionTokens);
+                    completionTokens: _completionTokens,
+                    ttftSeconds: ComputeTtftSecondsLocked(DateTimeOffset.UtcNow));
             }
 
             if (_lastUpdatedUtc == DateTimeOffset.MinValue)
@@ -145,7 +150,8 @@ public sealed class GenerationSpeedTracker
                 active: false,
                 routeKind: _lastRouteKind,
                 tokensPerSecond: _lastTokensPerSecond,
-                completionTokens: _lastCompletionTokens);
+                completionTokens: _lastCompletionTokens,
+                ttftSeconds: _lastTtftSeconds);
         }
     }
 
@@ -306,7 +312,24 @@ public sealed class GenerationSpeedTracker
 
         _lastCompletionTokens = _completionTokens;
         _lastRouteKind = _routeKind;
+        _lastTtftSeconds = ComputeTtftSecondsLocked(now);
         _lastUpdatedUtc = now;
+    }
+
+    /// <summary>
+    /// Seconds from the start of the turn (Begin) to the first generated token. 0 when no
+    /// token has arrived yet. This is the "time to first token" the operator sees as the delay
+    /// before a reply starts flowing.
+    /// </summary>
+    private double ComputeTtftSecondsLocked(DateTimeOffset now)
+    {
+        if (_firstTokenUtc == default || _turnStartUtc == default)
+        {
+            return 0.0;
+        }
+
+        var seconds = (_firstTokenUtc - _turnStartUtc).TotalSeconds;
+        return seconds > 0 ? seconds : 0.0;
     }
 
     private void RecalculateLiveRateLocked(DateTimeOffset now, bool useLiveClock)
@@ -327,7 +350,8 @@ public sealed class GenerationSpeedTracker
         bool active,
         string routeKind,
         double tokensPerSecond,
-        int completionTokens)
+        int completionTokens,
+        double ttftSeconds)
     {
         var kindLabel = routeKind.Equals("cloud", StringComparison.OrdinalIgnoreCase) ? "cloud" : "local";
         var rateText = tokensPerSecond > 0
@@ -347,7 +371,8 @@ public sealed class GenerationSpeedTracker
             tokensPerSecond,
             completionTokens,
             display,
-            active ? DateTimeOffset.UtcNow : _lastUpdatedUtc);
+            active ? DateTimeOffset.UtcNow : _lastUpdatedUtc,
+            ttftSeconds);
     }
 
     private static string NormalizeRouteKind(string? routeKind)

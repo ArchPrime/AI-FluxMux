@@ -83,7 +83,7 @@ public static class DisplayAdapterLabeling
     public static string FormatMemoryNote(AdapterMemoryKind kind)
         => kind switch
         {
-            AdapterMemoryKind.DedicatedVram => "dedicated VRAM — local models can use this",
+            AdapterMemoryKind.DedicatedVram => "dedicated VRAM — local models strongly prefer this",
             AdapterMemoryKind.SharedSystemRam => "shared system RAM — not separate VRAM",
             AdapterMemoryKind.NotApplicable => "no dedicated VRAM",
             _ => string.Empty

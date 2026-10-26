@@ -400,8 +400,8 @@ public sealed class LocalRoutingDecisionTests
             neededContext: 42000,
             candidate);
 
-        Assert.StartsWith("This chat turn cannot continue:", prompt, StringComparison.Ordinal);
-        Assert.Contains("Context is too small", prompt);
+        Assert.StartsWith("The loaded model profile's context is about to spill from VRAM to RAM", prompt, StringComparison.Ordinal);
+        Assert.Contains("context is about to spill from VRAM to RAM", prompt);
         Assert.Contains("alternative model with a larger Context (131,072)", prompt);
         Assert.Contains("long ctx · qwen3.6-q4.gguf", prompt);
         Assert.Contains("Do you want to switch to this model?", prompt);

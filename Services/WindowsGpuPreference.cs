@@ -19,7 +19,7 @@ public static class WindowsGpuPreference
     public const int HighPerformance = 2;
     public const string MotherboardGraphicsLabel = "Motherboard GPU";
     public const string MainGraphicsCardLabel = "Discrete GPU";
-    public const string AffinityModeLabel = "Windows GPU affinity";
+    public const string AffinityModeLabel = "Windows GPU affinity - full batch defaults toggle";
     public const string RegistrySubKey = @"Software\Microsoft\DirectX\UserGpuPreferences";
     public const string GlobalSettingsName = "DirectXUserGlobalSettings";
     public const string LlamaServerFileName = "llama-server.exe";
@@ -72,7 +72,9 @@ public static class WindowsGpuPreference
 
         // llama-server is the process AI-FluxMux launches. Keep it on the main graphics
         // card so a desktop-apps preference does not hide that card from local models.
-        if (string.Equals(Path.GetFileName(name), LlamaServerFileName, StringComparison.OrdinalIgnoreCase))
+        // The process name arrives extension-less in most call sites (e.g. "llama-server"
+        // from nvidia-smi / ProcessName), so match the filename ignoring the ".exe" suffix.
+        if (MatchesLlamaServer(name))
         {
             return true;
         }
@@ -98,6 +100,25 @@ public static class WindowsGpuPreference
 
         return false;
     }
+
+    /// <summary>
+    /// True when <paramref name="name"/> refers to the llama-server executable, whether it is
+    /// given as "llama-server", "llama-server.exe", or a full path. The ".exe" suffix is ignored
+    /// because most callers pass the bare process name (nvidia-smi process_name or
+    /// Process.ProcessName), which has no extension.
+    /// </summary>
+    private static bool MatchesLlamaServer(string name)
+    {
+        var fileName = Path.GetFileName(name);
+        var normalizedInput = StripExe(fileName);
+        var normalizedPinned = StripExe(LlamaServerFileName);
+        return string.Equals(normalizedInput, normalizedPinned, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string StripExe(string value)
+        => value.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            ? value[..^4]
+            : value;
 
     public static int InferCurrent(string? defaultValue, IEnumerable<(string Name, string Value)>? entries = null)
     {
@@ -241,6 +262,102 @@ public static class WindowsGpuPreference
             Pinned = pinned,
             Skipped = skipped
         };
+    }
+
+    /// <summary>
+    /// Updates the GPU affinity for a single app. This allows the user to reassign an individual
+    /// app to a different GPU after a bulk assign.
+    /// </summary>
+    public static bool ApplyForApp(string appName, int preference)
+    {
+        if (string.IsNullOrWhiteSpace(appName))
+        {
+            return false;
+        }
+
+        using var key = Registry.CurrentUser.CreateSubKey(RegistrySubKey, writable: true)
+            ?? throw new InvalidOperationException("Could not open the GPU preference registry key.");
+
+        // Check if the app exists in the registry.
+        var currentValue = key.GetValue(appName) as string;
+        if (string.IsNullOrEmpty(currentValue))
+        {
+            return false;
+        }
+
+        // Don't allow changing the affinity for pinned apps (e.g., llama-server).
+        if (IsPinnedName(appName))
+        {
+            return false;
+        }
+
+        var target = FormatPreference(preference);
+        if (!string.Equals(currentValue, target, StringComparison.Ordinal))
+        {
+            key.SetValue(appName, target, RegistryValueKind.String);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Reads the current GPU affinity for a single app. Returns the preference value
+    /// (PowerSaving = 1, HighPerformance = 2) or null if the app is not in the registry.
+    /// </summary>
+    public static int? GetAppPreference(string appName)
+    {
+        if (string.IsNullOrWhiteSpace(appName))
+        {
+            return null;
+        }
+
+        using var key = Registry.CurrentUser.OpenSubKey(RegistrySubKey, writable: false);
+        if (key is null)
+        {
+            return null;
+        }
+
+        var value = key.GetValue(appName) as string;
+        return ParsePreference(value);
+    }
+
+    /// <summary>
+    /// A single per-app GPU affinity entry read from the <c>UserGpuPreferences</c> registry.
+    /// </summary>
+    public sealed record GpuAppAffinity(string AppName, int Preference);
+
+    /// <summary>
+    /// Returns every per-app GPU affinity entry in the <c>UserGpuPreferences</c> registry,
+    /// covering both apps on the Discrete GPU (HighPerformance = 2) and apps on the
+    /// Motherboard GPU (PowerSaving = 1). The global settings entry is excluded.
+    /// Returns an empty list when the key does not exist.
+    /// </summary>
+    public static IReadOnlyList<GpuAppAffinity> GetAllAppAffinities()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(RegistrySubKey, writable: false);
+        if (key is null)
+        {
+            return Array.Empty<GpuAppAffinity>();
+        }
+
+        var entries = new List<GpuAppAffinity>();
+        foreach (var (name, value) in EnumerateEntries(key))
+        {
+            if (!IsAppPreferenceName(name))
+            {
+                continue;
+            }
+
+            var preference = ParsePreference(value);
+            if (preference is PowerSaving or HighPerformance)
+            {
+                entries.Add(new GpuAppAffinity(name, preference.Value));
+            }
+        }
+
+        entries.Sort(static (a, b) => string.CompareOrdinal(a.AppName, b.AppName));
+        return entries;
     }
 
     private static IEnumerable<(string Name, string Value)> EnumerateEntries(RegistryKey key)

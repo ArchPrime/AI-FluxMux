@@ -1,0 +1,31 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="FluxMux.Avalonia.Controls.GpuPillToggle">
+    <Border x:Name="RootBorder"
+            Height="22"
+            MinWidth="150"
+            Background="{DynamicResource FluxMutedBackground}"
+            BorderBrush="{DynamicResource FluxMutedBorder}"
+            BorderThickness="1">
+        <Grid ColumnDefinitions="*,*">
+            <Border x:Name="DiscreteSeg"
+                    Grid.Column="0"
+                    CornerRadius="10,0,0,10">
+                <TextBlock x:Name="DiscreteText"
+                           FontSize="11"
+                           VerticalAlignment="Center"
+                           HorizontalAlignment="Center"
+                           Text="Discrete GPU" />
+            </Border>
+            <Border x:Name="MotherboardSeg"
+                    Grid.Column="1"
+                    CornerRadius="0,10,10,0">
+                <TextBlock x:Name="MotherboardText"
+                           FontSize="11"
+                           VerticalAlignment="Center"
+                           HorizontalAlignment="Center"
+                           Text="Motherboard GPU" />
+            </Border>
+        </Grid>
+    </Border>
+</UserControl>

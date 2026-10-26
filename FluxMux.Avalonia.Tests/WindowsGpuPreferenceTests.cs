@@ -46,6 +46,13 @@ public sealed class WindowsGpuPreferenceTests
     [InlineData(@"C:\Tools\llama.cpp\llama-server.exe", true)]
     [InlineData(@"D:\models\bin\llama-server.exe", true)]
     [InlineData(@"C:\Program Files\ExampleApp\ExampleApp.exe", false)]
+    // The real call sites pass the bare, extension-less process name (nvidia-smi
+    // process_name or Process.ProcessName). These must also pin.
+    [InlineData("llama-server", true)]
+    [InlineData("llama-server.exe", true)]
+    [InlineData("LLAMA-SERVER", true)]
+    [InlineData("chrome", false)]
+    [InlineData("Code", false)]
     public void IsPinnedName_keeps_llama_server_on_the_main_card(string name, bool pinned)
     {
         Assert.Equal(pinned, WindowsGpuPreference.IsPinnedName(name));

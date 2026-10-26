@@ -64,17 +64,129 @@ public static class HailMaryCompaction
     public const int MiddleCutKeepTurns = 8;
 
     /// <summary>
+    /// One-off aggression stops for the manual Hail Mary button. The button is a REAR-context
+    /// prune: it drops older conversational turns so the full forward turn can complete with
+    /// room to spare. Each stop trades "how much rear context to keep" against "how much
+    /// headroom to leave for the forward turn". Always preserved regardless of stop: the
+    /// system prompt, the last real user task, and the active tool-pair (tool-pair-safe).
+    /// </summary>
+    public enum HailMaryAggression
+    {
+        /// <summary>Keep ~8 recent rear turns; just fit under the window. "Nudge it under."</summary>
+        Gentle,
+        /// <summary>Keep ~4 recent rear turns; leave ~20% of the window as headroom.</summary>
+        Balanced,
+        /// <summary>Keep ~2 recent rear turns; leave ~40% of the window as headroom.</summary>
+        Aggressive,
+    }
+
+    /// <summary>Rear turns kept for each stop.</summary>
+    public static int KeepTurnsFor(HailMaryAggression stop) => stop switch
+    {
+        HailMaryAggression.Gentle => 8,
+        HailMaryAggression.Balanced => 4,
+        HailMaryAggression.Aggressive => 2,
+        _ => MiddleCutKeepTurns,
+    };
+
+    /// <summary>Fraction of the context window to leave as headroom for the forward turn.</summary>
+    public static double HeadroomFractionFor(HailMaryAggression stop) => stop switch
+    {
+        HailMaryAggression.Gentle => 0.0,
+        HailMaryAggression.Balanced => 0.20,
+        HailMaryAggression.Aggressive => 0.40,
+        _ => 0.0,
+    };
+
+    /// <summary>
+    /// Manual, one-off REAR-context prune for the Hail Mary button. Drops older conversational
+    /// turns (the "rear") so the full forward turn can complete with the headroom the chosen
+    /// stop requests. Unlike <see cref="Salvage"/> (a forward prune that shrinks the current
+    /// payload stage-by-stage), this aims the middle-cut at a headroom target derived from the
+    /// stop, and optionally strips older embedded images (independent of the stop).
+    /// The system prompt, last real user task, and active tool-pair are always preserved.
+    /// </summary>
+    public static HailMaryResult RearContextPrune(
+        JsonObject payload,
+        int contextTokens,
+        HailMaryAggression stop,
+        bool stripImages,
+        int? measuredTokens = null)
+    {
+        if (payload is null || contextTokens <= 0)
+        {
+            return HailMaryResult.None;
+        }
+
+        // Use the model's measured token count when available; the 4-chars/token estimate
+        // over-counts for dense tokenizers (Qwen, ~3-4 chars/token), which made this prune a
+        // no-op (before <= target) even when the prompt genuinely exceeded the window.
+        var before = measuredTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        var headroomFraction = HeadroomFractionFor(stop);
+        var target = (int)(contextTokens * (1.0 - headroomFraction));
+        if (before <= target)
+        {
+            return HailMaryResult.None;
+        }
+
+        var report = new HailMaryReport
+        {
+            BeforeTokens = before,
+            TargetTokens = target,
+        };
+
+        var bestTokens = before;
+
+        // Calibrate the estimate to the measured count. The raw 4-chars/token estimate
+        // over-counts for dense tokenizers (Qwen, ~3-4 chars/token). We compute the ratio
+        // of measured to estimated for the original payload, and use that ratio to scale
+        // the estimate after each drop. This makes the loop's stop condition accurate.
+        var rawEstimate = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        var calibrationRatio = (measuredTokens is > 0 && rawEstimate > 0)
+            ? (double)measuredTokens.Value / rawEstimate
+            : 1.0;
+
+        // Optional: strip older embedded images first (independent of the stop). Pure waste
+        // removal — never touches the forward task or the most recent image.
+        if (stripImages && StripOldImages(payload, report))
+        {
+            var t = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);
+            bestTokens = Math.Min(bestTokens, t);
+            report.AfterTokens = t;
+        }
+
+        // The rear prune: drop older conversational turns until the prompt fits under the
+        // headroom target, keeping at least KeepTurnsFor(stop) recent turns. Tool-pair-safe;
+        // always keeps the system prompt + last real user task.
+        var keepTurns = KeepTurnsFor(stop);
+        if (MiddleCutOlderTurns(payload, report, target, keepTurns, calibrationRatio))
+        {
+            var t = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);
+            bestTokens = Math.Min(bestTokens, t);
+            report.AfterTokens = t;
+        }
+
+        report.AfterTokens = bestTokens;
+        return report.ToResult();
+    }
+
+    /// <summary>
     /// Runs the full Hail Mary pipeline on the payload, mutating it in place.
     /// Stages 1-4 run automatically; stage 5 (middle-cut) only runs when
     /// <paramref name="allowMiddleCut"/> is true (the operator's button).
     /// Stops as soon as the prompt fits under <paramref name="contextTokens"/>.
     /// Returns a report naming what was cut and the token delta.
+    /// <paramref name="middleCutKeepTurnsOverride"/> lets the caller make the middle-cut more
+    /// aggressive (keep fewer turns) when the prompt is clearly over the context window and the
+    /// default keep-turns count is too conservative to free enough space.
     /// </summary>
     public static HailMaryResult Salvage(
         JsonObject payload,
         int contextTokens,
         int headroom = LocalHistoryCompaction.Headroom,
-        bool allowMiddleCut = false)
+        bool allowMiddleCut = false,
+        int middleCutKeepTurnsOverride = 0,
+        bool stripImages = true)
     {
         if (payload is null || contextTokens <= 0)
         {
@@ -136,7 +248,10 @@ public static class HailMaryCompaction
         }
 
         // Stage 4: strip embedded image blobs from all-but-the-most-recent turn.
-        if (StripOldImages(payload, report))
+        // Gated on stripImages: automatic paths (rejoin prune, compact fallback) keep images
+        // so scenarios that compare one image with another are preserved; only the manual
+        // Hail Mary button strips older images.
+        if (stripImages && StripOldImages(payload, report))
         {
             var t = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
             bestTokens = Math.Min(bestTokens, t);
@@ -148,9 +263,12 @@ public static class HailMaryCompaction
         }
 
         // Stage 5 (button-gated): blunt middle-cut of older turns, tool-pair-safe.
+        // Token-driven: drops the oldest turns until the prompt fits under the target,
+        // keeping at least minKeepTurns recent turns for conversational context.
         if (allowMiddleCut)
         {
-            if (MiddleCutOlderTurns(payload, report))
+            var minKeepTurns = middleCutKeepTurnsOverride > 0 ? middleCutKeepTurnsOverride : MiddleCutKeepTurns;
+            if (MiddleCutOlderTurns(payload, report, target, minKeepTurns))
             {
                 var t = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
                 bestTokens = Math.Min(bestTokens, t);
@@ -586,41 +704,42 @@ public static class HailMaryCompaction
     }
 
     /// <summary>
-    /// Stage 5 (button-gated): the blunt middle-cut. Keeps the system prompt, the most
-    /// recent <see cref="MiddleCutKeepTurns"/> messages, and the last real user task; drops
-    /// the older conversational turns in between. Tool-pair-safe: it never splits a tool
-    /// result from its call.
+    /// Stage 5 (button-gated): the blunt middle-cut. Token-driven: keeps the system prompt,
+    /// the last real user task, and as many of the most recent turns as needed for the prompt
+    /// to fit under <paramref name="targetTokens"/>; drops the older conversational turns in
+    /// between. Tool-pair-safe: it never splits a tool result from its call.
+    ///
+    /// Unlike a fixed keep-turns count, this scales with the chat length: in a 500-turn chat
+    /// it drops hundreds of turns until the prompt fits; in a 12-turn chat it drops only what
+    /// is needed. The <paramref name="minKeepTurns"/> floor guarantees at least that many
+    /// recent turns are kept even if the prompt would fit with fewer (so the model still has
+    /// some conversational context).
     /// </summary>
-    private static bool MiddleCutOlderTurns(JsonObject payload, HailMaryReport report)
+    private static bool MiddleCutOlderTurns(JsonObject payload, HailMaryReport report, int targetTokens, int minKeepTurns = MiddleCutKeepTurns, double calibrationRatio = 1.0)
     {
         if (payload["messages"] is not JsonArray messages)
         {
             return false;
         }
 
-        var keepTurns = Math.Min(MiddleCutKeepTurns, Math.Max(1, messages.Count - 1));
-        var keepStart = messages.Count - keepTurns;
-        keepStart = AlignKeepStart(messages, keepStart);
-        if (keepStart < 1)
-        {
-            return false;
-        }
-
-        // Never drop the last real user task. If it falls before keepStart, pull
-        // keepStart back to it.
         var lastRealUser = IndexOfLastRealUser(messages);
-        if (lastRealUser >= 0 && lastRealUser < keepStart)
-        {
-            keepStart = lastRealUser;
-        }
-
-        if (keepStart < 1)
+        if (lastRealUser < 1)
         {
             return false;
         }
 
+        // The oldest index we are allowed to drop. We never drop the system prompt (guarded by
+        // role in the loop) or anything at/after the minimum keep-turns floor. Start by keeping
+        // only the last real user task + any turns after it. Then walk backward from
+        // lastRealUser - 1, dropping turns until the prompt fits under targetTokens, but keep
+        // at least minKeepTurns recent turns.
+
+        var minKeepStart = Math.Max(1, lastRealUser - minKeepTurns + 1);
+
+        // Walk backward from lastRealUser - 1 down to minKeepStart, dropping turns as long as
+        // the prompt still fits under targetTokens after the drop.
         var dropped = 0;
-        for (var i = keepStart - 1; i >= 0; i--)
+        for (var i = lastRealUser - 1; i >= minKeepStart; i--)
         {
             if (messages[i] is not JsonObject message)
             {
@@ -643,8 +762,18 @@ public static class HailMaryCompaction
                 }
             }
 
+            // Drop this older turn and check if the prompt now fits. Use the calibrated
+            // estimate (scaled to the measured count) rather than the raw 4-chars/token
+            // estimate, which over-counts for dense tokenizers and would stop the loop
+            // too early.
             messages.RemoveAt(i);
             dropped++;
+
+            var est = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);
+            if (est <= targetTokens)
+            {
+                break;
+            }
         }
 
         if (dropped == 0)
@@ -653,7 +782,7 @@ public static class HailMaryCompaction
         }
 
         report.MiddleCutDropped = dropped;
-        report.Stages.Add("middle-cut: dropped " + dropped + " older turn(s), kept the most recent " + keepTurns);
+        report.Stages.Add("middle-cut: dropped " + dropped + " older turn(s) to fit " + targetTokens + " tokens (kept the last real user task + " + (messages.Count - 1 - (IndexOfLastRealUser(messages) >= 0 ? IndexOfLastRealUser(messages) : 0)) + " most recent turns)");
         return true;
     }
 

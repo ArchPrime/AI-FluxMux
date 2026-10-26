@@ -103,6 +103,64 @@ public sealed class HelpHtmlParserTests
     }
 
     [Fact]
+    public void Diagnostics_topic_id_is_captured_and_sub_headings_are_banners()
+    {
+        const string html = """
+            <html><body>
+            <h1>AI-FluxMux v0.3.2 beta</h1>
+            <h2>Diagnostics</h2>
+            <h3>topic.diagnostics</h3>
+            <h3>Live telemetry graph</h3>
+            <h3>topic.diagnostics_telemetry_graph</h3>
+            <p>Two graphs.</p>
+            <h3>Stress test</h3>
+            <h3>topic.diagnostics_stress_test</h3>
+            <p>Context-fill probe.</p>
+            <h3>Hail Mary Compactor</h3>
+            <h3>topic.diagnostics_hail_mary</h3>
+            <p>Last-resort shrink.</p>
+            </body></html>
+            """;
+
+        var document = HelpHtmlParser.Parse(html);
+        var topic = Assert.Single(document.Topics);
+        Assert.Equal("Diagnostics", topic.Title);
+        Assert.Equal(HelpTopicIds.Diagnostics, topic.Id);
+
+        // The three visible sub-headings parse as Heading-3 banners; the four
+        // topic.* id markers are consumed as ids and never shown.
+        var banners = topic.Blocks.OfType<HelpBannerBlock>().Select(b => b.Text).ToList();
+        Assert.Equal(["Live telemetry graph", "Stress test", "Hail Mary Compactor"], banners);
+        Assert.DoesNotContain(topic.Blocks, block =>
+            block is HelpBannerBlock banner && banner.Text.StartsWith("topic.", StringComparison.Ordinal));
+
+        // A UI link written against the stable id resolves back to the topic.
+        var entries = new[] { new HelpTopicEntry { Title = topic.Title, Id = topic.Id } };
+        Assert.Equal(topic.Title, HelpTopicSearch.FindByReference(entries, HelpTopicIds.Diagnostics)?.Title);
+    }
+
+    [Fact]
+    public void Shipped_help_html_exposes_the_diagnostics_topic_id_and_new_subsections()
+    {
+        // The real Help.html is copied to the test output by the csproj.
+        var path = Path.Combine(AppContext.BaseDirectory, "Help.html");
+        Assert.True(File.Exists(path), $"expected Help.html at {path}");
+        var document = HelpHtmlParser.Parse(File.ReadAllText(path));
+
+        var diagnostics = document.Topics.Single(t => t.Title == "Diagnostics");
+        Assert.Equal(HelpTopicIds.Diagnostics, diagnostics.Id);
+
+        // The three 0.3.2 Diagnostics sub-sections are present as Heading-3 banners.
+        var banners = diagnostics.Blocks.OfType<HelpBannerBlock>().Select(b => b.Text).ToList();
+        Assert.Contains("Live telemetry graph", banners);
+        Assert.Contains("Stress test", banners);
+        Assert.Contains("Hail Mary Compactor", banners);
+
+        // No topic.* id marker leaks into the visible copy.
+        Assert.DoesNotContain(banners, b => b.StartsWith("topic.", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Quote_paragraph_becomes_a_callout()
     {
         const string html = """

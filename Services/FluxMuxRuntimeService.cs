@@ -377,11 +377,31 @@ public sealed class FluxMuxRuntimeService
 	public event Action<string>? HailMaryOffered;
 
 	/// <summary>
-	/// When true, the next local forward applies the Hail Mary stage-5 middle-cut to the
-	/// payload before sending. Set by <see cref="RequestHailMaryMiddleCut"/>, cleared after
-	/// one use.
+	/// Raised when an armed Hail Mary rear-prune is actually consumed on a turn (success or
+	/// no-op), carrying the new prompt-token count. The UI uses this to clear the "queued" pulse
+	/// (the button is a one-off) and to refresh the context gauge with the smaller prompt.
+	/// </summary>
+	public event Action<int>? HailMaryAppliedNotice;
+
+	/// <summary>
+	/// Raised for every gateway log line (Hail Mary results, forward-prune results, context
+	/// measurements, route decisions, etc.) so the UI diagnostic terminal can show them live.
+	/// </summary>
+	public event Action<string>? GatewayLogLine;
+
+	/// <summary>
+	/// When armed, the next local forward applies the Hail Mary REAR-context prune to the
+	/// payload before sending, using the chosen one-off aggression stop + image-strip choice.
+	/// Set by <see cref="RequestHailMaryMiddleCut"/>, cleared after one use. Not persisted —
+	/// a one-off emergency choice.
 	/// </summary>
 	private volatile bool _hailMaryMiddleCutRequested;
+
+	/// <summary>The one-off Hail Mary aggression stop chosen on the button (default Balanced).</summary>
+	private HailMaryCompaction.HailMaryAggression _hailMaryAggression = HailMaryCompaction.HailMaryAggression.Balanced;
+
+	/// <summary>Whether the one-off Hail Mary choice also strips older embedded images.</summary>
+	private volatile bool _hailMaryStripImages;
 
 	private sealed record ParkedLocalLaunch(
 		string Model,
@@ -615,11 +635,14 @@ public sealed class FluxMuxRuntimeService
 		host.GenerationSpeed = _generationSpeedTracker;
 		host.EnrichState = EnrichProxyRuntimeState;
 		host.GetLocalAutoCompactSettings = GetLocalAutoCompactSettings;
+		host.GetForwardPruneEnabled = GetForwardPruneEnabled;
+		host.ReportHailMaryApplied = tokens => HailMaryAppliedNotice?.Invoke(tokens);
 		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);
 		host.ReportPortRulesTelemetry = snap => PortRulesTelemetryNotice?.Invoke(snap);
 		host.ReportContextUsage = WriteLocalContextUsage;
 		host.ReportHailMaryOffer = line => OfferHailMary(line);
 		host.ConsumeHailMaryMiddleCut = ConsumeHailMaryMiddleCutRequest;
+		host.ReportLog = line => GatewayLogLine?.Invoke(line);
 		host.PortRules = _portForwardingRules;
 		TryCaptureAndRedactExistingRuntimeState();
 		return host;
@@ -672,6 +695,50 @@ public sealed class FluxMuxRuntimeService
 			var pinUserChars = int.TryParse(profile["LocalAutoCompactPinUserChars"]?.ToString(), out var pu) ? pu : 2000;
 
 			return (mode, triggerPercent, keepTurns, keepToolResults, pinUserChars);
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// Per-profile forward-prune toggle ("LocalForwardPruneEnabled", default on). Read live from
+	/// the config file each turn (same LoadJsonCached path as the auto-compact settings) so it
+	/// can be switched mid-chat without a reload. Returns null when the profile cannot be
+	/// resolved; the gateway treats null as "on" (the default).
+	/// </summary>
+	private bool? GetForwardPruneEnabled(string model, string variant)
+	{
+		try
+		{
+			var config = LoadJsonCached(_configPath);
+			if (config is null)
+			{
+				return null;
+			}
+
+			var localProfiles = config["LocalProfiles"] as JsonObject;
+			if (localProfiles is null)
+			{
+				return null;
+			}
+
+			var key = model + "::" + variant;
+			var profile = localProfiles[key] as JsonObject;
+			if (profile is null)
+			{
+				return null;
+			}
+
+			// Default on: only an explicit "false" disables forward pruning.
+			var raw = profile["LocalForwardPruneEnabled"]?.ToString();
+			if (string.IsNullOrWhiteSpace(raw))
+			{
+				return true;
+			}
+
+			return ParseBool(raw, fallback: true);
 		}
 		catch
 		{
@@ -1644,23 +1711,32 @@ public sealed class FluxMuxRuntimeService
 	/// The flag is consumed by the gateway on the next forward and cleared.
 	/// </summary>
 	public void RequestHailMaryMiddleCut()
+		=> RequestHailMaryMiddleCut(HailMaryCompaction.HailMaryAggression.Balanced, stripImages: false);
+
+	/// <summary>
+	/// Arms the one-off Hail Mary REAR-context prune for the next local forward, with the
+	/// chosen aggression stop and image-strip choice. Not persisted.
+	/// </summary>
+	public void RequestHailMaryMiddleCut(HailMaryCompaction.HailMaryAggression stop, bool stripImages)
 	{
+		_hailMaryAggression = stop;
+		_hailMaryStripImages = stripImages;
 		_hailMaryMiddleCutRequested = true;
 	}
 
 	/// <summary>
-	/// Returns and clears the pending Hail Mary middle-cut request. Called by the gateway
-	/// before forwarding a local payload.
+	/// Returns the armed Hail Mary choice (stop + image-strip) and clears it. Called by the
+	/// gateway before forwarding a local payload.
 	/// </summary>
-	public bool ConsumeHailMaryMiddleCutRequest()
+	public (HailMaryCompaction.HailMaryAggression Stop, bool StripImages) ConsumeHailMaryMiddleCutRequest()
 	{
 		if (_hailMaryMiddleCutRequested)
 		{
 			_hailMaryMiddleCutRequested = false;
-			return true;
+			return (_hailMaryAggression, _hailMaryStripImages);
 		}
 
-		return false;
+		return (HailMaryCompaction.HailMaryAggression.Balanced, false);
 	}
 
 	/// <summary>
@@ -8017,6 +8093,24 @@ public sealed class FluxMuxRuntimeService
 			{
 				state["local_context"] = _managedLocalContext;
 			}
+			// Step A (YaRN switch refresh): the VRAM-resident context and the "extend into RAM"
+			// flag are only stamped at launch (WriteProxyRuntimeStateForLocal). A mid-session
+			// profile switch (full-VRAM profile -> YaRN profile, or vice versa) left them stale
+			// or zero, so the gateway's spill-compact offer and VRAM-boundary compact trigger
+			// misbehaved on the first turns after the switch. Refresh them from the managed
+			// fields whenever they differ, mirroring the local_context diff-check above. A
+			// mid-launch turn already sees local_context=0 (cleared by ClearStaleLocalContextForStartup),
+			// so this cannot block a switch.
+			var storedExtendIntoRam = ParseBool(GetString(state, "local_extend_context_into_ram"), fallback: false);
+			if (storedExtendIntoRam != _managedLocalExtendContextIntoRam)
+			{
+				state["local_extend_context_into_ram"] = _managedLocalExtendContextIntoRam ? "true" : "false";
+			}
+			var storedVramContext = ParseInt(GetString(state, "local_vram_context"), 0);
+			if (storedVramContext != _managedLocalVramContext)
+			{
+				state["local_vram_context"] = _managedLocalVramContext;
+			}
 			if (ParseInt(GetString(state, "local_max_tokens"), 0) <= 0 && _managedLocalMaxTokens > 0)
 			{
 				state["local_max_tokens"] = _managedLocalMaxTokens;
@@ -8958,7 +9052,8 @@ public sealed class FluxMuxRuntimeService
 					g.Key,
 					g.Sum(x => x.Megabytes),
 					g.Count(),
-					g.Any(x => x.Megabytes <= 0)))
+					g.Any(x => x.Megabytes <= 0),
+					RawName: g.Select(x => x.RawName).FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? string.Empty))
 				.OrderByDescending(x => x.Megabytes)
 				.ThenBy(x => x.FriendlyName, StringComparer.OrdinalIgnoreCase)
 				.ToList();
@@ -8993,7 +9088,9 @@ public sealed class FluxMuxRuntimeService
 					{
 						MemoryLabel = $"{leftoverMb} MB",
 						NameLabel = "Unlisted (drivers and shared)",
-						IsCaution = true
+						IsCaution = true,
+						GpuKind = GpuKind.DiscreteVram,
+						CanToggle = false
 					});
 				}
 
@@ -9035,8 +9132,12 @@ public sealed class FluxMuxRuntimeService
 		{
 			MemoryLabel = group.Megabytes > 0 ? $"{group.Megabytes} MB" : "—",
 			NameLabel = group.FriendlyName,
+			RawName = group.RawName,
 			CountLabel = FormatGpuProcessCountNote(group),
-			IsCaution = caution
+			IsCaution = caution,
+			GpuKind = group.GpuKind,
+			CanToggle = !IsGpuStabilitySensitive(group.FriendlyName)
+				&& !WindowsGpuPreference.IsPinnedName(group.FriendlyName)
 		};
 	}
 
@@ -9053,13 +9154,13 @@ public sealed class FluxMuxRuntimeService
 		return $"({group.InstanceCount} {countWord})";
 	}
 
-	private sealed record GpuProcessUse(string FriendlyName, int Megabytes, int InstanceCount = 1, bool MissingAmount = false, int Pid = 0);
+	private sealed record GpuProcessUse(string FriendlyName, int Megabytes, int InstanceCount = 1, bool MissingAmount = false, int Pid = 0, GpuKind GpuKind = GpuKind.Unknown, string RawName = "");
 
 	private List<GpuProcessUse> CollectGpuProcessUses()
 	{
 		var windows = CollectWindowsGpuLocalUsage()
-			.Select(use => (use.Pid, use.FriendlyName, use.Megabytes));
-		var compute = new List<(int Pid, string Name, int Megabytes)>();
+			.Select(use => (use.Pid, use.FriendlyName, use.Megabytes, use.RawName));
+		var compute = new List<(int Pid, string Name, int Megabytes, string RawName)>();
 		foreach (var row in ParseNvidiaComputeApps())
 		{
 			if (row.Mb <= 0)
@@ -9067,11 +9168,11 @@ public sealed class FluxMuxRuntimeService
 				continue;
 			}
 
-			compute.Add((row.Pid, FriendlyGpuProcessName(row.Name, row.Pid), row.Mb));
+			compute.Add((row.Pid, FriendlyGpuProcessName(row.Name, row.Pid), row.Mb, row.Name));
 		}
 
 		return GpuProcessMemoryAggregator.UnionPreferringLargerMegabytes(windows, compute)
-			.Select(entry => new GpuProcessUse(entry.Value.Name, entry.Value.Megabytes, Pid: entry.Key))
+			.Select(entry => new GpuProcessUse(entry.Value.Name, entry.Value.Megabytes, Pid: entry.Key, GpuKind: GpuKind.DiscreteVram, RawName: entry.Value.RawName))
 			.ToList();
 	}
 
@@ -9111,6 +9212,8 @@ public sealed class FluxMuxRuntimeService
 				try
 				{
 					using PerformanceCounter counter = new PerformanceCounter("GPU Process Memory", "Local Usage", instance, readOnly: true);
+					// Warm up the counter: the first read initializes it and returns 0.
+					_ = counter.NextValue();
 					bytes = counter.RawValue;
 				}
 				catch
@@ -9158,7 +9261,7 @@ public sealed class FluxMuxRuntimeService
 				{
 				}
 
-				result.Add(new GpuProcessUse(FriendlyGpuProcessName(processName, entry.Key), mb, Pid: entry.Key));
+				result.Add(new GpuProcessUse(FriendlyGpuProcessName(processName, entry.Key), mb, Pid: entry.Key, GpuKind: GpuKind.DiscreteVram, RawName: processName));
 			}
 		}
 		catch
@@ -9193,6 +9296,8 @@ public sealed class FluxMuxRuntimeService
 				try
 				{
 					using var dedicatedCounter = new PerformanceCounter("GPU Adapter Memory", "Dedicated Usage", instance, readOnly: true);
+					// Warm up the counter: the first read initializes it and returns 0.
+					_ = dedicatedCounter.NextValue();
 					dedicated = dedicatedCounter.RawValue;
 				}
 				catch
@@ -9202,6 +9307,8 @@ public sealed class FluxMuxRuntimeService
 				try
 				{
 					using var sharedCounter = new PerformanceCounter("GPU Adapter Memory", "Shared Usage", instance, readOnly: true);
+					// Warm up the counter: the first read initializes it and returns 0.
+					_ = sharedCounter.NextValue();
 					shared = sharedCounter.RawValue;
 				}
 				catch

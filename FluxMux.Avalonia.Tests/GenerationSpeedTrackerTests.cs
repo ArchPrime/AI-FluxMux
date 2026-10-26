@@ -75,4 +75,36 @@ public sealed class GenerationSpeedTrackerTests
         Assert.NotNull(root);
         Assert.Equal(2, GenerationSpeedTracker.CountDeltaTokens(root));
     }
+
+    [Fact]
+    public void Enabled_tracker_reports_time_to_first_token()
+    {
+        var tracker = new GenerationSpeedTracker();
+        tracker.SetEnabled(true);
+        tracker.Begin("local");
+
+        // Let a little wall-clock time pass so the first-token arrival is measurably after Begin.
+        System.Threading.Thread.Sleep(60);
+        tracker.ProcessSseLine("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}");
+        tracker.Complete();
+
+        var snapshot = tracker.ReadSnapshot();
+        Assert.NotNull(snapshot);
+        // TTFT is measured from Begin() to the first generated token, so it must be positive.
+        Assert.True(snapshot!.TtftSeconds > 0, $"expected positive TTFT, got {snapshot.TtftSeconds}");
+        // And it should be small (the turn only slept ~60ms before the first token).
+        Assert.True(snapshot.TtftSeconds < 5.0, $"expected small TTFT, got {snapshot.TtftSeconds}");
+    }
+
+    [Fact]
+    public void Disabled_tracker_reports_zero_ttft()
+    {
+        var tracker = new GenerationSpeedTracker();
+        tracker.Begin("local");
+        tracker.ProcessSseLine("data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}");
+        tracker.Complete();
+
+        // Disabled -> no snapshot at all.
+        Assert.Null(tracker.ReadSnapshot());
+    }
 }

@@ -235,6 +235,106 @@ public sealed class HailMaryCompactionTests
     }
 
     [Fact]
+    public void Stage4_image_strip_is_off_for_automatic_paths_and_on_for_the_button()
+    {
+        // A large base64 blob so the image actually costs tokens.
+        var blob = "data:image/png;base64," + new string('A', 8000);
+        var imageContent = new JsonArray
+        {
+            new JsonObject { ["type"] = "text", ["text"] = "see the screenshot" },
+            new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = blob } }
+        };
+
+        var older = new JsonObject { ["role"] = "user", ["content"] = imageContent.DeepClone() };
+        var recent = new JsonObject { ["role"] = "user", ["content"] = imageContent.DeepClone() };
+        // Make the two image messages distinct so dedupe (stage 1) does not collapse
+        // them before the image-strip stage (stage 4) gets a chance to run.
+        older["content"] = new JsonArray
+        {
+            new JsonObject { ["type"] = "text", ["text"] = "first screenshot" },
+            new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = blob } }
+        };
+
+        // Automatic path (rejoin prune / compact fallback): stripImages=false.
+        // Both images must be kept so scenarios that compare one image with another survive.
+        var autoPayload = Payload(User("Here are two screenshots."), (JsonObject)older.DeepClone(), (JsonObject)recent.DeepClone());
+        var autoResult = HailMaryCompaction.Salvage(autoPayload, contextTokens: 10, allowMiddleCut: false, stripImages: false);
+        Assert.Equal(0, autoResult.ImagesStripped);
+        var autoMessages = autoPayload["messages"]!.AsArray();
+        Assert.Contains("data:image/png", autoMessages[^1]!["content"]!.ToString());
+        Assert.Contains("data:image/png", autoMessages[^2]!["content"]!.ToString());
+
+        // Manual Hail Mary button: stripImages=true (default). The older image is stripped.
+        var buttonPayload = Payload(User("Here are two screenshots."), (JsonObject)older.DeepClone(), (JsonObject)recent.DeepClone());
+        var buttonResult = HailMaryCompaction.Salvage(buttonPayload, contextTokens: 10, allowMiddleCut: true, stripImages: true);
+        Assert.True(buttonResult.ImagesStripped >= 1, "expected >=1 image stripped on the button, got " + buttonResult.ImagesStripped);
+        Assert.Contains("images", buttonResult.DiagnosticsLine);
+    }
+
+    [Fact]
+    public void RearContextPrune_drops_older_turns_to_headroom_and_preserves_task_and_toolpair()
+    {
+        // A long conversational history with a tool pair near the start and a final user task.
+        var messages = new List<JsonObject>
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "You are a coding assistant." },
+            User("Original task: fix the bug."),
+            AssistantWithCall("k1", "run_command", "{\"command\":\"dotnet test\"}"),
+            ToolResult("tests passed", "k1"),
+        };
+        for (var i = 0; i < 20; i++)
+        {
+            messages.Add(User("Turn " + i + " " + new string('n', 300)));
+            messages.Add(Assistant("Reply " + i + " " + new string('n', 300)));
+        }
+        messages.Add(User("Final task: now do X."));
+
+        // Use a context window the prompt actually exceeds, so the rear prune has to drop turns.
+        // 20 turns x ~150 tokens + overhead ~= 3500 tokens; a 2000-token window forces a drop.
+        const int contextTokens = 2000;
+
+        // Aggressive: keep ~2 recent turns, leave ~40% headroom (target = 1200 tokens).
+        var payload = Payload(messages.Select(m => (JsonObject)m.DeepClone()).ToArray());
+        var before = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        Assert.True(before > contextTokens * 0.6, "setup: prompt must exceed the aggressive target (before=" + before + ")");
+        var result = HailMaryCompaction.RearContextPrune(payload, contextTokens, HailMaryCompaction.HailMaryAggression.Aggressive, stripImages: false);
+        Assert.True(result.MiddleCutDropped > 0, "expected older turns dropped, got " + result.MiddleCutDropped);
+        // The prune must free space: the result is smaller than the original prompt.
+        // (It may not reach the exact headroom target if the protected floor — system prompt +
+        // last task + tool-pair + min keep-turns — is itself larger than the target.)
+        Assert.True(result.AfterTokens < before, "after " + result.AfterTokens + " should be < before " + before);
+        // System prompt + last real user task + the tool result are preserved.
+        var kept = payload["messages"]!.AsArray();
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "system");
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "tool");
+        Assert.Contains(kept, m => m!["role"]!.ToString() == "user"
+            && m!["content"]!.ToString().Contains("Final task"));
+
+        // Both stops drop turns and free space. (The exact count depends on where the prompt
+        // crosses the headroom target relative to the keep-turns floor, so we assert the
+        // invariant — turns dropped + space freed + essentials preserved — not a fixed count.)
+        var payload2 = Payload(messages.Select(m => (JsonObject)m.DeepClone()).ToArray());
+        var gentle = HailMaryCompaction.RearContextPrune(payload2, contextTokens, HailMaryCompaction.HailMaryAggression.Gentle, stripImages: false);
+        Assert.True(gentle.MiddleCutDropped > 0, "Gentle should also drop turns, got " + gentle.MiddleCutDropped);
+        Assert.True(gentle.AfterTokens < before, "Gentle should free space: " + gentle.AfterTokens + " < " + before);
+    }
+
+    [Fact]
+    public void RearContextPrune_is_noop_when_prompt_already_fits_the_headroom_target()
+    {
+        var messages = new List<JsonObject>
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "sys" },
+            User("Hello."),
+            Assistant("Hi there."),
+        };
+        var payload = Payload(messages.ToArray());
+        var result = HailMaryCompaction.RearContextPrune(payload, contextTokens: 100000, HailMaryCompaction.HailMaryAggression.Aggressive, stripImages: false);
+        Assert.Equal(0, result.MiddleCutDropped);
+        Assert.Equal(HailMaryResult.None, result);
+    }
+
+    [Fact]
     public void Stage5_middle_cut_is_button_gated_and_tool_pair_safe()
     {
         // A long conversational history with a tool pair near the start.
@@ -283,4 +383,45 @@ public sealed class HailMaryCompactionTests
         Assert.Contains("tokens", result.DiagnosticsLine);
         Assert.True(result.BeforeTokens > result.AfterTokens);
     }
+    [Fact]
+    public void RearContextPrune_prunes_with_measured_count_where_estimate_would_noop()
+    {
+        // A payload whose 4-chars/token estimate is small enough to fit the headroom target, but
+        // whose measured token count exceeds it. Without the measured count the rear prune is a
+        // no-op (before <= target); with it, the prune must drop older turns. This is the Qwen
+        // dense-tokenizer case that made the Hail Mary button appear to do nothing.
+        var messages = new List<JsonObject>
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "sys" },
+            User("Original task: fix the bug."),
+        };
+        for (var i = 0; i < 12; i++)
+        {
+            messages.Add(User("Turn " + i + " " + new string('n', 120)));
+            messages.Add(Assistant("Reply " + i + " " + new string('n', 120)));
+        }
+
+        var contextTokens = 100000;
+        var aggressiveHeadroom = (int)(contextTokens * (1.0 - HailMaryCompaction.HeadroomFractionFor(HailMaryCompaction.HailMaryAggression.Aggressive)));
+
+        // Estimate-based (no measured count): the estimate of this payload is far under the
+        // headroom target, so the prune is a no-op.
+        var byEstimate = HailMaryCompaction.RearContextPrune(
+            Payload(messages.Select(m => (JsonObject)m.DeepClone()).ToArray()),
+            contextTokens,
+            HailMaryCompaction.HailMaryAggression.Aggressive,
+            stripImages: false,
+            measuredTokens: null);
+        Assert.Equal(0, byEstimate.MiddleCutDropped);
+
+        // Measured-based: a measured count that exceeds the headroom target forces the prune.
+        var byMeasured = HailMaryCompaction.RearContextPrune(
+            Payload(messages.Select(m => (JsonObject)m.DeepClone()).ToArray()),
+            contextTokens,
+            HailMaryCompaction.HailMaryAggression.Aggressive,
+            stripImages: false,
+            measuredTokens: aggressiveHeadroom + 1000);
+        Assert.True(byMeasured.MiddleCutDropped > 0, "rear prune must drop turns when the measured count exceeds the headroom target");
+    }
 }
+

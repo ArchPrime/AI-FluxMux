@@ -34,9 +34,6 @@ public partial class TelemetryGraphViewModel : ViewModelBase
     private string _yLabel = string.Empty;
 
     [ObservableProperty]
-    private bool _isLogScaleY;
-
-    [ObservableProperty]
     private bool _isActive;
 
     [ObservableProperty]
@@ -180,6 +177,13 @@ public partial class TelemetryGraphViewModel : ViewModelBase
     {
         public string Text { get; set; } = string.Empty;
         public double Position { get; set; }
+        /// <summary>
+        /// True when this label marks the right end of the X-axis (the axis maximum). The
+        /// code-behind right-aligns this label so its right edge sits at the axis end instead of
+        /// centering it under the tick — the axis-max label is the "end" label and reads best
+        /// flush against the right edge of the plot.
+        /// </summary>
+        public bool IsAxisMax { get; set; }
     }
 
     [ObservableProperty]
@@ -241,6 +245,31 @@ public partial class TelemetryGraphViewModel : ViewModelBase
 
     [ObservableProperty]
     private double _barValueY6;
+
+    // The X position (in 0-100 screen space) of each bar's CENTER. The code-behind uses these to
+    // position the bar-value TextBlocks directly above each bar. These differ from XAxisPos1-6:
+    // the axis tick positions are evenly spaced (0/20/40/60/80/100%), but the bars sit at the
+    // actual data-point X values, which in the per-turn view are turn indices (1..N) spaced by the
+    // padded axis range — not evenly. Positioning the value labels at XAxisPos would offset them
+    // from the bars (the "labels drift off the bars" bug). BarValueX keeps each label centered on
+    // its own bar.
+    [ObservableProperty]
+    private double _barValueX1;
+
+    [ObservableProperty]
+    private double _barValueX2;
+
+    [ObservableProperty]
+    private double _barValueX3;
+
+    [ObservableProperty]
+    private double _barValueX4;
+
+    [ObservableProperty]
+    private double _barValueX5;
+
+    [ObservableProperty]
+    private double _barValueX6;
 
     [ObservableProperty]
     private string _yAxisMin = "0";
@@ -348,6 +377,67 @@ public partial class TelemetryGraphViewModel : ViewModelBase
     private double _maxY;
     private bool _hasData;
 
+    // --- Scroll mode (live per-turn view) ---
+    // When enabled, the X axis is a sliding window of turn indices rather than a data range.
+    // The most-recent turn sits at the right edge; as the eased scroll offset advances 0->1 the
+    // whole window slides left by one slot, so new bars enter from the right and old bars (with
+    // their turn numbers and value labels) exit off the left edge. This is the "smoothly
+    // scrolling" per-turn view. The stress test does NOT use scroll mode — it sets a fixed axis
+    // range (_hasAxisRange) and its bars are evenly spaced at the fill levels, so all of the
+    // scroll-mode code paths below are skipped for it.
+    private bool _scrollMode;
+    private int _scrollWindow = 6; // number of bars visible in the sliding window (matches the 6 value-label slots)
+    private double _scrollOffset; // eased 0->1 offset; advanced by ScrollTo each timer tick
+
+    /// <summary>
+    /// The UTC timestamp of the most recent <see cref="AddPoint"/> call. The code-behind uses this
+    /// to compute the eased scroll offset (elapsed time since the last turn) in scroll mode.
+    /// </summary>
+    public DateTime LastPointAddedUtc { get; private set; } = DateTime.MinValue;
+
+    /// <summary>True when the graph is in scroll mode (the live per-turn view).</summary>
+    public bool IsScrollMode => _scrollMode;
+
+    /// <summary>
+    /// Enters scroll mode with the given window size (number of visible bars). Clears any fixed
+    /// axis range so the data-range fallback is not used. Call this when the per-turn view starts.
+    /// </summary>
+    public void BeginScrollMode(int windowSize = 6)
+    {
+        _scrollMode = true;
+        _scrollWindow = Math.Max(2, Math.Min(windowSize, 6)); // cap at 6 (the value-label slot count)
+        _hasAxisRange = false;
+        _scrollOffset = 0.0;
+        DiagLog($"BeginScrollMode window={_scrollWindow}");
+    }
+
+    /// <summary>
+    /// Exits scroll mode (e.g. when a stress test takes over the panel). Restores normal
+    /// data-range / fixed-axis-range positioning.
+    /// </summary>
+    public void EndScrollMode()
+    {
+        _scrollMode = false;
+        DiagLog("EndScrollMode");
+    }
+
+    /// <summary>
+    /// Advances the scroll window to the given eased offset (0.0 = newest bar at the right edge,
+    /// 1.0 = the window has slid one full slot left) and re-renders the bars, value labels, and
+    /// turn-number axis labels at their new positions. Called by the code-behind timer each tick
+    /// with the eased offset computed from elapsed time since the last turn. No-op when not in
+    /// scroll mode (the stress test and any non-scroll series ignore it).
+    /// </summary>
+    public void ScrollTo(double offset01)
+    {
+        if (!_scrollMode || Points.Count == 0)
+        {
+            return;
+        }
+        _scrollOffset = Math.Max(0.0, Math.Min(1.0, offset01));
+        UpdateGraphStrings();
+    }
+
     // Fixed axis range. When set, X values are normalized against [axisMinX, axisMaxX] and Y
     // values against [0, axisMaxY] (TTFT always starts at 0). This keeps the axis labels honest
     // (showing the real fill levels, not interpolated data-range values) and lets the Y-axis
@@ -357,6 +447,17 @@ public partial class TelemetryGraphViewModel : ViewModelBase
     private double _axisMinY;
     private double _axisMaxY;
     private bool _hasAxisRange;
+
+    // Y-axis minimum offset. When set (> 0), the Y-axis starts at this value instead of 0.
+    // Used for the live per-turn telemetry view where the user wants the Y-axis to start at
+    // a non-zero baseline (e.g. 180 for tok/s, 200 for TTFT) to make small variations visible.
+    private double _yAxisMinOffset;
+
+    // Label headroom fraction. The fraction of the chart height reserved for the bar value
+    // label above the tallest bar. When a bar's value label would be forced to overlap the
+    // top of the chart (or the bar itself), the Y-axis rescales to ensure this headroom is
+    // available. Computed by the code-behind from the label height and chart height.
+    private double _labelHeadroomFraction;
 
     /// <summary>
     /// Sets a fixed axis range for the current series. X is normalized against
@@ -373,6 +474,38 @@ public partial class TelemetryGraphViewModel : ViewModelBase
         _hasAxisRange = true;
         UpdateAxisLabels();
         DiagLog($"SetAxisRange x=[{xMin},{xMax}] y=[{yMin},{yMax}]");
+    }
+
+    /// <summary>
+    /// Sets the Y-axis minimum offset for the live per-turn telemetry view. When set to a value
+    /// greater than 0, the Y-axis starts at that value instead of 0, making small variations
+    /// above the baseline more visible. Call this after <see cref="SetSeries"/> for the
+    /// scroll-mode graphs (e.g. 180 for tok/s, 200 for TTFT).
+    /// </summary>
+    public void SetYAxisMinOffset(double offset)
+    {
+        _yAxisMinOffset = Math.Max(0.0, offset);
+        UpdateAxisLabels();
+        DiagLog($"SetYAxisMinOffset yMin={_yAxisMinOffset}");
+    }
+
+    /// <summary>
+    /// Sets the label headroom fraction — the fraction of the chart height reserved for the
+    /// bar value label above the tallest bar. When a bar's value label would be forced to
+    /// overlap the top of the chart, the Y-axis rescales (to a round multiple of 10) to ensure
+    /// this headroom is available. Computed by the code-behind from the label height and chart
+    /// height. Call this whenever the chart size or label font changes.
+    /// </summary>
+    public void SetLabelHeadroomFraction(double fraction)
+    {
+        var clamped = Math.Clamp(fraction, 0.0, 0.5); // cap at 50% to avoid absurd rescaling
+        if (Math.Abs(clamped - _labelHeadroomFraction) < 0.001)
+        {
+            return; // no meaningful change; avoid a redundant re-render
+        }
+        _labelHeadroomFraction = clamped;
+        UpdateAxisLabels();
+        DiagLog($"SetLabelHeadroomFraction headroom={_labelHeadroomFraction:F3}");
     }
 
     /// <summary>
@@ -541,12 +674,11 @@ public partial class TelemetryGraphViewModel : ViewModelBase
     /// <summary>
     /// Starts a new series. Clears existing points and sets the axis labels.
     /// </summary>
-    public void SetSeries(string title, string xLabel, string yLabel, bool isLogScaleY = false, string? yAxisTooltip = null)
+    public void SetSeries(string title, string xLabel, string yLabel, string? yAxisTooltip = null)
     {
         Title = title;
         XLabel = xLabel;
         YLabel = yLabel;
-        IsLogScaleY = isLogScaleY;
         YAxisTooltip = yAxisTooltip ?? "TTFT = Time To First Token (latency from prompt to first token)";
         Points.Clear();
         _hasData = false;
@@ -559,12 +691,34 @@ public partial class TelemetryGraphViewModel : ViewModelBase
         _axisMaxX = 100;
         _axisMinY = 0;
         _axisMaxY = 1;
+        _yAxisMinOffset = 0;
+        _labelHeadroomFraction = 0;
         PointsString = string.Empty;
         FailurePointsString = string.Empty;
         PolylinePoints.Clear();
         FailurePolylinePoints.Clear();
         HasPoints = false;
         SummaryText = string.Empty;
+        // Clear the bar value labels so they don't linger from a previous series (e.g. when
+        // switching between stress test and telemetry modes).
+        BarValueText1 = string.Empty;
+        BarValueText2 = string.Empty;
+        BarValueText3 = string.Empty;
+        BarValueText4 = string.Empty;
+        BarValueText5 = string.Empty;
+        BarValueText6 = string.Empty;
+        BarValueY1 = 0;
+        BarValueY2 = 0;
+        BarValueY3 = 0;
+        BarValueY4 = 0;
+        BarValueY5 = 0;
+        BarValueY6 = 0;
+        BarValueX1 = 0;
+        BarValueX2 = 0;
+        BarValueX3 = 0;
+        BarValueX4 = 0;
+        BarValueX5 = 0;
+        BarValueX6 = 0;
         HasUnfilledRegion = false;
         UnfilledRegionGeometry = null;
         UnfilledRegionLineGeometry = null;
@@ -581,7 +735,7 @@ public partial class TelemetryGraphViewModel : ViewModelBase
         GhostBarPathData = string.Empty;
         IsActive = true;
         UpdateIsPlotVisible();
-        DiagLog($"SetSeries title='{title}' x='{xLabel}' y='{yLabel}' logY={isLogScaleY}");
+        DiagLog($"SetSeries title='{title}' x='{xLabel}' y='{yLabel}'");
     }
 
     private static void DiagLog(string message)
@@ -617,6 +771,7 @@ public partial class TelemetryGraphViewModel : ViewModelBase
     {
         var point = new TelemetryPoint(x, y, label, isFailure);
         Points.Add(point);
+        LastPointAddedUtc = DateTime.UtcNow;
 
         if (!_hasData)
         {
@@ -645,7 +800,7 @@ public partial class TelemetryGraphViewModel : ViewModelBase
             }
             if (y > _axisMaxY)
             {
-                _axisMaxY = y * 1.05; // 5% padding
+                _axisMaxY = y * 1.25; // 25% padding to minimize re-scaling frequency
                 extended = true;
             }
             if (extended)
@@ -701,7 +856,7 @@ public partial class TelemetryGraphViewModel : ViewModelBase
             }
             if (y > _axisMaxY)
             {
-                _axisMaxY = y * 1.05; // 5% padding
+                _axisMaxY = y * 1.25; // 25% padding to minimize re-scaling frequency
                 extended = true;
             }
             if (extended)
@@ -729,6 +884,25 @@ public partial class TelemetryGraphViewModel : ViewModelBase
         FailurePolylinePoints.Clear();
         HasPoints = false;
         SummaryText = string.Empty;
+        // Clear the bar value labels so they don't linger from a previous series.
+        BarValueText1 = string.Empty;
+        BarValueText2 = string.Empty;
+        BarValueText3 = string.Empty;
+        BarValueText4 = string.Empty;
+        BarValueText5 = string.Empty;
+        BarValueText6 = string.Empty;
+        BarValueY1 = 0;
+        BarValueY2 = 0;
+        BarValueY3 = 0;
+        BarValueY4 = 0;
+        BarValueY5 = 0;
+        BarValueY6 = 0;
+        BarValueX1 = 0;
+        BarValueX2 = 0;
+        BarValueX3 = 0;
+        BarValueX4 = 0;
+        BarValueX5 = 0;
+        BarValueX6 = 0;
         HasUnfilledRegion = false;
         UnfilledRegionGeometry = null;
         UnfilledRegionLineGeometry = null;
@@ -751,6 +925,38 @@ public partial class TelemetryGraphViewModel : ViewModelBase
     {
         IsActive = false;
         UpdateIsPlotVisible();
+    }
+
+    /// <summary>
+    /// Re-derives the data bounds from the current <see cref="Points"/> and re-renders. Used after
+    /// the live chat-turn view trims the oldest points to keep a rolling window: the axis bounds
+    /// (<c>_minX</c>…<c>_maxY</c>) are recomputed from whatever remains, then the polyline/bars are
+    /// rebuilt. Without this the graph would keep the stale bounds from the trimmed points.
+    /// </summary>
+    public void RefreshAfterTrim()
+    {
+        if (Points.Count == 0)
+        {
+            Clear();
+            return;
+        }
+
+        _minX = double.MaxValue;
+        _maxX = double.MinValue;
+        _minY = double.MaxValue;
+        _maxY = double.MinValue;
+        foreach (var p in Points)
+        {
+            _minX = Math.Min(_minX, p.X);
+            _maxX = Math.Max(_maxX, p.X);
+            _minY = Math.Min(_minY, p.Y);
+            _maxY = Math.Max(_maxY, p.Y);
+        }
+
+        _hasData = true;
+        HasPoints = true;
+        UpdateGraphStrings();
+        DiagLog($"RefreshAfterTrim totalPoints={Points.Count} x=[{_minX},{_maxX}] y=[{_minY},{_maxY}]");
     }
 
     /// <summary>
@@ -893,7 +1099,26 @@ public partial class TelemetryGraphViewModel : ViewModelBase
         foreach (var p in Points)
         {
             double nx;
-            if (useAxis)
+            if (_scrollMode)
+            {
+                // Scroll mode (live per-turn view): the X axis is a sliding window of turn indices.
+                // p.X is the turn index. Bars are spaced 100/window units apart. The newest bar
+                // (index _maxX) sits at the right edge (X=100) when the eased offset is 0, and
+                // slides left by one slot as the offset advances to 1 — so new bars enter from the
+                // right and old bars exit off the left edge. A bar with turn index i is at:
+                //   nx = 100 - (newest - i + offset) * (100 / window)
+                // i=newest, offset=0 -> 100 (right edge). i=newest-1, offset=0 -> 100 - slot.
+                // i=newest, offset=1 -> 100 - slot (one slot left of the edge). Bars whose nx falls
+                // outside [0,100] are clipped by the plot's ClipToBounds, so they exit cleanly.
+                // Offset by half a bar width to the right so the leftmost bar's full width is
+                // visible (its left edge sits at 0 instead of -3.5). The rightmost position is
+                // usually empty, so clipping the newest bar on the right is acceptable.
+                const double barWidthOffset = 3.5; // half of the 7.0-unit bar width
+                var newest = _maxX; // the most recent turn index
+                var slot = 100.0 / _scrollWindow;
+                nx = 100.0 - (newest - p.X + _scrollOffset) * slot + barWidthOffset;
+            }
+            else if (useAxis)
             {
                 nx = axXRange > 0 ? (p.X - axMin) / axXRange * 100.0 : 50.0;
             }
@@ -905,21 +1130,18 @@ public partial class TelemetryGraphViewModel : ViewModelBase
             if (useAxis)
             {
                 // Y is always linear against [0, axisMaxY] when a fixed range is set (the stress
-                // test's TTFT curve is steep but linear is honest; log-scale is only used in the
-                // generic data-range fallback).
+                // test's TTFT curve is steep but linear is honest).
                 ny = axYRange > 0 ? (p.Y - _axisMinY) / axYRange * 100.0 : 50.0;
-            }
-            else if (IsLogScaleY && _minY > 0 && _maxY > 0)
-            {
-                var logMin = Math.Log10(Math.Max(1, _minY));
-                var logMax = Math.Log10(Math.Max(1, _maxY));
-                var logVal = Math.Log10(Math.Max(1, p.Y));
-                var logRange = logMax - logMin;
-                ny = logRange > 0 ? (logVal - logMin) / logRange * 100.0 : 50.0;
             }
             else
             {
-                ny = yRange > 0 ? (p.Y - _minY) / yRange * 100.0 : 50.0;
+                // Linear: use the effective Y-axis range (from GetEffectiveYAxisRange) so the
+                // bars align with the Y-axis labels. The range is [yMin, yMax] where yMin is the
+                // offset (or 0 if the offset >= yMax) and yMax is the rounded max.
+                GetEffectiveYAxisRange(out var yMin, out var yMax);
+                var ySpan = yMax - yMin;
+                ny = ySpan > 0 ? (p.Y - yMin) / ySpan * 100.0 : 50.0;
+                if (ny < 0) ny = 0; // clamp data below the offset to the bottom
             }
 
             var screenY = 100.0 - ny;
@@ -986,22 +1208,40 @@ public partial class TelemetryGraphViewModel : ViewModelBase
 
         // Compute bar value labels: text + Y position for each bar's top.
         // The Y position is in 0-100 screen space, offset slightly above the bar's top.
+        // The X position is the bar's CENTER (successList[i].X) — NOT the axis tick position.
+        // The axis ticks are evenly spaced (0/20/40/60/80/100%), but the bars sit at the actual
+        // data-point X values. In the per-turn view those are turn indices spaced by the padded
+        // axis range, so using the axis-tick X would offset each label from its bar. Using the
+        // bar center keeps every value label directly above its own bar. In the stress test the
+        // bars are evenly spaced at the fill levels, so BarValueX == XAxisPos and this is a no-op
+        // there (the stress test's alignment is unchanged).
         var labelOffset = 4.0; // 4% above the bar top
         var textValues = new[] { BarValueText1, BarValueText2, BarValueText3, BarValueText4, BarValueText5, BarValueText6 };
         var yValues = new[] { BarValueY1, BarValueY2, BarValueY3, BarValueY4, BarValueY5, BarValueY6 };
+        var xValues = new[] { BarValueX1, BarValueX2, BarValueX3, BarValueX4, BarValueX5, BarValueX6 };
+        // In scroll mode the visible window is the NEWEST _scrollWindow bars, so label those
+        // (the last successList entries). In non-scroll mode label the first 6 (oldest first),
+        // which is the existing behavior. This keeps the 6 value-label slots aligned with the
+        // 6 turn-number axis labels in scroll mode.
+        var visibleCount = Math.Min(6, successList.Count);
+        var startIndex = _scrollMode ? successList.Count - visibleCount : 0;
         for (int i = 0; i < 6; i++)
         {
-            if (i < successList.Count)
+            var listIndex = startIndex + i;
+            if (listIndex >= 0 && listIndex < successList.Count)
             {
-                var p = successList[i];
-                // Find the i-th successful data point to get the raw Y value for the label text.
+                var p = successList[listIndex];
+                // Find the success point at this list index to get the raw Y value for the label
+                // text. successList is built in Points order (oldest first), so the i-th success
+                // point in Points maps to successList[i] in non-scroll mode; in scroll mode we
+                // offset by startIndex to reach the newest visible bars.
                 var successIndex = 0;
                 double rawY = 0;
                 foreach (var pt in Points)
                 {
                     if (!pt.IsFailure)
                     {
-                        if (successIndex == i)
+                        if (successIndex == listIndex)
                         {
                             rawY = pt.Y;
                             break;
@@ -1011,11 +1251,13 @@ public partial class TelemetryGraphViewModel : ViewModelBase
                 }
                 textValues[i] = FormatBarValueLabel(rawY);
                 yValues[i] = Math.Max(0, p.Y - labelOffset);
+                xValues[i] = p.X; // bar center in 0-100 screen space (the sliding window X)
             }
             else
             {
                 textValues[i] = string.Empty;
                 yValues[i] = 0;
+                xValues[i] = 0;
             }
         }
         BarValueText1 = textValues[0];
@@ -1030,6 +1272,12 @@ public partial class TelemetryGraphViewModel : ViewModelBase
         BarValueY4 = yValues[3];
         BarValueY5 = yValues[4];
         BarValueY6 = yValues[5];
+        BarValueX1 = xValues[0];
+        BarValueX2 = xValues[1];
+        BarValueX3 = xValues[2];
+        BarValueX4 = xValues[3];
+        BarValueX5 = xValues[4];
+        BarValueX6 = xValues[5];
 
         // Update the axis labels based on the actual data range.
         UpdateAxisLabels();
@@ -1067,6 +1315,56 @@ public partial class TelemetryGraphViewModel : ViewModelBase
     /// </summary>
     private void UpdateAxisLabels()
     {
+        if (_scrollMode)
+        {
+            // Scroll mode (live per-turn view): the X-axis shows the TURN NUMBER of each visible
+            // bar, positioned at the same screen-X as the bar so each number scrolls beneath its
+            // own bar (and exits off the left edge with it). This replaces the evenly-spaced tick
+            // labels, which in scroll mode would not track the sliding bars. The Y-axis still uses
+            // the data-range fallback (computed below the X-axis block, shared with non-scroll).
+            var newest = _maxX;
+            var slot = 100.0 / _scrollWindow;
+            XAxisLabels.Clear();
+            // Iterate the visible turn indices from oldest (left) to newest (right) so the labels
+            // line up left-to-right with the bars. The newest bar is at index _maxX; the oldest
+            // visible one is _maxX - (_scrollWindow - 1).
+            for (int k = _scrollWindow - 1; k >= 0; k--)
+            {
+                var turnIndex = newest - k;
+                // Only label turns that actually have a plotted point (turns are 1-based and may
+                // not be contiguous if a turn produced no tokens and was skipped).
+                if (!Points.Any(pt => pt.X == turnIndex))
+                {
+                    continue;
+                }
+                var screenX = 100.0 - (newest - turnIndex + _scrollOffset) * slot + 3.5; // +3.5 = half bar width offset (matches bar positioning)
+                // Skip labels that have scrolled fully off the left edge (or not yet entered).
+                if (screenX < -5.0 || screenX > 105.0)
+                {
+                    continue;
+                }
+                XAxisLabels.Add(new XAxisLabelItem
+                {
+                    Text = ((int)turnIndex).ToString(CultureInfo.InvariantCulture),
+                    Position = screenX
+                });
+            }
+            // Keep the XAxisLabel1-6 props in sync (the XAML may bind to either).
+            for (int i = 0; i < 6; i++)
+            {
+                if (i < XAxisLabels.Count)
+                {
+                    SetXAxisLabelProp(i, XAxisLabels[i].Text, XAxisLabels[i].Position);
+                }
+                else
+                {
+                    SetXAxisLabelProp(i, string.Empty, 0.0);
+                }
+            }
+            UpdateYAxisDataRangeLabels();
+            return;
+        }
+
         if (_hasAxisRange)
         {
             // X-axis: place labels at the fill-level positions (which are evenly spaced, since the
@@ -1105,14 +1403,17 @@ public partial class TelemetryGraphViewModel : ViewModelBase
                     // Always add a final label at the axis max so the right end is covered.
                     labels.Add((_axisMaxX, axisMaxPos, FormatTokenLabel(_axisMaxX)));
 
-                    // Update the XAxisLabels collection with the new labels.
+                    // Update the XAxisLabels collection with the new labels. The final label (the
+                    // axis max, always the last entry) is flagged IsAxisMax so the code-behind can
+                    // right-align it at the axis end.
                     XAxisLabels.Clear();
-                    foreach (var label in labels)
+                    for (int li = 0; li < labels.Count; li++)
                     {
                         XAxisLabels.Add(new XAxisLabelItem
                         {
-                            Text = label.Text,
-                            Position = label.ScreenPos
+                            Text = labels[li].Text,
+                            Position = labels[li].ScreenPos,
+                            IsAxisMax = li == labels.Count - 1
                         });
                     }
 
@@ -1166,6 +1467,26 @@ public partial class TelemetryGraphViewModel : ViewModelBase
                     XAxisPos4 = 60;
                     XAxisPos5 = 80;
                     XAxisPos6 = 100;
+
+                    // Also populate the XAxisLabels collection (the code-behind positions from the
+                    // collection, not the properties). The final label (axis max) is flagged
+                    // IsAxisMax so it is right-aligned at the axis end.
+                    var evenPositions = new[] { 0.0, 20.0, 40.0, 60.0, 80.0, 100.0 };
+                    var evenTexts = new[]
+                    {
+                        XAxisLabel1, XAxisLabel2, XAxisLabel3,
+                        XAxisLabel4, XAxisLabel5, XAxisLabel6
+                    };
+                    XAxisLabels.Clear();
+                    for (int ei = 0; ei < evenTexts.Length; ei++)
+                    {
+                        XAxisLabels.Add(new XAxisLabelItem
+                        {
+                            Text = evenTexts[ei],
+                            Position = evenPositions[ei],
+                            IsAxisMax = ei == evenTexts.Length - 1
+                        });
+                    }
                 }
             }
             else
@@ -1175,11 +1496,14 @@ public partial class TelemetryGraphViewModel : ViewModelBase
             }
 
             // Y-axis: 0/25/50/75/100% of the axis max.
-            // Both graphs use round numbers (multiples of 100) for clean Y-axis labels:
+            // Both graphs use round numbers (multiples of 10) for clean Y-axis labels:
             // TTFT graph (log-scale, seconds) and Throughput graph (linear, tok/s).
             {
-                // Round the axis max up to the next multiple of 100 for clean, round Y-axis labels.
-                var roundedMaxY = Math.Ceiling(_axisMaxY / 100.0) * 100.0;
+                // Round the axis max up to the next multiple of 10 for clean, round Y-axis labels.
+                // Use a minimum of 10 to avoid the "all numbers the same" confusion when data
+                // is just starting (e.g. _axisMaxY = 0.5 would otherwise round to 10, making
+                // the labels 0/2.5/5/7.5/10 look nearly identical).
+                var roundedMaxY = Math.Max(10.0, Math.Ceiling(_axisMaxY / 10.0) * 10.0);
                 YAxisMin = "0";
                 YAxis25 = (roundedMaxY * 0.25).ToString("0", CultureInfo.InvariantCulture);
                 YAxis50 = (roundedMaxY * 0.50).ToString("0", CultureInfo.InvariantCulture);
@@ -1212,8 +1536,20 @@ public partial class TelemetryGraphViewModel : ViewModelBase
         }
 
         // X-axis: 6 evenly-spaced labels showing the actual X values at 0/20/40/60/80/100%
-        // of the data range.
+        // of the data range. The code-behind positions labels from the XAxisLabels COLLECTION
+        // (PositionAxisLabelSet), not from the XAxisLabel1-6 properties, so we must populate the
+        // collection here — otherwise the per-turn view (no fixed axis range) shows no X-axis
+        // scale at all. The XAxisLabel1-6 props are also set for completeness.
         var xRange = _maxX - _minX;
+        var xTickValues = new[]
+        {
+            _minX,
+            _minX + xRange * 0.20,
+            _minX + xRange * 0.40,
+            _minX + xRange * 0.60,
+            _minX + xRange * 0.80,
+            _maxX,
+        };
         XAxisLabel1 = _minX.ToString("0.#", CultureInfo.InvariantCulture);
         XAxisLabel2 = (_minX + xRange * 0.20).ToString("0.#", CultureInfo.InvariantCulture);
         XAxisLabel3 = (_minX + xRange * 0.40).ToString("0.#", CultureInfo.InvariantCulture);
@@ -1226,14 +1562,143 @@ public partial class TelemetryGraphViewModel : ViewModelBase
         XAxisPos4 = 60;
         XAxisPos5 = 80;
         XAxisPos6 = 100;
+        var xTickPositions = new[] { 0.0, 20.0, 40.0, 60.0, 80.0, 100.0 };
+        XAxisLabels.Clear();
+        for (int i = 0; i < xTickValues.Length; i++)
+        {
+            XAxisLabels.Add(new XAxisLabelItem
+            {
+                Text = xTickValues[i].ToString("0.#", CultureInfo.InvariantCulture),
+                Position = xTickPositions[i],
+                IsAxisMax = i == xTickValues.Length - 1
+            });
+        }
 
-        // Y-axis: show the actual Y values at 0/25/50/75/100% of the range.
-        var yRange = _maxY - _minY;
-        YAxisMin = _minY.ToString("0.#", CultureInfo.InvariantCulture);
-        YAxis25 = (_minY + yRange * 0.25).ToString("0.#", CultureInfo.InvariantCulture);
-        YAxis50 = (_minY + yRange * 0.50).ToString("0.#", CultureInfo.InvariantCulture);
-        YAxis75 = (_minY + yRange * 0.75).ToString("0.#", CultureInfo.InvariantCulture);
-        YAxisMax = _maxY.ToString("0.#", CultureInfo.InvariantCulture);
+        // Y-axis: show the actual Y values at 0/25/50/75/100% of the effective range.
+        // Use the effective Y-axis range (from GetEffectiveYAxisRange) so the Y-axis labels
+        // align with the bar positions (which also use the effective range).
+        GetEffectiveYAxisRange(out var yMin, out var yMax);
+        var yRange = yMax - yMin;
+        YAxisMin = yMin.ToString("0.#", CultureInfo.InvariantCulture);
+        YAxis25 = (yMin + yRange * 0.25).ToString("0.#", CultureInfo.InvariantCulture);
+        YAxis50 = (yMin + yRange * 0.50).ToString("0.#", CultureInfo.InvariantCulture);
+        YAxis75 = (yMin + yRange * 0.75).ToString("0.#", CultureInfo.InvariantCulture);
+        YAxisMax = yMax.ToString("0.#", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Computes the effective Y-axis range [yMin, yMax] for the current data. Used by both the
+    /// Y-axis label computation and the bar positioning so they always agree. In scroll mode,
+    /// the max is _maxY * 1.25 (rounded up to the next multiple of 10); in non-scroll mode, it's
+    /// _axisMaxY. The min is _yAxisMinOffset (if set and less than the max), otherwise 0.
+    /// </summary>
+    private void GetEffectiveYAxisRange(out double yMin, out double yMax)
+    {
+        if (!_hasData)
+        {
+            yMin = 0;
+            yMax = 1;
+            return;
+        }
+
+        // In scroll mode (live per-turn view), _axisMaxY is not updated (it's only set in
+        // SetAxisRange for the stress test). Use _maxY (the actual data max) instead. In
+        // non-scroll mode, _axisMaxY may include padding (if SetAxisRange was called), but it
+        // defaults to 1 if SetAxisRange was not called. Use the max of _axisMaxY and _maxY to
+        // ensure the range always covers the data.
+        var dataMax = _scrollMode ? _maxY : Math.Max(_axisMaxY, _maxY);
+
+        // Apply the Y-axis minimum offset (if set). The Y-axis starts at _yAxisMinOffset
+        // instead of 0, so the range is [_yAxisMinOffset, yMax]. If the offset is
+        // >= the data max (e.g. at turn 1 when data is just starting and below the offset),
+        // fall back to 0 to avoid a negative/zero range.
+        yMin = _yAxisMinOffset;
+        if (dataMax - yMin <= 0)
+        {
+            yMin = 0;
+        }
+
+        // Reserve headroom above the tallest bar for its value label. The tallest bar (value
+        // = dataMax) should sit at screen position (1 - headroomFraction) * 100, leaving
+        // headroomFraction * 100 of the chart height above it for the label.
+        //
+        // For LINEAR scale: solve (dataMax - yMin) / (yMax - yMin) = 1 - headroom
+        //   yMax = yMin + (dataMax - yMin) / (1 - headroom)
+        //
+        // For LOG scale: solve (log(dataMax) - log(yMin)) / (log(yMax) - log(yMin)) = 1 - headroom
+        //   log(yMax) = log(yMin) + (log(dataMax) - log(yMin)) / (1 - headroom)
+        //   yMax = 10^(log(yMin) + (log(dataMax) - log(yMin)) / (1 - headroom))
+        //
+        // If no headroom is reserved, yMax = dataMax (the old behavior).
+        var headroom = Math.Clamp(_labelHeadroomFraction, 0.0, 0.5);
+        double rawYMax;
+        if (headroom > 0)
+        {
+            // Linear-scale headroom: the tallest bar's position is on a linear scale, so the
+            // headroom is computed in linear space to ensure the bar sits at the right screen
+            // position.
+            rawYMax = yMin + (dataMax - yMin) / (1.0 - headroom);
+        }
+        else
+        {
+            rawYMax = dataMax;
+        }
+
+        // Round the axis max up to the next multiple of 10 for clean, round Y-axis labels.
+        // Use a minimum of 10 to avoid the "all numbers the same" confusion when data
+        // is just starting.
+        yMax = Math.Max(10.0, Math.Ceiling(rawYMax / 10.0) * 10.0);
+
+        // Guard: if rounding pushed yMax back below the data max (shouldn't happen, but be
+        // safe), bump it up one more step of 10.
+        if (yMax <= dataMax)
+        {
+            yMax = Math.Ceiling((dataMax + 1) / 10.0) * 10.0;
+        }
+    }
+
+    /// <summary>
+    /// Sets the Y-axis labels from the data's own Y range (0/25/50/75/100% of [minY, maxY]).
+    /// Used by the no-fixed-axis-range paths (the live per-turn scroll view and the generic
+    /// data-range fallback). When no data exists, shows the default 0..1 scale.
+    /// </summary>
+    private void UpdateYAxisDataRangeLabels()
+    {
+        if (!_hasData)
+        {
+            YAxisMin = "0";
+            YAxis25 = "0.25";
+            YAxis50 = "0.5";
+            YAxis75 = "0.75";
+            YAxisMax = "1";
+            return;
+        }
+
+        GetEffectiveYAxisRange(out var yMin, out var yMax);
+        var yRange = yMax - yMin;
+
+        YAxisMin = yMin.ToString("0", CultureInfo.InvariantCulture);
+        YAxis25 = (yMin + yRange * 0.25).ToString("0", CultureInfo.InvariantCulture);
+        YAxis50 = (yMin + yRange * 0.50).ToString("0", CultureInfo.InvariantCulture);
+        YAxis75 = (yMin + yRange * 0.75).ToString("0", CultureInfo.InvariantCulture);
+        YAxisMax = yMax.ToString("0", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Sets the Nth X-axis label property pair (XAxisLabelN / XAxisPosN) by zero-based index.
+    /// Used to keep the XAxisLabel1-6 properties in sync with the XAxisLabels collection.
+    /// </summary>
+    private void SetXAxisLabelProp(int index, string text, double position)
+    {
+        switch (index)
+        {
+            case 0: XAxisLabel1 = text; XAxisPos1 = position; break;
+            case 1: XAxisLabel2 = text; XAxisPos2 = position; break;
+            case 2: XAxisLabel3 = text; XAxisPos3 = position; break;
+            case 3: XAxisLabel4 = text; XAxisPos4 = position; break;
+            case 4: XAxisLabel5 = text; XAxisPos5 = position; break;
+            case 5: XAxisLabel6 = text; XAxisPos6 = position; break;
+        }
     }
 
     /// <summary>

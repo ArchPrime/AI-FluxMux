@@ -42,6 +42,9 @@ public sealed class UpdaterForm : Form
             Text = title,
             Font = new Font("Segoe UI", 12F, FontStyle.Bold),
             AutoSize = true,
+            // MaximumSize is set below from a DPI-aware measurement so a long title
+            // truncates instead of widening the dialog past the progress bar.
+            AutoEllipsis = true,
             Margin = new Padding(0, 0, 0, 6)
         };
 
@@ -49,6 +52,11 @@ public sealed class UpdaterForm : Form
         {
             Text = "Starting...",
             AutoSize = true,
+            // MaximumSize is set below from a DPI-aware measurement. Status lines come
+            // from console output and can be long; without a cap the label grows wider
+            // than the progress bar, the GrowOnly FlowLayoutPanel widens, and the form
+            // overflows the dialog. Capping + AutoEllipsis keeps the dialog width fixed.
+            AutoEllipsis = true,
             Margin = new Padding(0, 0, 0, 6)
         };
 
@@ -111,6 +119,8 @@ public sealed class UpdaterForm : Form
         uiFont.Dispose();
 
         _progressBar.Width = contentWidth;
+        _titleLabel.MaximumSize = new Size(contentWidth, 0);
+        _statusLabel.MaximumSize = new Size(contentWidth, 0);
         _detailLabel.MaximumSize = new Size(contentWidth, 0);
 
         // Stack content top-to-bottom. A FlowLayoutPanel (TopDown) sizes itself to

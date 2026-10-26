@@ -13,9 +13,9 @@ public partial class AnimatedAppLogo : UserControl
         AvaloniaProperty.Register<AnimatedAppLogo, bool>(nameof(IsPlaying));
 
     private const int FrameCount = 8;
-    private const double TurnSeconds = 4.0;
+    private const double TurnSeconds = 1.5;
 
-    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(50) };
+    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromMilliseconds(25) };
     private readonly Bitmap?[] _frames = new Bitmap?[FrameCount];
     private DateTime _startedUtc;
     private bool _running;

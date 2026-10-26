@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableExtensions EnableDelayedExpansion
 
 :: Taskbar / Start Menu shortcut entry.
 ::
@@ -29,12 +29,39 @@ for /f "delims=" %%D in ('where dotnet.exe 2^>nul') do (
     if not defined DOTNET_EXE set "DOTNET_EXE=%%D"
 )
 
+rem If not found on PATH, check the common installation location
 if not defined DOTNET_EXE (
-    if "%USE_MASTER%"=="1" goto :dotnet_ok
-    echo ERROR: dotnet.exe not found on PATH.
-    exit /b 1
+    if exist "C:\Program Files\dotnet\dotnet.exe" set "DOTNET_EXE=C:\Program Files\dotnet\dotnet.exe"
+)
+
+if not defined DOTNET_EXE (
+    if "!USE_MASTER!"=="1" goto :dotnet_found
+    goto :dotnet_error
+) else (
+    goto :dotnet_found
 )
 :dotnet_ok
+
+:dotnet_error
+echo.
+echo ERROR: .NET 10 SDK not found.
+echo.
+echo AI-FluxMux requires the .NET 10 SDK to build and run from source.
+echo.
+echo To install the .NET 10 SDK:
+echo   1. Open this URL in your browser:
+echo      https://dotnet.microsoft.com/download/dotnet/10.0
+echo   2. Download the ".NET SDK 10.0" (64-bit x64)
+echo   3. Install it, then run this script again.
+echo.
+echo Alternatively, if you have a pre-built release zip, you can run
+echo FluxMux.Avalonia.exe directly without the SDK (it only needs the
+echo .NET 10 Desktop Runtime, not the full SDK).
+echo.
+pause
+exit /b 1
+
+:dotnet_found
 
 if not exist "%AVALONIA_PROJECT%" (
     if "%USE_MASTER%"=="1" goto :proj_ok

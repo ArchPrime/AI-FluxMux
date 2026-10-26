@@ -88,6 +88,7 @@ public static class HelpTopicIds
 {
     public const string Prefix = "topic.";
     public const string PortRules = "topic.port_rules";
+    public const string Diagnostics = "topic.diagnostics";
 }
 
 public sealed class HelpDocument

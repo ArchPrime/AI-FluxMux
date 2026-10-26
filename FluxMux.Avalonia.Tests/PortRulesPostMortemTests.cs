@@ -151,6 +151,47 @@ public sealed class PortRulesPostMortemTests
     }
 
     [Fact]
+    public void Hang_long_load_first_byte_names_long_load_and_reports_actual_deadline()
+    {
+        // A long-load / YaRN spill prefill: the first-byte deadline is the long-load
+        // thinking window (600s), not the normal think budget. The post-mortem must NOT
+        // mislabel it as "Max think first-byte (limit 180)" — it should name the
+        // long-load first-byte timeout and report the actual 600s deadline.
+        var text = PortRulesPostMortem.FormatHang(
+            LocalStreamHangPolicy.FirstByteReason,
+            quietSeconds: 899,
+            waitLongerCount: 0,
+            firstByteDeadlineSeconds: 600,
+            PortForwardingRules.Defaults,
+            localModelReady: true,
+            portRulesActive: false);
+        Assert.Contains("Long-load first-byte", text);
+        // Reports the actual long-load deadline (600s), not the 180 think-budget cap.
+        Assert.Contains("(the limit is 600)", text);
+        // Names the situation as a slow / RAM-spilled prefill, not a think-budget overrun.
+        Assert.Contains("still prefilling a large (RAM-spilled) prompt", text);
+        // Must NOT mislabel it as the think-budget cap.
+        Assert.DoesNotContain("**Max think first-byte**", text);
+    }
+
+    [Fact]
+    public void Hang_long_load_first_byte_below_thinking_window_still_names_think_budget()
+    {
+        // A deadline at the think-budget cap (180s) but below the long-load window (600s)
+        // is still a "Max think first-byte" case, not a long-load prefill.
+        var text = PortRulesPostMortem.FormatHang(
+            LocalStreamHangPolicy.FirstByteReason,
+            quietSeconds: 180,
+            waitLongerCount: 0,
+            firstByteDeadlineSeconds: 180,
+            PortForwardingRules.Defaults,
+            localModelReady: true,
+            portRulesActive: false);
+        Assert.Contains("**Max think first-byte**", text);
+        Assert.DoesNotContain("Long-load first-byte", text);
+    }
+
+    [Fact]
     public void Hang_after_wait_longer_names_Wait_longer_seconds()
     {
         var text = PortRulesPostMortem.FormatHang(
@@ -229,7 +270,7 @@ public sealed class PortRulesPostMortemTests
     public void Context_overflow_names_Headroom_and_says_Compact_cannot_fix_this_turn()
     {
         var text = PortRulesPostMortem.FormatContextOverflow(compactApplied: true, PortForwardingRules.Defaults);
-        Assert.Contains("this turn was too large for the loaded Context", text);
+        Assert.Contains("it was too large to fit into the remaining Context space", text);
         Assert.Contains("**Headroom**", text);
         Assert.Contains("**Watermark %**", text);
         Assert.Contains("will trigger compaction earlier on future turns", text);
@@ -360,9 +401,8 @@ public sealed class PortRulesPostMortemTests
             compactApplied: false,
             PortForwardingRules.Defaults,
             portRulesActive: false);
-        Assert.Contains("this turn was too large for the loaded Context", text);
-        Assert.Contains(PortRulesPostMortem.RaiseContextAdvice, text);
-        Assert.Contains(PortRulesPostMortem.SmallerNextStepAdvice, text);
+        Assert.Contains("it was too large to fit into the remaining Context space", text);
+        Assert.Contains("Consider a simpler request", text);
         Assert.DoesNotContain("Port rule", text, StringComparison.Ordinal);
         Assert.DoesNotContain("Port-rule", text, StringComparison.Ordinal);
         Assert.DoesNotContain("**Headroom**", text, StringComparison.Ordinal);

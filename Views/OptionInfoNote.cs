@@ -22,12 +22,22 @@ public sealed class OptionInfoNote : UserControl
     public static readonly StyledProperty<bool> StartDismissedProperty =
         AvaloniaProperty.Register<OptionInfoNote, bool>(nameof(StartDismissed));
 
+    /// <summary>
+    /// Optional text rendered immediately before the "More info" link, on the same line,
+    /// so the link is contextualised (e.g. "See other display scenarios: [More info]").
+    /// Empty means no lead-in label.
+    /// </summary>
+    public static readonly StyledProperty<string?> LinkLabelProperty =
+        AvaloniaProperty.Register<OptionInfoNote, string?>(nameof(LinkLabel));
+
     private const string BulletMarker = HelpHtmlParser.NoteBullet;
 
     private readonly StackPanel _body;
     private readonly Button _hide;
     private readonly Button _more;
     private readonly Grid _expanded;
+    private readonly StackPanel _labelRow;
+    private readonly TextBlock _linkLabel;
     private OptionInfoDismissalStore? _store;
 
     static OptionInfoNote()
@@ -35,6 +45,7 @@ public sealed class OptionInfoNote : UserControl
         InfoIdProperty.Changed.AddClassHandler<OptionInfoNote>((note, _) => note.Refresh());
         NoteTextProperty.Changed.AddClassHandler<OptionInfoNote>((note, _) => note.Refresh());
         StartDismissedProperty.Changed.AddClassHandler<OptionInfoNote>((note, _) => note.Refresh());
+        LinkLabelProperty.Changed.AddClassHandler<OptionInfoNote>((note, _) => note.RefreshLabel());
     }
 
     public OptionInfoNote()
@@ -45,6 +56,22 @@ public sealed class OptionInfoNote : UserControl
         _more = CreateChromeButton(OptionInfoDismissalStore.MoreInfoLabel);
         _more.Click += (_, _) => Store.Show(InfoId);
         _more.HorizontalAlignment = HorizontalAlignment.Left;
+
+        _linkLabel = new TextBlock
+        {
+            FontSize = 11,
+            Opacity = 0.82,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsVisible = false
+        };
+
+        // The label sits on its own line, above the expanded text and the "More info"/"Hide"
+        // link, so it stays visible whether the note is open or closed.
+        _labelRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Children = { _linkLabel }
+        };
 
         _expanded = new Grid
         {
@@ -59,7 +86,7 @@ public sealed class OptionInfoNote : UserControl
         Content = new StackPanel
         {
             Spacing = 4,
-            Children = { _expanded, _more }
+            Children = { _labelRow, _expanded, _more }
         };
 
         AttachedToVisualTree += OnAttached;
@@ -84,7 +111,20 @@ public sealed class OptionInfoNote : UserControl
         set => SetValue(StartDismissedProperty, value);
     }
 
+    public string? LinkLabel
+    {
+        get => GetValue(LinkLabelProperty);
+        set => SetValue(LinkLabelProperty, value);
+    }
+
     private OptionInfoDismissalStore Store => _store ?? OptionInfoDismissalStore.Current;
+
+    private void RefreshLabel()
+    {
+        var label = LinkLabel;
+        _linkLabel.Text = label ?? string.Empty;
+        _linkLabel.IsVisible = !string.IsNullOrWhiteSpace(label);
+    }
 
     private void OnAttached(object? sender, VisualTreeAttachmentEventArgs e)
     {
@@ -130,6 +170,9 @@ public sealed class OptionInfoNote : UserControl
         var expanded = Store.IsNoteVisible(InfoId, StartDismissed);
         _expanded.IsVisible = expanded;
         _more.IsVisible = !expanded;
+        // The label row is independent of the link, so it stays visible whether the note is
+        // collapsed or expanded; only the "More info"/"Hide" link toggles.
+        _labelRow.IsVisible = _linkLabel.IsVisible;
     }
 
     /// <summary>

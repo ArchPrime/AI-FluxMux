@@ -1,4 +1,4 @@
-AI-FluxMux 0.2.2 beta
+AI-FluxMux 0.3.2 beta
 =====================
 
 WHAT YOU NEED BEFORE RUNNING
@@ -20,7 +20,7 @@ WHAT YOU NEED BEFORE RUNNING
 
 WHERE THE LAUNCH FILE IS (and why it differs)
 ---------------------------------------------
-- Release zip (normal install): after you unzip AI-FluxMux-0.2.2-beta, the launch
+- Release zip (normal install): after you unzip AI-FluxMux-0.3.2-beta, the launch
   file is in the ROOT of that folder:
       <folder>\FluxMux.Avalonia.exe
   This is the normal case. Double-click it.
@@ -38,7 +38,7 @@ WHERE THE LAUNCH FILE IS (and why it differs)
 
 HOW TO START (release zip)
 --------------------------
-1. This file is inside the unzipped AI-FluxMux-0.2.2-beta folder. Keep that folder
+1. This file is inside the unzipped AI-FluxMux-0.3.2-beta folder. Keep that folder
    somewhere you own (for example C:\AI-FluxMux). Do not use Program Files — Help
    updates write next to the program.
 2. In that same folder, double-click FluxMux.Avalonia.exe. Windows SmartScreen may

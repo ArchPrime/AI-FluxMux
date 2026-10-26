@@ -39,7 +39,7 @@ public sealed class DisplayAdapterLabelingTests
     {
         var notes = DisplayAdapterLabeling.FormatNotesColumn("NVIDIA GeForce RTX 4090");
 
-        Assert.Equal("main graphics card: dedicated VRAM — local models can use this", notes);
+        Assert.Equal("main graphics card: dedicated VRAM — local models strongly prefer this", notes);
         Assert.DoesNotContain('\n', notes);
     }
 

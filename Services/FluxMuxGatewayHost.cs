@@ -92,6 +92,20 @@ public sealed class FluxMuxGatewayHost : IDisposable
     public Func<string, string, int?>? GetLocalMaxForwardedImages { get; set; }
     public Func<string, string, (int Context, string Offload)>? GetLocalProfileContextAndOffload { get; set; }
 
+    /// <summary>
+    /// Per-profile forward-prune toggle ("LocalForwardPruneEnabled", default on). Read live each
+    /// turn so it can be switched mid-chat without a reload. Returns null when the profile cannot
+    /// be resolved (treated as on, the default).
+    /// </summary>
+    public Func<string, string, bool?>? GetForwardPruneEnabled { get; set; }
+
+    /// <summary>
+    /// Raised when the armed Hail Mary rear-prune is actually consumed on a turn (success or
+    /// no-op), so the UI can clear the "queued" pulse and refresh the context gauge with the new
+    /// (smaller) prompt-token count. Fires exactly once per armed prune.
+    /// </summary>
+    public Action<int>? ReportHailMaryApplied { get; set; }
+
     public Action<string>? ReportPortRulesPostMortem { get; set; }
 
     public Action<PortRulesTelemetry>? ReportPortRulesTelemetry { get; set; }
@@ -110,10 +124,18 @@ public sealed class FluxMuxGatewayHost : IDisposable
     public Action<string>? ReportHailMaryOffer { get; set; }
 
     /// <summary>
-    /// Returns and clears the pending Hail Mary middle-cut request. When true, the next
-    /// local forward applies the stage-5 middle-cut to the payload before sending.
+    /// Returns and clears the armed Hail Mary REAR-context prune choice (stop + image-strip).
+    /// When armed, the next local forward applies the rear-context prune to the payload before
+    /// sending, using the chosen one-off aggression stop.
     /// </summary>
-    public Func<bool>? ConsumeHailMaryMiddleCut { get; set; }
+    public Func<(HailMaryCompaction.HailMaryAggression Stop, bool StripImages)>? ConsumeHailMaryMiddleCut { get; set; }
+
+    /// <summary>
+    /// Raised for every gateway log line (Hail Mary results, forward-prune results, context
+    /// measurements, route decisions, etc.) so the UI diagnostic terminal can show them live.
+    /// This is the "report results to terminal" path: previously Log() only wrote to a file.
+    /// </summary>
+    public Action<string>? ReportLog { get; set; }
 
     public GenerationSpeedTracker? GenerationSpeed
     {
@@ -529,6 +551,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         // safety check below still runs so the test can observe the real "context too small"
         // behavior at high fill.
         var compactApplied = isProbeRequest ? false : TryApplyForwardCompact(payload, state, compactOn);
+
         OfferDocumentContextDialogIfNeeded(state, payload, compactApplied, isProbeRequest);
         var reloadOffered = false;
         var decision = FluxMuxGatewayRouting.DecideRoute(state, payload, forceRoute);
@@ -639,8 +662,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
         var localReasoningForResponse = routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
             ? Str(state, "local_reasoning", "Off")
             : null;
+        var turnStart = DateTime.Now;
         if (routeKind == "local")
         {
+            Log("[turn] start · model=" + Str(state, "local_preferred_model")
+                + " variant=" + Str(state, "local_variant")
+                + " context=" + ParseInt(Str(state, "local_context"), 0).ToString(CultureInfo.InvariantCulture));
             await PrepareLocalChatPayloadAsync(payload, state).ConfigureAwait(false);
             var overlay = LocalRequestOverlayRouting.Pick(state, payload, requested);
             overlayVariant = overlay?["variant"]?.ToString();
@@ -673,10 +700,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
             int? measuredPromptTokens = null;
             if (localPort > 0 && hotContext > 0)
             {
+                Log("[turn] measuring prompt tokens (llama-server /input_tokens) …");
                 measuredPromptTokens = await LocalPromptTokenCounter.CountAsync(
                     localPort,
                     payload,
                     Str(state, "local_preferred_model")).ConfigureAwait(false);
+                Log("[turn] prompt tokens measured in " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms (cumulative since turn start)");
                 if (measuredPromptTokens is not null)
                 {
                     Log("local prompt tokens (measured): "
@@ -689,6 +718,29 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         measuredPromptTokens.Value,
                         hotContext,
                         Str(state, "local_preferred_model"));
+                }
+            }
+
+            // Forward pruning: a per-turn fill throttle. On EVERY local turn, as it happens, trim
+            // the turn's own waste (dedupe, collapse repeated tool loops, truncate oversized older
+            // tool results) so the context fills more slowly. This is NOT conventional compaction
+            // (which summarizes older turns at a threshold) and NOT Hail Mary (one-off emergency
+            // rear-prune) — it is a distinct, conservative, always-on mechanism. It is gated on the
+            // per-profile "LocalForwardPruneEnabled" toggle (default on) so it can be turned off
+            // mid-chat without a reload. Uses the model's measured token count when available.
+            //
+            // NOTE: this does NOT re-measure the prompt after pruning. Re-measuring is a network
+            // round-trip to llama-server (LocalPromptTokenCounter.CountAsync → POST
+            // /input_tokens), and doing it on every pruned turn would add a full extra call to the
+            // model per turn — a significant speed hit. The prune itself is a cheap in-memory JSON
+            // edit; the gauge refresh is not worth an extra llama-server call each turn. The next
+            // turn's own measurement will reflect the pruned history anyway.
+            if (!isProbeRequest && hotContext > 0 && GetForwardPruneEnabled?.Invoke(model, Str(state, "local_variant")) == true)
+            {
+                var forwardPruned = ForwardPrune.PruneTurn(payload, hotContext, measuredPromptTokens);
+                if (forwardPruned.Pruned)
+                {
+                    Log("forward-prune: " + forwardPruned.DiagnosticsLine);
                 }
             }
 
@@ -705,15 +757,27 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // Hail Mary stage-5 middle-cut: if the user clicked the Hail Mary button after a
             // context-overflow 400, apply the destructive middle-cut to this payload before
             // sending. This is the one-shot retry that gives the turn a chance to fit.
-            if (!isProbeRequest && ConsumeHailMaryMiddleCut?.Invoke() == true)
+            //
+            // The middle-cut is now token-driven: it drops the oldest (least useful) turns until
+            // the prompt fits under the target, keeping at least MiddleCutKeepTurns recent turns
+            // for conversational context. This scales with chat length — in a 500-turn chat it
+            // drops hundreds of turns; in a 12-turn chat it drops only what is needed.
+            if (!isProbeRequest && ConsumeHailMaryMiddleCut is not null)
             {
+                var (hailStop, hailStripImages) = ConsumeHailMaryMiddleCut.Invoke();
                 var hotContextForHailMary = ParseInt(Str(state, "local_context"), 0);
                 if (hotContextForHailMary > 0)
                 {
-                    var hailMary = HailMaryCompaction.Salvage(payload, hotContextForHailMary, allowMiddleCut: true);
-                    if (hailMary.MiddleCutDropped > 0)
+                    // Manual, one-off REAR-context prune: drop older conversational turns so the
+                    // full forward turn can complete with the headroom the chosen stop requests.
+                    // The system prompt, last real user task, and active tool-pair are preserved.
+                    // Pass the model's measured token count (when available) so the prune's
+                    // before/target check uses the real count, not the over-counting estimate
+                    // (which made the prune a no-op on dense tokenizers like Qwen).
+                    var hailMary = HailMaryCompaction.RearContextPrune(payload, hotContextForHailMary, hailStop, hailStripImages, measuredPromptTokens);
+                    if (hailMary.MiddleCutDropped > 0 || hailMary.ImagesStripped > 0)
                     {
-                        Log("hail-mary (button): " + hailMary.DiagnosticsLine);
+                        Log("hail-mary (button, " + hailStop + ", stripImages=" + hailStripImages + "): " + hailMary.DiagnosticsLine);
                         var hailInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
                         if (hailInserted > 0)
                         {
@@ -722,7 +786,31 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     }
                     else
                     {
-                        Log("hail-mary (button): middle-cut could not drop any turns (too few turns or tool-pair-locked)");
+                        Log("hail-mary (button, " + hailStop + "): rear-context prune could not drop any turns (too few turns or tool-pair-locked)");
+                    }
+
+                    // The armed rear-prune has now actually occurred (whether it dropped turns or
+                    // was a no-op). Report back so the UI clears the "queued" pulse and refreshes
+                    // the context gauge with the new (smaller) prompt-token count. Re-measure when
+                    // a daemon port is available so the gauge reflects the pruned prompt.
+                    int? gaugeTokens = measuredPromptTokens;
+                    var hailLocalPort = ParseInt(Str(state, "local_port"), 0);
+                    if (hailLocalPort > 0)
+                    {
+                        var reMeasured = await LocalPromptTokenCounter.CountAsync(
+                            hailLocalPort,
+                            payload,
+                            Str(state, "local_preferred_model")).ConfigureAwait(false);
+                        if (reMeasured is not null)
+                        {
+                            gaugeTokens = reMeasured;
+                            measuredPromptTokens = reMeasured;
+                        }
+                    }
+                    if (gaugeTokens is not null)
+                    {
+                        ReportContextUsage?.Invoke(gaugeTokens.Value, hotContextForHailMary, Str(state, "local_preferred_model"));
+                        ReportHailMaryApplied?.Invoke(gaugeTokens.Value);
                     }
                 }
             }
@@ -1282,6 +1370,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             }
             using var timeoutCts = new CancellationTokenSource();
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+            Log("[turn] sending to " + routeKind + " model (timeout " + timeoutSec + "s) · cumulative " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms since turn start");
             HttpResponseMessage? response = null;
             var loadingRetries = 0;
             string? loadingDetail = null;
@@ -2290,7 +2379,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // pipeline (stages 1-4: dedupe, loop-collapse, result-truncate, image-strip)
             // fixes without a model round-trip. Run it automatically as a last resort.
             // Stage 5 (the blunt middle-cut) stays behind the operator's button.
-            var hailMary = HailMaryCompaction.Salvage(payload, hotContext, rules.CompactHeadroom, allowMiddleCut: false);
+            var hailMary = HailMaryCompaction.Salvage(payload, hotContext, rules.CompactHeadroom, allowMiddleCut: false, stripImages: false);
             if (hailMary.TokensSaved > 0)
             {
                 Log("hail-mary: " + hailMary.DiagnosticsLine);
@@ -2430,15 +2519,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
         else if (urgency == 2)
         {
-            reason = "Context warning: heavy RAM usage (very slow) — compact now?";
+            reason = "Context warning: most of this chat's context is running in slow RAM (very slow) — compact now to pull it back onto the graphics card?";
         }
         else if (urgency == 1)
         {
-            reason = "Context warning: spilling into RAM (slower) — compact now to pull back onto VRAM?";
+            reason = "Context warning: part of this chat's context has spilled into RAM (slower) — compact now to pull it back onto the graphics card?";
         }
         else
         {
-            reason = "Context warning: now approaching VRAM limit — compact to stay fast?";
+            reason = "Context warning: the graphics-card portion of this chat's context is nearly full — compact to keep the working set on the fast card?";
         }
 
         SaveLocalReload(new JsonObject
@@ -3387,6 +3476,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
             {
                 File.AppendAllText(_logPath, $"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
             }
+        }
+        catch
+        {
+        }
+
+        // Surface the line to the UI diagnostic terminal so Hail Mary / forward-prune / context
+        // results are visible live (previously Log() only wrote to a file).
+        try
+        {
+            ReportLog?.Invoke(message);
         }
         catch
         {

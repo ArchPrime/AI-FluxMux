@@ -1,4 +1,4 @@
-# AI-FluxMux 0.3.0 beta
+# AI-FluxMux 0.3.2 beta
 
 Desktop router for local and cloud models. Designed for any OpenAI-compatible Client app (Cline, DeepSeek Harness, and similar). Extensive control, turn by turn, or per stored model profile, or via port rules, over model behavior. Model tuning wizard, model switch testing, YaRN context extension and more.
 
@@ -18,9 +18,9 @@ Desktop router for local and cloud models. Designed for any OpenAI-compatible Cl
 ## Install (Release zip)
 
 1. Download the app zip. Use this direct link (it skips the GitHub releases page, whose asset list can fail to load):
-   [AI-FluxMux-0.3.0-beta.zip](https://github.com/ArchPrime/AI-FluxMux/releases/download/v0.3.0-beta/AI-FluxMux-0.3.0-beta.zip)
-   It is about 76 MB. Do **not** use the "Source code (zip)" download on the repo's Code menu — that is the source to build from, not the app, and it has no ready-to-run exe.
-2. Unzip it. You get a folder named `AI-FluxMux-0.3.0-beta`. Move or open that folder somewhere you own (for example `C:\AI-FluxMux`). Do not use Program Files — Help updates write next to the program, and Windows will refuse that there.
+   [AI-FluxMux-0.3.2-beta.zip](https://github.com/ArchPrime/AI-FluxMux/releases/download/v0.3.2-beta/AI-FluxMux-0.3.2-beta.zip)
+   It is about 85 MB. Do **not** use the "Source code (zip)" download on the repo's Code menu — that is the source to build from, not the app, and it has no ready-to-run exe.
+2. Unzip it. You get a folder of files (no nested subfolder). Move or open that folder somewhere you own (for example `C:\AI-FluxMux`). Do not use Program Files — Help updates write next to the program, and Windows will refuse that there.
 3. Double-click `FluxMux.Avalonia.exe` **inside that unzipped folder**. If Windows SmartScreen appears, choose **More info**, then **Run anyway**. This build is not code-signed.
 4. Open the **Help** tab in AI-FluxMux and follow the instructions there. In a nutshell:
    - Install the latest `llama-server` version for your GPU (don't forget the CUDA DLLs if applicable).
@@ -39,7 +39,7 @@ Do not copy `fluxmux_config.json` or `fluxmux_secrets.json` from a development P
 Publishing into `artifacts\publish` is safe while the Debug window is open:
 
 ```
-dotnet publish -c Release -p:PublishProfile=win-x64-selfcontained -o artifacts\publish\AI-FluxMux-0.3.0-beta
+dotnet publish -c Release -p:PublishProfile=win-x64-selfcontained -o artifacts\publish\AI-FluxMux-0.3.2-beta
 ```
 
 Zip that folder. Do not launch the daily app from `artifacts\`.
