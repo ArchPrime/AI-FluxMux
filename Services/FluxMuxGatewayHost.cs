@@ -126,9 +126,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// <summary>
     /// Returns and clears the armed Hail Mary REAR-context prune choice (stop + image-strip).
     /// When armed, the next local forward applies the rear-context prune to the payload before
-    /// sending, using the chosen one-off aggression stop.
+    /// sending, using the chosen one-off aggression stop. The <c>WasArmed</c> flag is true only
+    /// when the user actually clicked the button; when false the gateway skips the prune entirely.
     /// </summary>
-    public Func<(HailMaryCompaction.HailMaryAggression Stop, bool StripImages)>? ConsumeHailMaryMiddleCut { get; set; }
+    public Func<(HailMaryCompaction.HailMaryAggression Stop, bool StripImages, bool WasArmed)>? ConsumeHailMaryMiddleCut { get; set; }
 
     /// <summary>
     /// Raised for every gateway log line (Hail Mary results, forward-prune results, context
@@ -663,11 +664,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
             ? Str(state, "local_reasoning", "Off")
             : null;
         var turnStart = DateTime.Now;
+        int? measuredPromptTokens = null;
+        string? forwardPruneSummary = null;
         if (routeKind == "local")
         {
-            Log("[turn] start · model=" + Str(state, "local_preferred_model")
-                + " variant=" + Str(state, "local_variant")
-                + " context=" + ParseInt(Str(state, "local_context"), 0).ToString(CultureInfo.InvariantCulture));
             await PrepareLocalChatPayloadAsync(payload, state).ConfigureAwait(false);
             var overlay = LocalRequestOverlayRouting.Pick(state, payload, requested);
             overlayVariant = overlay?["variant"]?.ToString();
@@ -697,15 +697,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // is the active model/variant, both of which change per profile. Switching profiles
             // therefore yields a different, correct count automatically.
             var localPort = ParseInt(Str(state, "local_port"), 0);
-            int? measuredPromptTokens = null;
             if (localPort > 0 && hotContext > 0)
             {
-                Log("[turn] measuring prompt tokens (llama-server /input_tokens) …");
                 measuredPromptTokens = await LocalPromptTokenCounter.CountAsync(
                     localPort,
                     payload,
                     Str(state, "local_preferred_model")).ConfigureAwait(false);
-                Log("[turn] prompt tokens measured in " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms (cumulative since turn start)");
                 if (measuredPromptTokens is not null)
                 {
                     Log("local prompt tokens (measured): "
@@ -738,10 +735,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
             if (!isProbeRequest && hotContext > 0 && GetForwardPruneEnabled?.Invoke(model, Str(state, "local_variant")) == true)
             {
                 var forwardPruned = ForwardPrune.PruneTurn(payload, hotContext, measuredPromptTokens);
-                if (forwardPruned.Pruned)
-                {
-                    Log("forward-prune: " + forwardPruned.DiagnosticsLine);
-                }
+                forwardPruneSummary = forwardPruned.Pruned
+                    ? "pruned " + forwardPruned.TokensSaved + " tokens (" + string.Join(", ", forwardPruned.Stages.Select(s => s.Split(':')[0].Trim())) + ")"
+                    : "nothing to prune";
             }
 
             if (!compactApplied && !isProbeRequest)
@@ -764,10 +760,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // drops hundreds of turns; in a 12-turn chat it drops only what is needed.
             if (!isProbeRequest && ConsumeHailMaryMiddleCut is not null)
             {
-                var (hailStop, hailStripImages) = ConsumeHailMaryMiddleCut.Invoke();
-                var hotContextForHailMary = ParseInt(Str(state, "local_context"), 0);
-                if (hotContextForHailMary > 0)
+                var (hailStop, hailStripImages, hailWasArmed) = ConsumeHailMaryMiddleCut.Invoke();
+                // Only run the rear-prune when the user actually armed it (clicked the button).
+                // Previously this ran on every turn and logged a no-op each time, cluttering the
+                // terminal. Now it's a true one-off.
+                if (hailWasArmed)
                 {
+                    var hotContextForHailMary = ParseInt(Str(state, "local_context"), 0);
+                    if (hotContextForHailMary > 0)
+                    {
                     // Manual, one-off REAR-context prune: drop older conversational turns so the
                     // full forward turn can complete with the headroom the chosen stop requests.
                     // The system prompt, last real user task, and active tool-pair are preserved.
@@ -777,7 +778,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     var hailMary = HailMaryCompaction.RearContextPrune(payload, hotContextForHailMary, hailStop, hailStripImages, measuredPromptTokens);
                     if (hailMary.MiddleCutDropped > 0 || hailMary.ImagesStripped > 0)
                     {
-                        Log("hail-mary (button, " + hailStop + ", stripImages=" + hailStripImages + "): " + hailMary.DiagnosticsLine);
+                        Log("hail-mary (" + hailStop + (hailStripImages ? ", strip-img" : "") + "): " + hailMary.DiagnosticsLine);
                         var hailInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
                         if (hailInserted > 0)
                         {
@@ -786,7 +787,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     }
                     else
                     {
-                        Log("hail-mary (button, " + hailStop + "): rear-context prune could not drop any turns (too few turns or tool-pair-locked)");
+                        Log("hail-mary (" + hailStop + "): no-op (too few turns or tool-pair-locked, " + (measuredPromptTokens?.ToString() ?? "n/a") + " tokens)");
                     }
 
                     // The armed rear-prune has now actually occurred (whether it dropped turns or
@@ -812,6 +813,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         ReportContextUsage?.Invoke(gaugeTokens.Value, hotContextForHailMary, Str(state, "local_preferred_model"));
                         ReportHailMaryApplied?.Invoke(gaugeTokens.Value);
                     }
+                }
                 }
             }
 
@@ -1370,7 +1372,13 @@ public sealed class FluxMuxGatewayHost : IDisposable
             }
             using var timeoutCts = new CancellationTokenSource();
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
-            Log("[turn] sending to " + routeKind + " model (timeout " + timeoutSec + "s) · cumulative " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms since turn start");
+            // Only log the [turn] line when we have a real token measurement. During launch
+            // (503 retries) the measurement is null, and logging "n/a tokens" is just noise.
+            if (measuredPromptTokens is not null)
+            {
+                var pruneBit = forwardPruneSummary is not null ? " · " + forwardPruneSummary : string.Empty;
+                Log("[turn] " + routeKind + " · " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms" + pruneBit);
+            }
             HttpResponseMessage? response = null;
             var loadingRetries = 0;
             string? loadingDetail = null;

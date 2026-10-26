@@ -25,15 +25,15 @@ public static class FluxMuxGatewayRouting
         "The latest prompt asks to use a cloud model.";
     public const string LocalFillingBlockedType = "local_context_filling";
     public const string LocalFillingBlockedMessage =
-        PortRulesPostMortem.ChatTurnCannotContinue
-        + "it is too large for the current local model's Context. "
-        + PortRulesPostMortem.RaiseContextAdvice
-        + " "
-        + PortRulesPostMortem.SmallerNextStepAdvice;
+        "This chat turn failed as it was too large to fit into the remaining Context space. "
+        + "You can try recovering the chat by launching a model profile with larger Context, if you have one, "
+        + "or using the **Hail Mary** context trimmer, then retrying. "
+        + "Otherwise start a new chat. Consider making a more focussed or simpler request.";
     public const string LocalContextOverflowMessage =
-        PortRulesPostMortem.ChatTurnCannotContinue
-        + "it is too large for the local model's Context. "
-        + "Launch a model profile with higher **Context**, or start a new chat with a smaller next step.";
+        "This chat turn failed as it was too large to fit into the remaining Context space. "
+        + "You can try recovering the chat by launching a model profile with larger Context, if you have one, "
+        + "or using the **Hail Mary** context trimmer, then retrying. "
+        + "Otherwise start a new chat. Consider making a more focussed or simpler request.";
     public const string RepeatedToolType = "cline_repeated_command";
     public const string RepeatedToolMessage =
         PortRulesPostMortem.ChatTurnCannotContinue

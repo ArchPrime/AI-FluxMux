@@ -642,7 +642,19 @@ public sealed class FluxMuxRuntimeService
 		host.ReportContextUsage = WriteLocalContextUsage;
 		host.ReportHailMaryOffer = line => OfferHailMary(line);
 		host.ConsumeHailMaryMiddleCut = ConsumeHailMaryMiddleCutRequest;
-		host.ReportLog = line => GatewayLogLine?.Invoke(line);
+		host.ReportLog = line =>
+		{
+			// Only forward user-relevant lines to the terminal. The gateway logs many internal
+			// lines (route decide, overlay, ContextDiag, long-load, ttfb, upstream ok, etc.)
+			// that are useful in the log file but clutter the UI. Forward only:
+			//   - [turn] ...       (one line per turn: route, timing, forward-prune result)
+			//   - hail-mary ...    (only when armed and executed)
+			if (line.StartsWith("[turn]", StringComparison.Ordinal)
+				|| line.StartsWith("hail-mary", StringComparison.Ordinal))
+			{
+				GatewayLogLine?.Invoke(line);
+			}
+		};
 		host.PortRules = _portForwardingRules;
 		TryCaptureAndRedactExistingRuntimeState();
 		return host;
@@ -1726,17 +1738,19 @@ public sealed class FluxMuxRuntimeService
 
 	/// <summary>
 	/// Returns the armed Hail Mary choice (stop + image-strip) and clears it. Called by the
-	/// gateway before forwarding a local payload.
+	/// gateway before forwarding a local payload. The <c>WasArmed</c> flag is true only when the
+	/// user actually clicked the Hail Mary button; when false the gateway should skip the prune
+	/// entirely (previously it ran the prune on every turn and logged a no-op each time).
 	/// </summary>
-	public (HailMaryCompaction.HailMaryAggression Stop, bool StripImages) ConsumeHailMaryMiddleCutRequest()
+	public (HailMaryCompaction.HailMaryAggression Stop, bool StripImages, bool WasArmed) ConsumeHailMaryMiddleCutRequest()
 	{
 		if (_hailMaryMiddleCutRequested)
 		{
 			_hailMaryMiddleCutRequested = false;
-			return (_hailMaryAggression, _hailMaryStripImages);
+			return (_hailMaryAggression, _hailMaryStripImages, true);
 		}
 
-		return (HailMaryCompaction.HailMaryAggression.Balanced, false);
+		return (HailMaryCompaction.HailMaryAggression.Balanced, false, false);
 	}
 
 	/// <summary>

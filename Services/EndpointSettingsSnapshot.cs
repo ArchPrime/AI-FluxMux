@@ -20,7 +20,8 @@ public readonly record struct EndpointSettingsSnapshot(
     string DisplayName,
     string ModelId,
     bool CreateHarnessSettingsIfMissing,
-    int MaxContextWindow = 0)
+    int MaxContextWindow = 0,
+    string CompactMode = "port-rules")
 {
     public string Fingerprint()
         => string.Join(
@@ -33,7 +34,8 @@ public readonly record struct EndpointSettingsSnapshot(
             ReasoningOn ? "reason" : "noreason",
             string.IsNullOrWhiteSpace(DisplayName) ? FluxMuxGatewayModels.LocalModelId : DisplayName.Trim(),
             string.IsNullOrWhiteSpace(ModelId) ? FluxMuxGatewayModels.LocalModelId : ModelId.Trim(),
-            CreateHarnessSettingsIfMissing ? "mkharness" : "noharness");
+            CreateHarnessSettingsIfMissing ? "mkharness" : "noharness",
+            CompactMode);
 }
 
 public readonly record struct EndpointSettingsSyncResult(

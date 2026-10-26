@@ -19,7 +19,8 @@ internal sealed class ClineEndpointAdapter(string id) : IEndpointSettingsAdapter
                 snapshot.ImagesOn,
                 snapshot.DisplayName,
                 snapshot.AdvertisedMaxTokens,
-                snapshot.MaxContextWindow));
+                snapshot.MaxContextWindow,
+                snapshot.CompactMode));
         return new EndpointSettingsSyncResult(Id, result.Success, result.Changed, result.Skipped, result.Message);
     }
 }

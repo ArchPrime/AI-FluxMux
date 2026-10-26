@@ -1828,7 +1828,8 @@ public partial class MainViewModel : ViewModelBase
             ResolveClineModelId(),
             SelectedEndpointApp.Equals("DeepSeek Harness", StringComparison.OrdinalIgnoreCase)
                 || HarnessWebIsInPlay,
-            ResolveRunningProfileExtendContextIntoRam() ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : 0);
+            ResolveRunningProfileExtendContextIntoRam() ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : 0,
+            LocalAutoCompactMode);
 
     /// <summary>
     /// Reads the YaRN "Extend context into RAM" flag directly from the running profile's
@@ -3977,7 +3978,7 @@ public partial class MainViewModel : ViewModelBase
         };
         var imgBit = HailMaryStripImages ? ", strip older images" : string.Empty;
         SetHailMaryOutcome("Armed (" + stopName + imgBit + ") — will prune on the next turn you send");
-        StatusMessage = "Hail Mary armed (" + stopName + imgBit + "): the next turn you send will have its older history pruned to make room. Send your reply now.";
+        StatusMessage = "Hail Mary Context Trim armed (" + stopName + imgBit + "): the next turn you send will have its older history trimmed to make room. Send your reply now.";
         _runtimeService.RequestHailMaryMiddleCut(HailMaryAggressionStop, HailMaryStripImages);
         ResetHailMaryPicker();
     }

@@ -3156,12 +3156,13 @@
                                 IsVisible="{Binding HailMaryButtonVisible}"
                                 VerticalAlignment="Center"
                                 FontFamily="Segoe UI Emoji, Segoe UI, Arial"
-                                Content="🙏&#xFE0E; Hail Mary Compactor"
-                                Background="#7C3AED"
+                                FontSize="14"
+                                Content="🙏&#xFE0E; Hail Mary Context Trim"
+                                Background="#1A1A1A"
                                 Foreground="White"
-                                BorderBrush="#5B21B6"
+                                BorderBrush="#333333"
                                 Click="HailMaryButton_Click"
-                                ToolTip.Tip="Prunes the older turns from this chat's forwarded history so the current turn has room to complete in the model's context window. Recent turns and your last task are kept; your chat app still has the full conversation.&#10;&#10;Click to choose how much to prune (Gentle / Balanced / Aggressive) and whether to also strip older images, then confirm.&#10;&#10;Trade-off: the model forgets the pruned turns, so it may repeat work or lose track of early decisions. Use this when you want to keep this chat on the local model but don't have a bigger-context model to switch to." />
+                                ToolTip.Tip="Prunes the older turns from the chat, when the current turn lacks sufficient context space to complete, and your normal auto compact method didn&#39;t activate in time. Recent turns and your last task are kept, and your chat app window still keeps the full conversation.&#10;&#10;Click to choose how much to prune (Gentle / Balanced / Aggressive) and whether to also strip older images.&#10;&#10;Warning: the model forgets the pruned turns, so it may repeat work, lose understanding or lose track of early decisions. Use this when you really want to keep this chat going on a local model and don&#39;t have a suitable bigger-context local or cloud model to switch to. This may buy you time at the expense of fidelity – so you may want to use the opportunity to steer the chat towards a graceful end" />
                         <Popup x:Name="HailMaryPickerPopup"
                                 IsOpen="False"
                                 PlacementTarget="{Binding ElementName=HailMaryButton}"
@@ -3173,7 +3174,7 @@
                                     CornerRadius="4"
                                     Padding="0">
                                 <StackPanel Spacing="8" Margin="8" MinWidth="240">
-                                <TextBlock Text="Hail Mary — rear-context prune" FontWeight="SemiBold" FontSize="12" />
+                                <TextBlock Text="Hail Mary Context Trim" FontWeight="SemiBold" FontSize="12" />
                                 <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.85"
                                            Text="Drop older turns so the reply has room to complete. The system prompt, your last task, and the active tool-pair are always kept." />
                                 <StackPanel Spacing="2">
@@ -3371,7 +3372,7 @@
                                               ToolTip.Tip="Also strip older embedded images (keeps the most recent). Independent of the prune stop." />
                                 </WrapPanel>
                                 <WrapPanel>
-                                    <Button Content="Hail Mary: shrink this turn"
+                                    <Button Content="Hail Mary Context Trim: shrink this turn"
                                             Margin="0,0,8,4"
                                             Command="{Binding HailMaryShrinkTurnCommand}"
                                             ToolTip.Tip="Prunes the older turns from this chat's forwarded history (keeping the system prompt, your last task, and the chosen number of recent turns) so the reply has room to complete, then re-sends the turn. The Client app still has the full chat." />

@@ -14,7 +14,8 @@ public readonly record struct ClineContextSyncOptions(
     string ModelId,
     bool ImagesOn,
     string DisplayName,
-    int MaxTokens)
+    int MaxTokens,
+    string CompactMode = "port-rules")
 {
     public static ClineContextSyncOptions Create(
         int fluxMuxPort,
@@ -23,7 +24,8 @@ public readonly record struct ClineContextSyncOptions(
         bool imagesOn = false,
         string? displayName = null,
         int maxTokens = 0,
-        int maxContextWindow = 0)
+        int maxContextWindow = 0,
+        string compactMode = "port-rules")
     {
         var port = Math.Clamp(fluxMuxPort, 1, 65535);
         var cap = maxContextWindow > 0 ? maxContextWindow : DeepSeekHarnessSetup.MaxLocalContextWindow;
@@ -31,7 +33,7 @@ public readonly record struct ClineContextSyncOptions(
         var id = string.IsNullOrWhiteSpace(modelId) ? FluxMuxGatewayModels.LocalModelId : modelId.Trim();
         var label = string.IsNullOrWhiteSpace(displayName) ? id : displayName.Trim();
         var replyBudget = maxTokens > 0 ? Math.Clamp(maxTokens, 1, context) : 0;
-        return new ClineContextSyncOptions(port, context, id, imagesOn, label, replyBudget);
+        return new ClineContextSyncOptions(port, context, id, imagesOn, label, replyBudget, compactMode);
     }
 }
 
@@ -277,14 +279,21 @@ public static class ClineContextSync
                 options.ImagesOn,
                 options.DisplayName,
                 options.MaxTokens);
-            var settingsChanged = PatchGlobalSettingsAutoCompactOff(globalSettingsPath);
+            // Only turn off Cline's auto-compact when FluxMux is managing compacting.
+            // When the profile's compact mode is "none" (endpoint managed), Cline should
+            // keep its own auto-compact on — FluxMux is not doing the compacting.
+            var settingsChanged = false;
+            if (!string.Equals(options.CompactMode, "none", StringComparison.OrdinalIgnoreCase))
+            {
+                settingsChanged = PatchGlobalSettingsAutoCompactOff(globalSettingsPath);
+            }
             var changed = modelsChanged || providersChanged || stateChanged || settingsChanged;
             return new ClineContextSyncResult(
                 true,
                 changed,
                 false,
                 modelsPath,
-                BuildSyncMessage(options.ContextWindow, modelsChanged, stateChanged || settingsChanged));
+                BuildSyncMessage(options.ContextWindow, modelsChanged, stateChanged || settingsChanged, options.CompactMode));
         }
         catch (Exception ex)
         {
@@ -710,7 +719,7 @@ public static class ClineContextSync
         return true;
     }
 
-    private static string BuildSyncMessage(int contextWindow, bool contextChanged, bool compactChanged)
+    private static string BuildSyncMessage(int contextWindow, bool contextChanged, bool compactChanged, string compactMode = "port-rules")
     {
         var context = "Cline 4.x Context Window was set to "
             + contextWindow.ToString(CultureInfo.InvariantCulture)
@@ -730,6 +739,13 @@ public static class ClineContextSync
         if (contextChanged)
         {
             return context + ". " + follow;
+        }
+
+        // When compact mode is "none" (endpoint managed), FluxMux is not doing the compacting,
+        // so don't claim we turned off Cline's auto-compact.
+        if (string.Equals(compactMode, "none", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Cline 4.x Context Window already matches this model profile. Compact mode is endpoint managed — Cline Auto compact is left as-is.";
         }
 
         return "Cline 4.x Context Window already matches this model profile, and Auto compact is off.";

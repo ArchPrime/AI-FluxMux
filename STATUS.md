@@ -5,6 +5,14 @@
 
 Current version: **0.3.1 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs` → `FluxMuxAppInfo`).
 
+## ⚠️ ACTIVE: YaRN mid-chat switch failure — see `YARN_SWITCH_DIAG.md`
+
+Switching to a YaRN profile part-way through a chat now fails/times out (regression). Under
+diagnosis. **If resuming this: read `YARN_SWITCH_DIAG.md` first** — it has the log-capture
+command (offset 60,256,015 in `c:\AI_Workbench\Logs\Proxy_Cloud_Handshake.log`), the 4
+hypotheses, and the key code locations. The gateway log is written by the running app, so it
+persists even if the triggering chat drops.
+
 ## Context fixes: YaRN switch + per-turn forward-prune + Hail Mary (10/26)
 
 **Full handoff + resumable plan: `PLAN_CONTEXT_FIXES.md`.** All steps implemented + verified
@@ -37,9 +45,11 @@ the app → `build-fluxmux.bat clean` → restart.
   event, wired through `RuntimeService.GatewayLogLine` to the UI diagnostic terminal
   (`AppendDiagnosticEntry("GW", line)`). This means Hail Mary results, forward-prune results,
   context measurements, and route decisions all appear live in the terminal. Additionally,
-  `[turn]` progress markers are logged at each pipeline stage (turn start → measuring tokens →
-  tokens measured → sending to model) with cumulative ms since turn start, so the user can see
-  exactly where a delay is occurring and whether the turn is making progress.
+  `[turn]` progress markers are logged at each pipeline stage with cumulative ms since turn start,
+  so the user can see exactly where a delay is occurring. **Log noise reduced:** Hail Mary now
+  only runs when actually armed (the `WasArmed` flag), so it no longer logs a no-op on every turn.
+  The per-turn log is now just 2 lines: `[turn] start · model=... · context=...` and
+  `[turn] sending to local model · measured X tokens · cumulative Y ms · timeout Zs`.
 - **E. Forward-prune speed fixes** — (1) No re-measure network call after pruning (was adding a
   full extra llama-server round-trip per pruned turn). (2) Dedupe stage now uses a cheap
   fingerprint (role + content length + FNV-1a hash + tool-call count) instead of full

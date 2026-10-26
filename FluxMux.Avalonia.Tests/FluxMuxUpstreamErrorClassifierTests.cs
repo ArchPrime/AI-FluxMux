@@ -71,7 +71,7 @@ public sealed class FluxMuxUpstreamErrorClassifierTests
 
         Assert.False(string.IsNullOrWhiteSpace(message));
         Assert.True(string.IsNullOrEmpty(hint));
-        Assert.InRange(message.Length, 1, 180);
+        Assert.InRange(message.Length, 1, 400);
         Assert.DoesNotContain("Diagnostics", message, System.StringComparison.Ordinal);
         Assert.DoesNotContain("Compact only", message, System.StringComparison.Ordinal);
         Assert.DoesNotContain(".vscode", message, System.StringComparison.Ordinal);
