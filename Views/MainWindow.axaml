@@ -3231,17 +3231,6 @@
                                    HorizontalAlignment="Left"
                                    Opacity="0.9"
                                    Text="{Binding HailMaryOutcome}" />
-                        <!-- Fix 3 — prefill progress indicator: live "Prefilling context… elapsed Xs · ~N tokens · ETA ~Y"
-                             shown while a local turn is prefilling. Hidden when no prefill is in progress. -->
-                        <TextBlock Grid.Column="5"
-                                   IsVisible="{Binding PrefillInProgress}"
-                                   VerticalAlignment="Center"
-                                   FontSize="10"
-                                   Foreground="#0EA5E9"
-                                   HorizontalAlignment="Left"
-                                   Opacity="0.95"
-                                   Text="{Binding PrefillStatusText}"
-                                   ToolTip.Tip="The local model is prefilling the conversation context before it can start replying. Large prompts (especially on GPU+CPU offload with RAM spill) take longer. The ETA is a conservative estimate." />
                         <Button Grid.Column="6"
                                 VerticalAlignment="Center"
                                 MinWidth="72"
