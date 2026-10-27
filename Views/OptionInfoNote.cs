@@ -31,6 +31,8 @@ public sealed class OptionInfoNote : UserControl
         AvaloniaProperty.Register<OptionInfoNote, string?>(nameof(LinkLabel));
 
     private const string BulletMarker = HelpHtmlParser.NoteBullet;
+    private const string SubBulletMarker = "\u2013"; // en-dash: nested sub-bullet (Pros/Cons etc.)
+    private const double SubBulletIndent = 16.0; // left margin (px) for nested sub-bullets
 
     private readonly StackPanel _body;
     private readonly Button _hide;
@@ -196,6 +198,14 @@ public sealed class OptionInfoNote : UserControl
                 continue;
             }
 
+            // Nested sub-bullet (en-dash): render with a left indent so Pros/Cons lists sit
+            // visually under their parent scenario bullet.
+            if (trimmed.StartsWith(SubBulletMarker, StringComparison.Ordinal))
+            {
+                _body.Children.Add(SubBulletRow(trimmed[SubBulletMarker.Length..].TrimStart()));
+                continue;
+            }
+
             _body.Children.Add(Line(trimmed));
         }
     }
@@ -209,6 +219,27 @@ public sealed class OptionInfoNote : UserControl
         };
 
         var marker = Line(BulletMarker);
+        marker.VerticalAlignment = VerticalAlignment.Top;
+        row.Children.Add(marker);
+
+        var body = Line(text);
+        Grid.SetColumn(body, 1);
+        row.Children.Add(body);
+        return row;
+    }
+
+    private static Grid SubBulletRow(string text)
+    {
+        // Indented sub-bullet: a left margin pushes the whole row in, and the en-dash marker
+        // + text use the same 2-column layout as a top-level bullet so wrapped lines align.
+        var row = new Grid
+        {
+            Margin = new Thickness(SubBulletIndent, 0, 0, 0),
+            ColumnDefinitions = new ColumnDefinitions("Auto,*"),
+            ColumnSpacing = 5
+        };
+
+        var marker = Line(SubBulletMarker);
         marker.VerticalAlignment = VerticalAlignment.Top;
         row.Children.Add(marker);
 
