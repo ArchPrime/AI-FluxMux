@@ -2725,7 +2725,8 @@
                                                FontSize="12"
                                                FontWeight="SemiBold"
                                                Opacity="0.7" />
-                                    <ItemsControl ItemsSource="{Binding GpuAdapterRows}">
+                                    <ItemsControl IsVisible="{Binding ShowGpuAdapterList}"
+                                                  ItemsSource="{Binding GpuAdapterRows}">
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
                                                 <Border Padding="6,4"
@@ -2750,6 +2751,13 @@
                                             </DataTemplate>
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>
+                                    <!-- Empty-state fallback: shown when no display adapters were
+                                         detected (or the PowerShell query failed). Restored after
+                                         c3f9cd2 dropped it, which made the section look empty. -->
+                                    <TextBlock IsVisible="{Binding ShowGpuAdapterEmptyMessage}"
+                                               Opacity="0.82"
+                                               TextWrapping="Wrap"
+                                               Text="No display adapters detected, or PowerShell query failed." />
                                 </StackPanel>
 
                                 <!-- Batch Windows affinity switcher -->
