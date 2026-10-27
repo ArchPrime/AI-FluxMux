@@ -444,19 +444,18 @@ public partial class MainViewModel : ViewModelBase
         {
             SafeUiInvoke(() => AppendDiagnosticEntry("GW", line));
         };
-        // Fix 3 — prefill progress: when a local turn is sent to llama-server, emit a [prefill]
-        // line to the diagnostic terminal with the prompt size + a conservative ETA. When the
-        // first byte arrives, emit a completion line. The terminal (not the top bar) is the home
-        // for this feedback — it's a scrolling log with room, and it's where the user already
-        // watches [turn] / hail-mary lines. (Previously this drove a top-bar TextBlock that
-        // overlapped the Hail Mary button.)
+        // Fix 3 — prefill progress: when a local turn is sent to llama-server, emit a plain-English
+        // [prefill] line to the diagnostic terminal so the user knows AI-FluxMux hasn't frozen and
+        // roughly how long to wait. When the first byte arrives, emit a "reply is starting" line.
+        // Plain English over precise numbers: the token count is already on the Context gauge, and
+        // a fake-precise ETA ("18m 1s") is less useful than a friendly "give it about X".
         _runtimeService.PrefillStartedNotice += promptTokens =>
         {
             SafeUiInvoke(() =>
             {
                 var line = promptTokens > 0
-                    ? "[prefill] started · ~" + FormatTokenCount(promptTokens) + " tokens · ETA ~" + FormatDuration((int)Math.Ceiling(promptTokens / 200.0))
-                    : "[prefill] started";
+                    ? "[prefill] warming up — reading the conversation before it replies. Give it about " + FriendlyWait(promptTokens) + "."
+                    : "[prefill] warming up — reading the conversation before it replies.";
                 AppendDiagnosticEntry("PREFILL", line);
             });
         };
@@ -465,7 +464,8 @@ public partial class MainViewModel : ViewModelBase
             SafeUiInvoke(() =>
             {
                 var seconds = (int)(elapsedMs / 1000);
-                AppendDiagnosticEntry("PREFILL", "[prefill] first byte after " + seconds + "s");
+                var wait = seconds < 5 ? "a moment" : seconds < 60 ? seconds + " seconds" : FriendlyWaitFromSeconds(seconds);
+                AppendDiagnosticEntry("PREFILL", "[prefill] done warming up (took " + wait + ") — the reply is starting now.");
             });
         };
 
@@ -3769,11 +3769,43 @@ public partial class MainViewModel : ViewModelBase
 
     private System.Threading.Timer? _hailMaryOutcomeTimer;
 
-    private static string FormatTokenCount(int tokens)
-        => tokens >= 1000 ? (tokens / 1000) + "K" : tokens.ToString();
+    /// <summary>
+    /// Plain-English "give it about X" estimate for a prefill of <paramref name="promptTokens"/>
+    /// tokens. Uses a conservative ~200 tokens/sec baseline (a slow GPU+CPU offload with RAM
+    /// spill) and rounds to friendly units so it reads as a rough guide, not a precise promise.
+    /// </summary>
+    private static string FriendlyWait(int promptTokens)
+        => FriendlyWaitFromSeconds((int)Math.Ceiling(promptTokens / 200.0));
 
-    private static string FormatDuration(int seconds)
-        => seconds >= 60 ? (seconds / 60) + "m" + (seconds % 60 > 0 ? " " + (seconds % 60) + "s" : "") : seconds + "s";
+    /// <summary>
+    /// Plain-English duration phrasing: "a moment", "a few seconds", "about a minute",
+    /// "a few minutes", "around N minutes". Avoids fake precision like "18m 1s".
+    /// </summary>
+    private static string FriendlyWaitFromSeconds(int seconds)
+    {
+        if (seconds < 5)
+        {
+            return "a moment";
+        }
+
+        if (seconds < 30)
+        {
+            return "a few seconds";
+        }
+
+        if (seconds < 90)
+        {
+            return "about a minute";
+        }
+
+        var minutes = (int)Math.Round(seconds / 60.0);
+        if (minutes <= 3)
+        {
+            return "a few minutes";
+        }
+
+        return "around " + minutes + " minutes";
+    }
 
     // When the Hail Mary button becomes visible, re-evaluate its command's CanExecute so the
     // button is enabled (and shows its tooltip). Without this, the button renders visible but
