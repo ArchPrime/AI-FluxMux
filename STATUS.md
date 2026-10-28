@@ -56,7 +56,7 @@ Current version: **0.3.1 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs
    - `LocalReloadRouting.cs`: Removed Cline-specific reference. Now says "If your endpoint offers manual compaction, you can use it to shorten the history before the next turn."
    - Hail Mary banner tooltip: Added "When to use: this is typically a last resort to reanimate a dead chat — use it when the current turn became large enough to kill the chat before auto-compact could trigger."
    - Compact button tooltip: Updated to explain it works even below the auto-compact threshold.
-   - Compact status message: Updated to "AI-FluxMux will summarize older turns on the next turn. The Client app still has the full chat."
+   - Compact status message: Updated to "AI-FluxMux will compress context on the next turn as requested. The Client app still has the full chat."
 
 3. **Persistent prefill status indicator:**
    - Added `PrefillInProgress` and `PrefillStatusText` ObservableProperties to `MainViewModel`.
