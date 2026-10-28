@@ -37,6 +37,56 @@ public sealed class OpenAiStreamTelemetryProxyTests
     }
 
     [Fact]
+    public async Task First_content_token_callback_fires_only_on_real_content()
+    {
+        // A stream with an empty/role-only first chunk (no content) followed by a real content
+        // chunk. The callback must fire exactly once, on the real content line.
+        var sse =
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n" +
+            "data: [DONE]\n\n";
+        var upstream = new MemoryStream(Encoding.UTF8.GetBytes(sse));
+        var downstream = new FlushCountingStream();
+
+        var fireCount = 0;
+        await OpenAiStreamTelemetryProxy.CopyAsync(
+            upstream,
+            downstream,
+            tracker: null,
+            localReasoningMode: null,
+            CancellationToken.None,
+            onUpstreamBytes: null,
+            declaredTools: null,
+            onFirstContentToken: () => fireCount++);
+
+        Assert.Equal(1, fireCount);
+    }
+
+    [Fact]
+    public async Task First_content_token_callback_does_not_fire_for_role_only_stream()
+    {
+        // A stream with only role/empty chunks and no real content should NOT fire the callback.
+        var sse =
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
+            "data: [DONE]\n\n";
+        var upstream = new MemoryStream(Encoding.UTF8.GetBytes(sse));
+        var downstream = new FlushCountingStream();
+
+        var fireCount = 0;
+        await OpenAiStreamTelemetryProxy.CopyAsync(
+            upstream,
+            downstream,
+            tracker: null,
+            localReasoningMode: null,
+            CancellationToken.None,
+            onUpstreamBytes: null,
+            declaredTools: null,
+            onFirstContentToken: () => fireCount++);
+
+        Assert.Equal(0, fireCount);
+    }
+
+    [Fact]
     public async Task Think_only_stream_is_not_an_empty_complete()
     {
         var upstream = new MemoryStream(Encoding.UTF8.GetBytes(

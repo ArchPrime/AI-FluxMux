@@ -68,7 +68,8 @@ public static class OpenAiStreamTelemetryProxy
         IReadOnlyCollection<string>? declaredTools,
         bool allowParallelToolCalls = true,
         LocalSessionArtifacts? artifacts = null,
-        int maxTokens = 0)
+        int maxTokens = 0,
+        Action? onFirstContentToken = null)
     {
         var sanitizeResponses = !string.IsNullOrWhiteSpace(localReasoningMode);
         LocalToolCallHealSession? healSession = declaredTools is { Count: > 0 } || artifacts is not null
@@ -76,7 +77,8 @@ public static class OpenAiStreamTelemetryProxy
             : null;
         var parseLines = sanitizeResponses
             || healSession is not null
-            || (tracker is not null && tracker.IsEnabled);
+            || (tracker is not null && tracker.IsEnabled)
+            || onFirstContentToken is not null;
         if (!parseLines)
         {
             await CopyFlushingAsync(upstream, downstream, cancellationToken, onUpstreamBytes).ConfigureAwait(false);
@@ -86,6 +88,7 @@ public static class OpenAiStreamTelemetryProxy
         using var reader = new StreamReader(upstream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
         var writer = new StreamWriter(downstream, Encoding.UTF8, leaveOpen: true) { AutoFlush = true, NewLine = "\n" };
         var responseSanitized = false;
+        var firstContentTokenFired = false;
         LocalThinkingStreamSession? streamSession = sanitizeResponses
             ? new LocalThinkingStreamSession(localReasoningMode, maxTokens)
             : null;
@@ -120,6 +123,17 @@ public static class OpenAiStreamTelemetryProxy
             }
 
             onUpstreamBytes?.Invoke(Math.Max(1, Encoding.UTF8.GetByteCount(line) + 1));
+
+            // Fix 4 — detect the first *content* token (not the first byte). The first byte of an
+            // SSE stream arrives immediately (headers / first data line) and does NOT mark the end
+            // of prefill. The first line that actually carries content / reasoning / tool_calls is
+            // when prefill is truly complete. Fire the callback once so the gateway can measure the
+            // real prefill duration for the self-refining performance model.
+            if (onFirstContentToken is not null && !firstContentTokenFired && HasContentToken(line))
+            {
+                firstContentTokenFired = true;
+                onFirstContentToken();
+            }
 
             var outbound = line;
             if (streamSession is not null)
@@ -216,6 +230,42 @@ public static class OpenAiStreamTelemetryProxy
         }
 
         return line.Substring(5).Trim().Equals("[DONE]", StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// True when an SSE <c>data:</c> line carries actual content — i.e. the model has produced a
+    /// real token (content, reasoning_content, text, or tool_calls). This is the signal that
+    /// prefill is complete, as opposed to the first byte of the stream (which arrives
+    /// immediately and is just headers / an empty data line). Mirrors the detection used by
+    /// <see cref="GenerationSpeedTracker"/> for its first-token timestamp.
+    /// </summary>
+    private static bool HasContentToken(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var payload = line.Substring(5).Trim();
+        if (payload.Length == 0 || payload.Equals("[DONE]", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            var root = JsonNode.Parse(payload) as JsonObject;
+            if (root is null)
+            {
+                return false;
+            }
+
+            return GenerationSpeedTracker.CountDeltaTokens(root) > 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static async Task WriteThinkCutoffAsync(

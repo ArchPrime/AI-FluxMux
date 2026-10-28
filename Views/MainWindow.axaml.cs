@@ -192,6 +192,7 @@ public partial class MainWindow : Window
             ApplySavedGeometry(vm);
             SyncInterventionPopup();
             ApplyGraphTerminalDefaultSplit();
+            SyncPrefillBarWidth();
             _ = vm.AutoLoadSelectedProfileOnStartupAsync();
         }
         _stressBarPulseTimer = new DispatcherTimer
@@ -778,6 +779,17 @@ public partial class MainWindow : Window
             }
         }
         grid.LayoutUpdated += OnLayoutUpdated;
+    }
+
+    /// <summary>
+    /// No-op: the prefill bar now spans the full width of the bottom bar's left column
+    /// (HorizontalAlignment="Stretch"), so no width sync is needed.
+    /// </summary>
+    private void SyncPrefillBarWidth()
+    {
+        // Intentionally empty. The bar's width is now determined by the layout, not synced
+        // to the graph panel. This avoids the flickering that occurred when the graph panel's
+        // width changed (e.g. when the sash moved) and the bar's width was updated.
     }
 
     private void OnStressTestButtonClick(object? sender, RoutedEventArgs e)

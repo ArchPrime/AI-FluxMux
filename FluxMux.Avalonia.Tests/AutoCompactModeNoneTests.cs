@@ -120,7 +120,7 @@ public sealed class AutoCompactModeNoneTests
         bool compactOn)
     {
         // measuredPromptTokens is null: these tests exercise the estimate-based path.
-        return (bool)TryApplyForwardCompact.Invoke(host, new object[] { payload, state, compactOn, null })!;
+        return (bool)TryApplyForwardCompact.Invoke(host, new object[] { payload, state, compactOn, null, false })!;
     }
 
     [Fact]

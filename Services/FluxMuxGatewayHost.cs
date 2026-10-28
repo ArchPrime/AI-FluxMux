@@ -566,7 +566,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         // the test's fill %). So skip forward-compaction for probes; the ShouldBlockLocalForward
         // safety check below still runs so the test can observe the real "context too small"
         // behavior at high fill.
-        var compactApplied = isProbeRequest ? false : TryApplyForwardCompact(payload, state, compactOn);
+        var compactApplied = isProbeRequest ? false : TryApplyForwardCompact(payload, state, compactOn, forceCompact: compactOn);
 
         OfferDocumentContextDialogIfNeeded(state, payload, compactApplied, isProbeRequest);
         var reloadOffered = false;
@@ -2292,7 +2292,37 @@ public sealed class FluxMuxGatewayHost : IDisposable
         return null;
     }
 
-    private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn, int? measuredPromptTokens = null)
+    /// <summary>
+    /// Clears the forward_compact flag so the force-compact is a one-off action.
+    /// </summary>
+    private void ClearForwardCompactFlag()
+    {
+        var existing = LoadLocalReload();
+        if (ParseBool(Str(existing, "forward_compact")))
+        {
+            existing["forward_compact"] = false;
+            existing["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+            SaveLocalReload(existing);
+            Log("local reload: forward_compact flag cleared after force-compact");
+        }
+    }
+
+    /// <summary>
+    /// Suppresses the forward-compact offer for a period of time after a failed compact.
+    /// This prevents the compact button from reappearing on every turn when the compact
+    /// cannot shrink the prompt (e.g., one big over-full turn).
+    /// </summary>
+    private void SuppressForwardCompactFor(int minutes)
+    {
+        var existing = LoadLocalReload();
+        var until = DateTimeOffset.UtcNow.AddMinutes(minutes).ToUnixTimeSeconds();
+        existing["suppress_until"] = until;
+        existing["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        SaveLocalReload(existing);
+        Log("local reload: forward-compact suppressed for " + minutes + " minutes after failed compact");
+    }
+
+    private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn, int? measuredPromptTokens = null, bool forceCompact = false)
     {
         var rules = CurrentRules();
 
@@ -2311,6 +2341,53 @@ public sealed class FluxMuxGatewayHost : IDisposable
         if (perProfile.HasValue)
         {
             perProfileMode = perProfile.Value.Mode;
+        }
+
+        // Force-compact: the user explicitly clicked the Compact button. Bypass all
+        // threshold checks and compact immediately. This is a one-off action, so we
+        // clear the forward_compact flag after a successful compact.
+        if (forceCompact)
+        {
+            Log("[compact] Compacting context now...");
+            var forceHotContext = ParseInt(Str(state, "local_context"), 0);
+            var forceRules = rules;
+            if (perProfile.HasValue)
+            {
+                var (mode, trigger, keepT, keepTool, pinUser) = perProfile.Value;
+                forceRules = rules with
+                {
+                    CompactKeepTurns = keepT,
+                    CompactToolKeepTurns = keepTool,
+                    CompactPreservedUserChars = pinUser
+                };
+            }
+            if (LocalHistoryCompaction.TryCompactPayload(payload, forceRules, force: true))
+            {
+                Log("local history compact: force-compact applied (user clicked Compact)");
+                var forceInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
+                if (forceInserted > 0)
+                {
+                    Log("local chat: inserted a user turn so the Qwen template has a query");
+                }
+                ClearForwardCompactFlag();
+                return true;
+            }
+            var hailMary = HailMaryCompaction.Salvage(payload, forceHotContext, rules.CompactHeadroom, allowMiddleCut: false, stripImages: false);
+            if (hailMary.TokensSaved > 0)
+            {
+                Log("hail-mary: " + hailMary.DiagnosticsLine);
+                var hailInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
+                if (hailInserted > 0)
+                {
+                    Log("local chat: inserted a user turn so the Qwen template has a query");
+                }
+                ClearForwardCompactFlag();
+                return true;
+            }
+            Log("[compact] FAILED: The prompt is one big over-full turn that cannot be compacted. To continue, switch to a bigger-context model profile, or start a new chat.");
+            SuppressForwardCompactFor(15);
+            ClearForwardCompactFlag();
+            return false;
         }
 
         // "None / endpoint managed": the user explicitly opted out of gateway

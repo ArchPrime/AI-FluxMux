@@ -351,8 +351,8 @@ public static class LocalReloadRouting
             }
 
             return "The loaded model profile's context is about to spill from VRAM to RAM. This will reduce performance. "
-                + "If your endpoint offers manual compaction (e.g. Cline's Compact button), you can try that, but be aware it may be aggressive (Cline typically cuts context down to ~20%). "
-                + "The Hail Mary option is a more targeted last resort that keeps your most recent turns. "
+                + "If your endpoint offers manual compaction, you can use it to shorten the history before the next turn. "
+                + "The Hail Mary option is a targeted last resort that keeps your most recent turns. "
                 + "Or switch to a model with larger VRAM-based context, or switch to a cloud model.";
         }
 

@@ -355,6 +355,17 @@ public partial class MainViewModel : ViewModelBase
     private string _localVariantEditorBaselineModel = string.Empty;
     private string _localVariantEditorBaselineVariant = string.Empty;
 
+    // Prefill progress indicator: a self-refining performance model (persisted per model/variant)
+    // plus a timer that advances the bottom-bar progress bar while a local turn is prefilling.
+    private Services.PrefillPerformanceModel? _prefillModel;
+    private string _prefillModelKey = string.Empty;
+    private DispatcherTimer? _prefillTimer;
+    private DateTime _prefillStartUtc;
+    private int _prefillEstimatedSeconds;
+    private int _prefillPromptTokens;
+    private DispatcherTimer? _generationTimer;
+    private DateTime _generationStartUtc;
+
     private const int ModelProfilesTabIndex = 2;
 
     private static readonly string[] RuntimeLocalProfileMetadataKeys =
@@ -403,11 +414,12 @@ public partial class MainViewModel : ViewModelBase
         SyncEndpointAppToRuntime();
         _runtimeService.SetCloudRoutingCapacity(SelectedCloudRoutingCapacity);
         _runtimeService.SetIdleTimeout(IdleTimeoutEnabled, (int)IdleTimeoutMinutes);
-        _runtimeService.SetGenerationSpeedTelemetryEnabled(GenerationSpeedTelemetryEnabled);
-        if (GenerationSpeedTelemetryEnabled)
-        {
-            RefreshGenerationSpeedTelemetry();
-        }
+        // Generation speed tracking is always enabled: it powers the bottom-bar generation
+        // indicator (elapsed clock + live token count) which is a core UX element, not optional.
+        _runtimeService.SetGenerationSpeedTelemetryEnabled(true);
+        RefreshGenerationSpeedTelemetry();
+        // Initialize the bottom-bar indicator to the idle state ("Ready · <speed>").
+        ResetPrefillIndicatorToIdle();
         _runtimeService.IdleTimeoutNotice += message =>
         {
             SafeUiInvoke(() => ApplyLocalParkedAfterIdle(message));
@@ -444,28 +456,54 @@ public partial class MainViewModel : ViewModelBase
         {
             SafeUiInvoke(() => AppendDiagnosticEntry("GW", line));
         };
-        // Fix 3 — prefill progress: when a local turn is sent to llama-server, emit a plain-English
-        // [prefill] line to the diagnostic terminal so the user knows AI-FluxMux hasn't frozen and
-        // roughly how long to wait. When the first byte arrives, emit a "reply is starting" line.
-        // Plain English over precise numbers: the token count is already on the Context gauge, and
-        // a fake-precise ETA ("18m 1s") is less useful than a friendly "give it about X".
+        // Prefill progress: when a local turn is sent to llama-server, show a full-width
+        // incremental progress bar in the bottom bar. The bar advances based on a self-refining
+        // performance model (PrefillPerformanceModel) that tracks real prefill samples per
+        // model/variant. When the first byte arrives, the bar completes and the indicator
+        // switches to the generation phase (elapsed clock + live token count).
+        var prefillWarmupShown = false;
         _runtimeService.PrefillStartedNotice += promptTokens =>
         {
             SafeUiInvoke(() =>
             {
-                var line = promptTokens > 0
-                    ? "[prefill] warming up — reading the conversation before it replies. Give it about " + FriendlyWait(promptTokens) + "."
-                    : "[prefill] warming up — reading the conversation before it replies.";
-                AppendDiagnosticEntry("PREFILL", line);
+                PrefillInProgress = true;
+                PrefillProgress = 0.0;
+                PrefillStatusText = promptTokens > 0
+                    ? "Prefilling context… ~" + FormatTokenCount(promptTokens) + " tokens"
+                    : "Prefilling context…";
+
+                _prefillPromptTokens = promptTokens;
+                _prefillStartUtc = DateTime.UtcNow;
+                _prefillEstimatedSeconds = GetOrCreatePrefillModel().EstimateSeconds(promptTokens);
+                StartPrefillTimer();
+
+                // Only emit the warming-up terminal line once per session.
+                if (!prefillWarmupShown && promptTokens > 0)
+                {
+                    var estimatedSeconds = _prefillEstimatedSeconds;
+                    if (estimatedSeconds >= 30)
+                    {
+                        AppendDiagnosticEntry("PREFILL", "warming up — give me a minute or two to read the conversation before I reply.");
+                        prefillWarmupShown = true;
+                    }
+                }
             });
         };
         _runtimeService.PrefillFirstByteNotice += elapsedMs =>
         {
             SafeUiInvoke(() =>
             {
-                var seconds = (int)(elapsedMs / 1000);
-                var wait = seconds < 5 ? "a moment" : seconds < 60 ? seconds + " seconds" : FriendlyWaitFromSeconds(seconds);
-                AppendDiagnosticEntry("PREFILL", "[prefill] done warming up (took " + wait + ") — the reply is starting now.");
+                // Record the real sample so the performance model refits and persists.
+                if (_prefillPromptTokens > 0)
+                {
+                    GetOrCreatePrefillModel().RecordSample(_prefillPromptTokens, elapsedMs);
+                }
+
+                // Complete the prefill bar and switch to the generation phase.
+                StopPrefillTimer();
+                PrefillProgress = 1.0;
+                PrefillInProgress = false;
+                StartGenerationTimer();
             });
         };
 
@@ -3956,6 +3994,169 @@ public partial class MainViewModel : ViewModelBase
 
     private bool _isRefreshingRecoveryReplacement;
     private bool _applyingRecoveryReplacement;
+    [ObservableProperty]
+    public partial bool PrefillInProgress { get; set; }
+
+    [ObservableProperty]
+    public partial string PrefillStatusText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial double PrefillProgress { get; set; }
+
+    [ObservableProperty]
+    public partial string PrefillEtaText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string GenerationPhaseText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string GenerationDetailText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial bool ShowGenerationDot { get; set; }
+
+    partial void OnShowGenerationDotChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsIdle));
+    }
+
+    partial void OnPrefillInProgressChanged(bool value)
+    {
+        OnPropertyChanged(nameof(IsIdle));
+    }
+
+    /// <summary>
+    /// True when the bottom-bar indicator is in the idle state (not prefilling, not generating).
+    /// Used to show the "Ready · <speed>" text.
+    /// </summary>
+    public bool IsIdle => !PrefillInProgress && !ShowGenerationDot;
+
+    private static string FormatTokenCount(int tokens)
+    {
+        if (tokens < 1000) return tokens.ToString(CultureInfo.InvariantCulture);
+        if (tokens < 1000000) return (tokens / 1000.0).ToString("0.#") + "K";
+        return (tokens / 1000000.0).ToString("0.#") + "M";
+    }
+
+    /// <summary>
+    /// Gets or creates the <see cref="Services.PrefillPerformanceModel"/> for the currently
+    /// running local model/variant. The model is persisted in the log directory so refined
+    /// speed constants survive restarts.
+    /// </summary>
+    private Services.PrefillPerformanceModel GetOrCreatePrefillModel()
+    {
+        var key = Services.PrefillPerformanceModel.BuildKey(_runningLocalModel, _runningLocalVariant);
+        if (key != _prefillModelKey || _prefillModel is null)
+        {
+            _prefillModelKey = key;
+            var path = Path.Combine(_runtimeService.LogDirectory, "prefill_perf_" + key + ".json");
+            _prefillModel = new Services.PrefillPerformanceModel(path);
+        }
+        return _prefillModel;
+    }
+
+    /// <summary>
+    /// Applies the eased prefill progress curve: linear 0–95%, then an exponential approach
+    /// to 100% so the bar visibly decelerates near the end and only hits 100% on first byte.
+    /// </summary>
+    private static double EasePrefillProgress(double raw)
+    {
+        raw = Math.Clamp(raw, 0.0, 1.0);
+        if (raw < 0.95)
+        {
+            return raw;
+        }
+        const double k = 6.0;
+        return 0.95 + 0.05 * (1.0 - Math.Exp(-k * (raw - 0.95)));
+    }
+
+    /// <summary>
+    /// Starts the prefill timer. Called from <c>PrefillStartedNotice</c>.
+    /// </summary>
+    private void StartPrefillTimer()
+    {
+        _prefillTimer?.Stop();
+        _prefillTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _prefillTimer.Tick += (_, _) =>
+        {
+            var elapsedSeconds = (DateTime.UtcNow - _prefillStartUtc).TotalSeconds;
+            var raw = _prefillEstimatedSeconds > 0 ? elapsedSeconds / _prefillEstimatedSeconds : 0.0;
+            PrefillProgress = EasePrefillProgress(raw);
+
+            var remaining = Math.Max(0, _prefillEstimatedSeconds - (int)elapsedSeconds);
+            var speed = Services.PrefillPerformanceModel.FormatSpeed(GetOrCreatePrefillModel().CurrentSpeedTokensPerSec);
+            PrefillEtaText = remaining > 0
+                ? "~" + remaining + "s remaining" + (string.IsNullOrEmpty(speed) ? "" : " · " + speed)
+                : "finishing…";
+        };
+        _prefillTimer.Start();
+    }
+
+    /// <summary>
+    /// Stops the prefill timer. Called from <c>PrefillFirstByteNotice</c>.
+    /// </summary>
+    private void StopPrefillTimer()
+    {
+        _prefillTimer?.Stop();
+        _prefillTimer = null;
+    }
+
+    /// <summary>
+    /// Starts the generation timer. Called when the first byte arrives (prefill done,
+    /// generation starting). Ticks the elapsed clock and reads the generation speed snapshot.
+    /// </summary>
+    private void StartGenerationTimer()
+    {
+        _generationTimer?.Stop();
+        _generationStartUtc = DateTime.UtcNow;
+        _generationTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _generationTimer.Tick += (_, _) =>
+        {
+            var snapshot = _runtimeService.ReadGenerationSpeedSnapshot();
+            // If the stream has ended (snapshot no longer active), stop the timer and reset.
+            if (snapshot is not null && !snapshot.Active)
+            {
+                StopGenerationTimer();
+                ResetPrefillIndicatorToIdle();
+                return;
+            }
+
+            var elapsedSeconds = (int)(DateTime.UtcNow - _generationStartUtc).TotalSeconds;
+            var tokens = snapshot?.CompletionTokens ?? 0;
+            var speed = snapshot?.TokensPerSecond ?? 0.0;
+
+            GenerationPhaseText = "Generating…";
+            GenerationDetailText = elapsedSeconds + "s" + (tokens > 0 ? " · " + tokens + " tokens" : "") +
+                (speed > 0 ? " · " + speed.ToString("0", CultureInfo.InvariantCulture) + " tok/s" : "");
+            ShowGenerationDot = true;
+        };
+        _generationTimer.Start();
+    }
+
+    /// <summary>
+    /// Stops the generation timer and resets the generation-phase UI. Called when the stream ends.
+    /// </summary>
+    private void StopGenerationTimer()
+    {
+        _generationTimer?.Stop();
+        _generationTimer = null;
+        GenerationPhaseText = string.Empty;
+        GenerationDetailText = string.Empty;
+        ShowGenerationDot = false;
+    }
+
+    /// <summary>
+    /// Resets the bottom-bar indicator to the idle state: empty bar, "Ready · <speed>" text.
+    /// </summary>
+    private void ResetPrefillIndicatorToIdle()
+    {
+        PrefillInProgress = false;
+        PrefillProgress = 0.0;
+        PrefillEtaText = string.Empty;
+        var speed = Services.PrefillPerformanceModel.FormatSpeed(GetOrCreatePrefillModel().CurrentSpeedTokensPerSec);
+        PrefillStatusText = string.IsNullOrEmpty(speed) ? "Ready" : "Ready · " + speed;
+    }
+
     private bool _approvingChosenCloud;
     public bool RecoveryChooserDropDownOpen { get; set; }
 
@@ -3995,7 +4196,7 @@ public partial class MainViewModel : ViewModelBase
         LocalReloadRecommendVisible = false;
         if (!loadSuggested)
         {
-            StatusMessage = "AI-FluxMux will shorten older turns it forwards to the local model. The Client app still has the full chat. Retry this turn.";
+            StatusMessage = "AI-FluxMux will summarize older turns on the next turn. The Client app still has the full chat.";
             RefreshLocalReloadRecommendBanner();
             return;
         }
@@ -12464,8 +12665,9 @@ public partial class MainViewModel : ViewModelBase
         }
 
         IdleTimeoutEnabled = _config.GetBool("IdleTimeoutEnabled", IdleTimeoutEnabled);
-        GenerationSpeedTelemetryEnabled = _config.GetBool("GenerationSpeedTelemetryEnabled", GenerationSpeedTelemetryEnabled);
-        _runtimeService.SetGenerationSpeedTelemetryEnabled(GenerationSpeedTelemetryEnabled);
+        // Generation speed tracking is always enabled (core UX element, not optional).
+        GenerationSpeedTelemetryEnabled = true;
+        _runtimeService.SetGenerationSpeedTelemetryEnabled(true);
         IdleTimeoutMinutes = IdleTimeoutPolicy.ClampMinutes(
             _config.GetInt("IdleTimeoutMinutes", IdleTimeoutPolicy.DefaultMinutes));
         RequestRoutingEnabled = _config.GetBool("RequestRoutingEnabled", RequestRoutingEnabled);
@@ -14062,7 +14264,7 @@ public partial class MainViewModel : ViewModelBase
         _config.SetString("EndpointApp", SelectedEndpointApp?.Trim() ?? string.Empty);
         _config.SetInt("HarnessWebPort", (int)HarnessWebPort);
         _config.SetBool("IdleTimeoutEnabled", IdleTimeoutEnabled);
-        _config.SetBool("GenerationSpeedTelemetryEnabled", GenerationSpeedTelemetryEnabled);
+        _config.SetBool("GenerationSpeedTelemetryEnabled", true);
         _config.SetInt("IdleTimeoutMinutes", (int)IdleTimeoutMinutes);
         _config.SetBool("RequestRoutingEnabled", RequestRoutingEnabled);
         _config.SetBool("InterventionPopupsEnabled", InterventionPopupsEnabled);
@@ -14218,7 +14420,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         HailMaryBannerText = text;
-        HailMaryBannerTooltip = "What it does: deletes the older turns from the middle of this chat's forwarded history so the current turn fits in the model's context window. The most recent turns and your last task are kept. Your chat app still has the full conversation — only what is sent to the model is shortened.\n\nTrade-off: the model will not remember the deleted turns, so it may repeat work or lose track of early decisions. This keeps the conversation going, which is less disruptive than starting a new chat (where the model loses everything). If you have a cloud model ready, switching to it now is safer — the local model keeps its full context. Use this button when you want to keep this chat on the local model.";
+        HailMaryBannerTooltip = "What it does: deletes the older turns from the middle of this chat's forwarded history so the current turn fits in the model's context window. The most recent turns and your last task are kept. Your chat app still has the full conversation — only what is sent to the model is shortened.\n\nWhen to use: this is typically a last resort to reanimate a dead chat — use it when the current turn became large enough to kill the chat before auto-compact could trigger.\n\nTrade-off: the model will not remember the deleted turns, so it may repeat work or lose track of early decisions. This keeps the conversation going, which is less disruptive than starting a new chat (where the model loses everything). If you have a cloud model ready, switching to it now is safer — the local model keeps its full context. Use this button when you want to keep this chat on the local model.";
         HailMaryBannerUrgency = 0; // red — this is a failure state
         HailMaryBannerVisible = true;
         ResetHailMaryPicker(); // one-off: each emergency choice starts fresh

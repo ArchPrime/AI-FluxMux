@@ -3151,20 +3151,6 @@
                                    TextWrapping="NoWrap"
                                    TextTrimming="CharacterEllipsis"
                                    ToolTip.Tip="{Binding ActiveRouteStatusTooltip}" />
-                        <CheckBox Grid.Column="3"
-                                  VerticalAlignment="Center"
-                                  FontSize="11"
-                                  IsChecked="{Binding GenerationSpeedTelemetryEnabled}"
-                                  Content="Reply speed"
-                                  ToolTip.Tip="Show tokens per second for Client-app replies passing through AI-FluxMux. Local models use llama-server timings when available; cloud uses stream estimates. Turn off to skip stream parsing and reduce overhead on long replies." />
-                        <TextBlock Grid.Column="4"
-                                   VerticalAlignment="Center"
-                                   FontSize="11"
-                                   Opacity="0.82"
-                                   TextWrapping="NoWrap"
-                                   TextTrimming="CharacterEllipsis"
-                                   Text="{Binding GenerationSpeedText}"
-                                   IsVisible="{Binding ShowGenerationSpeedText}" />
                         <Button Grid.Column="5"
                                 x:Name="HailMaryButton"
                                 Classes="hailMary"
@@ -3335,7 +3321,7 @@
                                             Margin="0,0,8,4"
                                             IsVisible="{Binding LocalReloadCompactVisible}"
                                             Command="{Binding CompactLocalReloadRecommendCommand}"
-                                            ToolTip.Tip="Shorten older turns that AI-FluxMux forwards to the local model, but only when this chat is actually filling the loaded Context. The Client app still has the full chat. If the suggested model profile's Context is too small for this chat, Compact also loads that model profile." />
+                                            ToolTip.Tip="Compact: shorten the older turns that AI-FluxMux forwards to the local model so the current turn fits in the loaded Context. The Client app still has the full chat.\n\nWhen to use: this is typically a last resort to reanimate a dead chat — use it when the current turn became large enough to kill the chat before auto-compact could trigger.\n\nIf the suggested model profile's Context is too small for this chat, Compact also loads that model profile." />
                                     <Button Content="Load suggested model profile"
                                             Margin="0,0,8,4"
                                             IsVisible="{Binding LocalReloadLoadVisible}"
@@ -3506,7 +3492,11 @@
                               Grid.Row="0"
                               ColumnDefinitions="*,Auto,*"
                               ClipToBounds="True">
-                            <Border Grid.Column="0"
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <Border x:Name="GraphPaneBorder" Grid.Column="0"
                                     ClipToBounds="True"
                                     Background="#101828"
                                     BorderBrush="#344054"
@@ -4017,8 +4007,79 @@
                         </TextBox>
                         </Border>
                         </Grid>
-                        <Grid Grid.Row="1" ColumnDefinitions="*,Auto" ColumnSpacing="8" MinHeight="48">
-                            <WrapPanel Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Right">
+                        <Grid Grid.Row="1" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8" MinHeight="48">
+                            <!-- Full-width prefill/generation indicator: always visible.
+                                 Prefill phase: incremental progress bar (0→95% eased, then 100% on first byte).
+                                 Generation phase: thin baseline + pulsing dot + elapsed clock + live token count.
+                                 Idle: empty bar + "Ready · <speed>" text.
+                                 The bar spans the full width of the bottom bar. -->
+                            <Grid x:Name="ProgressBarContainer" Grid.Column="0" VerticalAlignment="Center" HorizontalAlignment="Stretch">
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <!-- Row 0: the progress bar (spans the terminal panel's width). -->
+                                <ProgressBar Grid.Row="0"
+                                             Height="4"
+                                             Maximum="1"
+                                             Value="{Binding PrefillProgress}"
+                                             IsIndeterminate="False"
+                                             Foreground="#FFFFFF"
+                                             Background="#1E293B"
+                                             ToolTip.Tip="{Binding PrefillStatusText}"
+                                             HorizontalAlignment="Left">
+                                    <ProgressBar.Width>
+                                        <MultiBinding Converter="{x:Static vm:MinOfTwoValuesConverter.Instance}">
+                                            <Binding ElementName="GraphPaneBorder" Path="Bounds.Width" />
+                                            <Binding ElementName="ProgressBarContainer" Path="Bounds.Width" />
+                                        </MultiBinding>
+                                    </ProgressBar.Width>
+                                </ProgressBar>
+                                <!-- Row 1: text labels + pulsing dot. -->
+                                <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" Margin="0,2,0,0">
+                                    <!-- Pulsing dot (visible during generation phase). -->
+                                    <Ellipse Grid.Column="0"
+                                             Width="6"
+                                             Height="6"
+                                             Fill="#0EA5E9"
+                                             VerticalAlignment="Center"
+                                             IsVisible="{Binding ShowGenerationDot}" />
+                                    <!-- Left text: phase label (prefill status, generation phase, or idle). -->
+                                    <TextBlock Grid.Column="1"
+                                               FontSize="11"
+                                               Foreground="#E4E7EC"
+                                               VerticalAlignment="Center"
+                                               Text="{Binding PrefillStatusText}"
+                                               IsVisible="{Binding PrefillInProgress}" />
+                                    <TextBlock Grid.Column="1"
+                                               FontSize="11"
+                                               Foreground="#E4E7EC"
+                                               VerticalAlignment="Center"
+                                               Text="{Binding GenerationPhaseText}"
+                                               IsVisible="{Binding ShowGenerationDot}" />
+                                    <!-- Idle text: "Ready · <speed>" when not prefilling or generating. -->
+                                    <TextBlock Grid.Column="1"
+                                               FontSize="11"
+                                               Foreground="#D0D5DD"
+                                               VerticalAlignment="Center"
+                                               Text="{Binding PrefillStatusText}"
+                                               IsVisible="{Binding IsIdle}" />
+                                    <!-- Right text: ETA (prefill) or detail (generation). -->
+                                    <TextBlock Grid.Column="2"
+                                               FontSize="11"
+                                               Foreground="#D0D5DD"
+                                               VerticalAlignment="Center"
+                                               Text="{Binding PrefillEtaText}"
+                                               IsVisible="{Binding PrefillInProgress}" />
+                                    <TextBlock Grid.Column="2"
+                                               FontSize="11"
+                                               Foreground="#D0D5DD"
+                                               VerticalAlignment="Center"
+                                               Text="{Binding GenerationDetailText}"
+                                               IsVisible="{Binding ShowGenerationDot}" />
+                                </Grid>
+                            </Grid>
+                            <WrapPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
                                 <!-- Stress-test control group: the mode dropdown and the "Stress test"
                                      button are wrapped in a single border so they read as one linked
                                      control. The ComboBox has a FIXED width (120) so the group's
@@ -4072,7 +4133,7 @@
                                         Command="{Binding ClearDiagnosticTerminalCommand}"
                                         ToolTip.Tip="Erase the log on this screen." />
                             </WrapPanel>
-                            <StackPanel Grid.Column="1"
+                            <StackPanel Grid.Column="2"
                                         Orientation="Horizontal"
                                         Spacing="6"
                                         VerticalAlignment="Center">
@@ -4096,7 +4157,5 @@
     </Panel>
 
 </Window>
-
-
 
 

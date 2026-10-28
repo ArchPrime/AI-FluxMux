@@ -152,6 +152,12 @@ public static class LocalHistoryCompaction
         }
 
         var summaryText = BuildForwardSummary(messages, keepStart);
+        if (string.IsNullOrWhiteSpace(summaryText) && force)
+        {
+            // Force-compact: even if there are no specific tool results, notes, or decisions to
+            // summarize, produce a generic summary so the compact can proceed.
+            summaryText = "Compressed prior conversation context (older turns):\n(older turns omitted)";
+        }
         if (string.IsNullOrWhiteSpace(summaryText))
         {
             return null;
