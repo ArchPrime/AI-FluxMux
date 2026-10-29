@@ -1608,15 +1608,9 @@ public partial class TelemetryGraphViewModel : ViewModelBase
         // ensure the range always covers the data.
         var dataMax = _scrollMode ? _maxY : Math.Max(_axisMaxY, _maxY);
 
-        // Apply the Y-axis minimum offset (if set). The Y-axis starts at _yAxisMinOffset
-        // instead of 0, so the range is [_yAxisMinOffset, yMax]. If the offset is
-        // >= the data max (e.g. at turn 1 when data is just starting and below the offset),
-        // fall back to 0 to avoid a negative/zero range.
-        yMin = _yAxisMinOffset;
-        if (dataMax - yMin <= 0)
-        {
-            yMin = 0;
-        }
+        // The Y-axis starts at 0, so the range is [0, yMax]. This keeps the y-axis stable
+        // as new data points are added, avoiding jumping around as the range changes.
+        yMin = 0;
 
         // Reserve headroom above the tallest bar for its value label. The tallest bar (value
         // = dataMax) should sit at screen position (1 - headroomFraction) * 100, leaving

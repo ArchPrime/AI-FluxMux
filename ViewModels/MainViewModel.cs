@@ -4196,7 +4196,7 @@ public partial class MainViewModel : ViewModelBase
         LocalReloadRecommendVisible = false;
         if (!loadSuggested)
         {
-            StatusMessage = "AI-FluxMux will compress context on the next turn as requested. The Client app still has the full chat.";
+            StatusMessage = "AI-FluxMux will compress context on the next turn as requested. The Client app still has the full chat. Send a message to trigger the compaction.";
             RefreshLocalReloadRecommendBanner();
             return;
         }
