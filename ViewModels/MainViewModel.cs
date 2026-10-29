@@ -4013,6 +4013,9 @@ public partial class MainViewModel : ViewModelBase
     public partial string GenerationDetailText { get; set; } = string.Empty;
 
     [ObservableProperty]
+    public partial string GenerationEtaText { get; set; } = string.Empty;
+
+    [ObservableProperty]
     public partial bool ShowGenerationDot { get; set; }
 
     partial void OnShowGenerationDotChanged(bool value)
@@ -4128,6 +4131,21 @@ public partial class MainViewModel : ViewModelBase
             GenerationPhaseText = "Generating…";
             GenerationDetailText = elapsedSeconds + "s" + (tokens > 0 ? " · " + tokens + " tokens" : "") +
                 (speed > 0 ? " · " + speed.ToString("0", CultureInfo.InvariantCulture) + " tok/s" : "");
+
+            // Estimate the ETA based on a typical response length (500 tokens) and the current speed.
+            // This is a rough estimate; the actual response length can vary widely.
+            if (speed > 0)
+            {
+                const int estimatedTotalTokens = 500;
+                var remainingTokens = Math.Max(0, estimatedTotalTokens - tokens);
+                var etaSeconds = (int)(remainingTokens / speed);
+                GenerationEtaText = etaSeconds > 0 ? "~" + etaSeconds + "s remaining" : "finishing…";
+            }
+            else
+            {
+                GenerationEtaText = string.Empty;
+            }
+
             ShowGenerationDot = true;
         };
         _generationTimer.Start();
@@ -4142,19 +4160,21 @@ public partial class MainViewModel : ViewModelBase
         _generationTimer = null;
         GenerationPhaseText = string.Empty;
         GenerationDetailText = string.Empty;
+        GenerationEtaText = string.Empty;
         ShowGenerationDot = false;
     }
 
     /// <summary>
-    /// Resets the bottom-bar indicator to the idle state: empty bar, "Ready · <speed>" text.
+    /// Resets the bottom-bar indicator to the idle state: empty bar, "Ready" text.
     /// </summary>
     private void ResetPrefillIndicatorToIdle()
     {
         PrefillInProgress = false;
         PrefillProgress = 0.0;
         PrefillEtaText = string.Empty;
-        var speed = Services.PrefillPerformanceModel.FormatSpeed(GetOrCreatePrefillModel().CurrentSpeedTokensPerSec);
-        PrefillStatusText = string.IsNullOrEmpty(speed) ? "Ready" : "Ready · " + speed;
+        // Show "Ready" without a speed. The prefill speed is not useful in the idle state
+        // because it's much faster than the generation speed and can be misleading.
+        PrefillStatusText = "Ready";
     }
 
     private bool _approvingChosenCloud;

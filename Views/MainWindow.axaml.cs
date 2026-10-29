@@ -44,6 +44,8 @@ public partial class MainWindow : Window
     private double _stressBarPulsePhase;
     private DispatcherTimer? _hailMaryPulseTimer;
     private double _hailMaryPulsePhase;
+    private DispatcherTimer? _generationDotPulseTimer;
+    private double _generationDotPulsePhase;
 
     static MainWindow()
     {
@@ -201,6 +203,12 @@ public partial class MainWindow : Window
         };
         _stressBarPulseTimer.Tick += OnStressBarPulseTick;
         _stressBarPulseTimer.Start();
+        _generationDotPulseTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(50)
+        };
+        _generationDotPulseTimer.Tick += OnGenerationDotPulseTick;
+        _generationDotPulseTimer.Start();
     }
 
     private void ApplySavedGeometry(MainViewModel vm)
@@ -249,6 +257,21 @@ public partial class MainWindow : Window
         PositionXAxisLabels();
         PositionYAxisLabels();
         PositionBarValueLabels();
+    }
+
+    private void OnGenerationDotPulseTick(object? sender, EventArgs e)
+    {
+        _generationDotPulsePhase += 0.05;
+        if (_generationDotPulsePhase > Math.PI * 2.0)
+        {
+            _generationDotPulsePhase -= Math.PI * 2.0;
+        }
+        var opacity = 0.3 + 0.7 * (0.5 + 0.5 * Math.Sin(_generationDotPulsePhase));
+        var dot = this.FindControl<global::Avalonia.Controls.Shapes.Ellipse>("GenerationDot");
+        if (dot is { IsVisible: true })
+        {
+            dot.Opacity = opacity;
+        }
     }
 
     private void StartHailMaryPulse()

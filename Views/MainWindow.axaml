@@ -4038,12 +4038,14 @@
                                 <!-- Row 1: text labels + pulsing dot. -->
                                 <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" Margin="0,2,0,0">
                                     <!-- Pulsing dot (visible during generation phase). -->
-                                    <Ellipse Grid.Column="0"
+                                    <Ellipse x:Name="GenerationDot"
+                                             Grid.Column="0"
                                              Width="6"
                                              Height="6"
                                              Fill="#0EA5E9"
                                              VerticalAlignment="Center"
-                                             IsVisible="{Binding ShowGenerationDot}" />
+                                             IsVisible="{Binding ShowGenerationDot}"
+                                             Opacity="0.3" />
                                     <!-- Left text: phase label (prefill status, generation phase, or idle). -->
                                     <TextBlock Grid.Column="1"
                                                FontSize="11"
@@ -4064,19 +4066,28 @@
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillStatusText}"
                                                IsVisible="{Binding IsIdle}" />
-                                    <!-- Right text: ETA (prefill) or detail (generation). -->
+                                    <!-- Right text: ETA (prefill) or detail + ETA (generation). -->
                                     <TextBlock Grid.Column="2"
                                                FontSize="11"
                                                Foreground="#D0D5DD"
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillEtaText}"
                                                IsVisible="{Binding PrefillInProgress}" />
-                                    <TextBlock Grid.Column="2"
-                                               FontSize="11"
-                                               Foreground="#D0D5DD"
-                                               VerticalAlignment="Center"
-                                               Text="{Binding GenerationDetailText}"
-                                               IsVisible="{Binding ShowGenerationDot}" />
+                                    <StackPanel Grid.Column="2"
+                                                Orientation="Horizontal"
+                                                VerticalAlignment="Center"
+                                                IsVisible="{Binding ShowGenerationDot}">
+                                        <TextBlock FontSize="11"
+                                                   Foreground="#D0D5DD"
+                                                   VerticalAlignment="Center"
+                                                   Text="{Binding GenerationDetailText}" />
+                                        <TextBlock FontSize="11"
+                                                   Foreground="#0EA5E9"
+                                                   VerticalAlignment="Center"
+                                                   Text="{Binding GenerationEtaText}"
+                                                   Margin="8,0,0,0"
+                                                   IsVisible="{Binding GenerationEtaText, Converter={StaticResource StringToVisibility}}" />
+                                    </StackPanel>
                                 </Grid>
                             </Grid>
                             <WrapPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
