@@ -4,6 +4,28 @@
 
 Current version: **0.3.1 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs` → `FluxMuxAppInfo`).
 
+## ✅ DONE: Don't park llama-server on first-byte hang for long-load/YaRN profiles (10/29)
+
+**What was done:**
+
+1. **Skip the park for long-load/YaRN profiles:**
+   - `FluxMuxGatewayHost.cs` line 1819-1833: When a first-byte hang is detected for a long-load/YaRN profile (`_currentTurnIsLongLoad=true`), the `ParkLocalAfterHangAsync` call is skipped.
+   - A first-byte timeout on a spill prefill is "slow", not "dead". Parking forces a cold reload on the next turn, which is even slower.
+   - The server is kept warm; only park on a confirmed mid-stream stall (non-long-load profiles).
+   - Log message: "local stream hang: skipping park for long-load/YaRN profile (first-byte timeout is slow, not dead)"
+
+**Why this helps:**
+- When you switch to a YaRN profile mid-chat, llama-server restarts with the new context size.
+- The old KV cache is gone, so the new model has to prefill the entire conversation from scratch (takes minutes).
+- Previously, the hang-watch would detect no first byte after 600s and park llama-server, forcing a cold reload on the next turn (even slower).
+- Now, the server is kept warm, so the next turn is fast (KV cache is warm).
+
+**Tests:** All 1728 tests pass.
+
+**State:** COMPILED & TESTED — 0 build errors, 1728/1728 tests pass.
+
+**Deploy:** Close the running app → `build-fluxmux.bat clean` → restart.
+
 ## ✅ DONE: Data-driven prefill progress indicator + generation phase (10/28)
 
 **What was done:**

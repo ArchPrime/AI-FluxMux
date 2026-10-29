@@ -1816,10 +1816,21 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 message = LocalStreamHangPolicy.FormatHangAbortMessage(endpointApp, hangDetails);
                 hint = string.Empty;
                 errorType = "request_timeout";
-                var park = ParkLocalAfterHangAsync;
-                if (park is not null)
+                // Don't park llama-server on a first-byte hang for long-load/YaRN profiles.
+                // A first-byte timeout on a spill prefill is "slow", not "dead". Parking
+                // forces a cold reload on the next turn, which is even slower. Keep the
+                // server warm; only park on a confirmed mid-stream stall.
+                if (!_currentTurnIsLongLoad)
                 {
-                    _ = park();
+                    var park = ParkLocalAfterHangAsync;
+                    if (park is not null)
+                    {
+                        _ = park();
+                    }
+                }
+                else
+                {
+                    Log("local stream hang: skipping park for long-load/YaRN profile (first-byte timeout is slow, not dead)");
                 }
 
                 var recStatus = Str(LoadRecommend(), "status");
