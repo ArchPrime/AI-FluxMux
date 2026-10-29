@@ -1626,14 +1626,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 // load + KV cache allocation) or in the first request (lazy KV allocation).
                 var ttfbStopwatch = Stopwatch.StartNew();
                 var firstByteLogged = false;
-                // Fix 3 — prefill progress indicator: signal the UI that prefill has begun for
-                // this local turn, with the measured prompt-token count so it can estimate how
-                // long the prefill will take. Only for local routes (cloud turns don't prefill
-                // on the user's hardware).
-                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
-                {
-                    ReportPrefillStarted?.Invoke(measuredPromptTokens ?? 0);
-                }
+                // Prefill/generation progress indicator: signal the UI that a turn has begun,
+                // with the measured prompt-token count so it can estimate how long the wait will
+                // take. Fires for all routes (local and cloud) so the bar never sits idle while
+                // the user is awaiting a response. For cloud routes the "prefill" phase is really
+                // "waiting for first byte from the cloud provider."
+                ReportPrefillStarted?.Invoke(measuredPromptTokens ?? 0);
                 try
                 {
                     var copy = await OpenAiStreamTelemetryProxy.CopyAsync(
@@ -1651,12 +1649,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
                                 {
                                     firstByteLogged = true;
                                     Log($"ttfb: first byte after {ttfbStopwatch.ElapsedMilliseconds} ms (model={model})");
-                                    // Fix 3 — prefill complete: tell the UI to stop the
-                                    // "Prefilling context…" indicator.
-                                    if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        ReportPrefillFirstByte?.Invoke(ttfbStopwatch.ElapsedMilliseconds);
-                                    }
+                                    // Prefill/first-byte complete: tell the UI to switch to the
+                                    // generation phase. Fires for all routes.
+                                    ReportPrefillFirstByte?.Invoke(ttfbStopwatch.ElapsedMilliseconds);
                                 }
                             }
                             hangClock.NoteByte();
@@ -1726,7 +1721,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 return;
             }
 
+            // Non-streaming (application/json) path: the whole response is read before it is
+            // sent to the client, so the user waits during ReadAsByteArrayAsync. Fire the
+            // prefill/first-byte notices here too so the bottom-bar indicator shows activity
+            // instead of sitting idle. (The streaming path fires these earlier.)
+            ReportPrefillStarted?.Invoke(measuredPromptTokens ?? 0);
+            var nonStreamStopwatch = Stopwatch.StartNew();
             var bytes = await response.Content.ReadAsByteArrayAsync(timeoutCts.Token).ConfigureAwait(false);
+            ReportPrefillFirstByte?.Invoke(nonStreamStopwatch.ElapsedMilliseconds);
             _generationSpeed?.ProcessJsonBody(bytes);
             if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
             {

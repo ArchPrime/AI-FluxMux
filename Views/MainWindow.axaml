@@ -4035,17 +4035,10 @@
                                         </MultiBinding>
                                     </ProgressBar.Width>
                                 </ProgressBar>
-                                <!-- Row 1: text labels + pulsing dot. -->
-                                <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" Margin="0,2,0,0">
-                                    <!-- Pulsing dot (visible during generation phase). -->
-                                    <Ellipse x:Name="GenerationDot"
-                                             Grid.Column="0"
-                                             Width="6"
-                                             Height="6"
-                                             Fill="#0EA5E9"
-                                             VerticalAlignment="Center"
-                                             IsVisible="{Binding ShowGenerationDot}"
-                                             Opacity="0.3" />
+                                <!-- Row 1: text labels. No width binding here: the row spans the
+                                     container, and the divider-resize must not reflow the text.
+                                     The ETA sits in the rightmost column (right edge of the row). -->
+                                 <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" Margin="0,2,0,0" Height="16" ClipToBounds="False">
                                     <!-- Left text: phase label (prefill status, generation phase, or idle). -->
                                     <TextBlock Grid.Column="1"
                                                FontSize="11"
@@ -4053,12 +4046,31 @@
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillStatusText}"
                                                IsVisible="{Binding PrefillInProgress}" />
-                                    <TextBlock Grid.Column="1"
-                                               FontSize="11"
-                                               Foreground="#E4E7EC"
-                                               VerticalAlignment="Center"
-                                               Text="{Binding GenerationPhaseText}"
-                                               IsVisible="{Binding ShowGenerationDot}" />
+                                     <!-- Generation phase: line 1 = "Generating…" + detail (seconds/tokens/speed),
+                                          line 2 = ETA. Vertical layout so the ETA sits on its own line
+                                          below the detail text instead of overlapping it. -->
+                                     <StackPanel Grid.Column="1"
+                                                 Orientation="Vertical"
+                                                 VerticalAlignment="Center"
+                                                 HorizontalAlignment="Left"
+                                                 IsVisible="{Binding ShowGenerationDot}">
+                                         <StackPanel Orientation="Horizontal">
+                                             <TextBlock x:Name="GenerationPhaseTextBlock"
+                                                        FontSize="11"
+                                                        Foreground="#E4E7EC"
+                                                        VerticalAlignment="Center"
+                                                        Text="{Binding GenerationPhaseText}" />
+                                             <TextBlock FontSize="11"
+                                                        Foreground="#D0D5DD"
+                                                        VerticalAlignment="Center"
+                                                        Margin="8,0,0,0"
+                                                        Text="{Binding GenerationDetailText}" />
+                                         </StackPanel>
+                                         <TextBlock FontSize="11"
+                                                    Foreground="#D0D5DD"
+                                                    Margin="0,1,0,0"
+                                                    Text="{Binding GenerationEtaText}" />
+                                     </StackPanel>
                                     <!-- Idle text: "Ready · <speed>" when not prefilling or generating. -->
                                     <TextBlock Grid.Column="1"
                                                FontSize="11"
@@ -4066,28 +4078,13 @@
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillStatusText}"
                                                IsVisible="{Binding IsIdle}" />
-                                    <!-- Right text: ETA (prefill) or detail + ETA (generation). -->
+                                    <!-- Right text: ETA (prefill) or ETA (generation), right-aligned. -->
                                     <TextBlock Grid.Column="2"
                                                FontSize="11"
                                                Foreground="#D0D5DD"
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillEtaText}"
                                                IsVisible="{Binding PrefillInProgress}" />
-                                    <StackPanel Grid.Column="2"
-                                                Orientation="Horizontal"
-                                                VerticalAlignment="Center"
-                                                IsVisible="{Binding ShowGenerationDot}">
-                                        <TextBlock FontSize="11"
-                                                   Foreground="#D0D5DD"
-                                                   VerticalAlignment="Center"
-                                                   Text="{Binding GenerationDetailText}" />
-                                        <TextBlock FontSize="11"
-                                                   Foreground="#0EA5E9"
-                                                   VerticalAlignment="Center"
-                                                   Text="{Binding GenerationEtaText}"
-                                                   Margin="8,0,0,0"
-                                                   IsVisible="{Binding GenerationEtaText, Converter={StaticResource StringToVisibility}}" />
-                                    </StackPanel>
                                 </Grid>
                             </Grid>
                             <WrapPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">

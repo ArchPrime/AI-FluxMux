@@ -44,8 +44,8 @@ public partial class MainWindow : Window
     private double _stressBarPulsePhase;
     private DispatcherTimer? _hailMaryPulseTimer;
     private double _hailMaryPulsePhase;
-    private DispatcherTimer? _generationDotPulseTimer;
-    private double _generationDotPulsePhase;
+    private DispatcherTimer? _generationTextPulseTimer;
+    private double _generationTextPulsePhase;
 
     static MainWindow()
     {
@@ -203,12 +203,12 @@ public partial class MainWindow : Window
         };
         _stressBarPulseTimer.Tick += OnStressBarPulseTick;
         _stressBarPulseTimer.Start();
-        _generationDotPulseTimer = new DispatcherTimer
+        _generationTextPulseTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(50)
         };
-        _generationDotPulseTimer.Tick += OnGenerationDotPulseTick;
-        _generationDotPulseTimer.Start();
+        _generationTextPulseTimer.Tick += OnGenerationTextPulseTick;
+        _generationTextPulseTimer.Start();
     }
 
     private void ApplySavedGeometry(MainViewModel vm)
@@ -259,18 +259,18 @@ public partial class MainWindow : Window
         PositionBarValueLabels();
     }
 
-    private void OnGenerationDotPulseTick(object? sender, EventArgs e)
+    private void OnGenerationTextPulseTick(object? sender, EventArgs e)
     {
-        _generationDotPulsePhase += 0.05;
-        if (_generationDotPulsePhase > Math.PI * 2.0)
+        _generationTextPulsePhase += 0.15;
+        if (_generationTextPulsePhase > Math.PI * 2.0)
         {
-            _generationDotPulsePhase -= Math.PI * 2.0;
+            _generationTextPulsePhase -= Math.PI * 2.0;
         }
-        var opacity = 0.3 + 0.7 * (0.5 + 0.5 * Math.Sin(_generationDotPulsePhase));
-        var dot = this.FindControl<global::Avalonia.Controls.Shapes.Ellipse>("GenerationDot");
-        if (dot is { IsVisible: true })
+        var opacity = 0.3 + 0.7 * (0.5 + 0.5 * Math.Sin(_generationTextPulsePhase));
+        var text = this.FindControl<global::Avalonia.Controls.TextBlock>("GenerationPhaseTextBlock");
+        if (text is { IsVisible: true })
         {
-            dot.Opacity = opacity;
+            text.Opacity = opacity;
         }
     }
 

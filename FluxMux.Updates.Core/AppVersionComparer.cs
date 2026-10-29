@@ -7,9 +7,9 @@ namespace FluxMux.Updates.Core;
 
 public static class FluxMuxAppInfo
 {
-    public const string Version = "0.3.2 beta";
-    public const string ProductTitle = "AI-FluxMux v0.3.2 beta";
-    public const string UserAgent = "AI-FluxMux/0.3.2-beta";
+    public const string Version = "0.3.3 beta";
+    public const string ProductTitle = "AI-FluxMux v0.3.3 beta";
+    public const string UserAgent = "AI-FluxMux/0.3.3-beta";
     public const string Copyright = "© 2026 Paul King · Architecture Prime Ltd";
 }
 

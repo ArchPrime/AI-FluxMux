@@ -454,7 +454,7 @@ public partial class MainViewModel : ViewModelBase
         // what is happening, especially during significant delays.
         _runtimeService.GatewayLogLine += line =>
         {
-            SafeUiInvoke(() => AppendDiagnosticEntry("GW", line));
+            SafeUiInvoke(() => AppendDiagnosticEntry("GATE", line));
         };
         // Prefill progress: when a local turn is sent to llama-server, show a full-width
         // incremental progress bar in the bottom bar. The bar advances based on a self-refining
@@ -474,7 +474,16 @@ public partial class MainViewModel : ViewModelBase
 
                 _prefillPromptTokens = promptTokens;
                 _prefillStartUtc = DateTime.UtcNow;
-                _prefillEstimatedSeconds = GetOrCreatePrefillModel().EstimateSeconds(promptTokens);
+                // Cold start detection: when the local model is not yet ready (still loading,
+                // or no model loaded), the first request triggers a cold load (model load +
+                // KV cache allocation) which takes ~30s regardless of prompt size. The warm-speed
+                // model would under-estimate this as ~2s, so the bar fills instantly then sits
+                // at 100% for 28s. Use a conservative 60s estimate for cold starts so the bar
+                // advances slowly and the user knows to wait.
+                var isColdStart = _runtimeService.IsLocalModelCold;
+                _prefillEstimatedSeconds = isColdStart
+                    ? 60
+                    : GetOrCreatePrefillModel().EstimateSeconds(promptTokens);
                 StartPrefillTimer();
 
                 // Only emit the warming-up terminal line once per session.

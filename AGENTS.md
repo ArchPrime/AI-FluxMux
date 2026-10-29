@@ -1,6 +1,6 @@
 # AI-FluxMux — resume here
 
-This folder is the Avalonia desktop app **AI-FluxMux v0.3.2 beta**. It launches local GGUF models through **llama-server**, can route cloud models, and presents one OpenAI-compatible address to a **Client app** (Cline or Harness).
+This folder is the Avalonia desktop app **AI-FluxMux v0.3.3 beta**. It launches local GGUF models through **llama-server**, can route cloud models, and presents one OpenAI-compatible address to a **Client app** (Cline or Harness).
 
 Open **this folder** as the Cursor workspace. The parent `Workspace` git tree also holds other projects; its `AGENTS.md` is a WinForms layout policy and does not apply here.
 

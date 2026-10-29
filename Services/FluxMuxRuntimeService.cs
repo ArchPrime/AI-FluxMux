@@ -8123,7 +8123,32 @@ public sealed class FluxMuxRuntimeService
 			// profile switch (e.g. VRAM-only 213056 -> YaRN 393216), which made the gateway's
 			// pre-flight blocking check misclassify the prompt as "context overflow" and Cline's
 			// context bar show the wrong (smaller) context.
-			if (_managedLocalContext > 0 && ParseInt(GetString(state, "local_context"), 0) != _managedLocalContext)
+			//
+			// GUARD (YaRN auto-load regression, 10/30): _managedLocalContext is set from the
+			// *launching* profile's OverrideContext and persists in memory. If the app last
+			// launched the standard VRAM profile (OverrideContext 262144), _managedLocalContext
+			// stays 262144. A subsequent YaRN launch (real window 393216) would otherwise have
+			// its local_context clobbered down to 262144 by the diff-check below, because the
+			// stored value "differs" from the managed one. That made the gateway run a YaRN
+			// profile against the wrong (smaller) window -> overflow / spill-compact / slow
+			// prefill on large chats. Full-VRAM profiles were unaffected because their real
+			// context ~= the managed value, so the overwrite was a no-op.
+			//
+			// Fix: only refresh these launch-stamped fields when the stored state actually
+			// belongs to the managed model/variant. When the stored state is a *different*
+			// valid profile (mid-session switch, or a stale state from another profile), leave
+			// its context alone -- the launch-success path (WriteProxyRuntimeStateForLocal)
+			// stamps the correct value for the profile that is actually running.
+			var storedModel = GetString(state, "local_preferred_model");
+			var storedVariant = FirstNonEmpty(GetString(state, "local_variant"), "(defaults)");
+			var managedModel = _managedLocalModel ?? string.Empty;
+			var managedVariant = FirstNonEmpty(_managedLocalVariant, "(defaults)");
+			var stateBelongsToManagedProfile =
+				!string.IsNullOrWhiteSpace(managedModel)
+				&& managedModel.Equals(storedModel ?? string.Empty, StringComparison.OrdinalIgnoreCase)
+				&& managedVariant.Equals(storedVariant, StringComparison.OrdinalIgnoreCase);
+			if (_managedLocalContext > 0 && stateBelongsToManagedProfile
+				&& ParseInt(GetString(state, "local_context"), 0) != _managedLocalContext)
 			{
 				state["local_context"] = _managedLocalContext;
 			}
@@ -8136,12 +8161,12 @@ public sealed class FluxMuxRuntimeService
 			// mid-launch turn already sees local_context=0 (cleared by ClearStaleLocalContextForStartup),
 			// so this cannot block a switch.
 			var storedExtendIntoRam = ParseBool(GetString(state, "local_extend_context_into_ram"), fallback: false);
-			if (storedExtendIntoRam != _managedLocalExtendContextIntoRam)
+			if (stateBelongsToManagedProfile && storedExtendIntoRam != _managedLocalExtendContextIntoRam)
 			{
 				state["local_extend_context_into_ram"] = _managedLocalExtendContextIntoRam ? "true" : "false";
 			}
 			var storedVramContext = ParseInt(GetString(state, "local_vram_context"), 0);
-			if (storedVramContext != _managedLocalVramContext)
+			if (stateBelongsToManagedProfile && storedVramContext != _managedLocalVramContext)
 			{
 				state["local_vram_context"] = _managedLocalVramContext;
 			}
@@ -9679,6 +9704,35 @@ public sealed class FluxMuxRuntimeService
 		catch
 		{
 			return 0;
+		}
+	}
+
+	/// <summary>
+	/// True when the local model is not yet ready (still loading, or no model loaded).
+	/// Used to detect cold starts so the prefill progress bar can use a conservative
+	/// estimate instead of the warm-speed model (which would under-estimate a 30s cold load
+	/// as ~2s).
+	/// </summary>
+	public bool IsLocalModelCold
+	{
+		get
+		{
+			try
+			{
+				if (!File.Exists(_localRuntimeStatePath))
+				{
+					return true;
+				}
+				JsonObject root = LoadJson(_localRuntimeStatePath);
+				string phase = GetString(root, "phase");
+				// "ready" means the model is loaded and warm. Anything else (loading, launching,
+				// empty, etc.) means the first request will trigger a cold load.
+				return !phase.Equals("ready", StringComparison.OrdinalIgnoreCase);
+			}
+			catch
+			{
+				return true;
+			}
 		}
 	}
 
