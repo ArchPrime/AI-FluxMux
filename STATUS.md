@@ -4,6 +4,36 @@
 
 Current version: **0.3.1 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs` → `FluxMuxAppInfo`).
 
+## ✅ DONE: Pulsing dot animation + generation ETA + fix 'Ready' state (10/29)
+
+**What was done:**
+
+1. **Pulsing dot animation:**
+   - Added a `DispatcherTimer` that pulses the generation dot's opacity
+   - The dot now smoothly pulses between 0.3 and 1.0 opacity
+   - Follows the same pattern as the existing stress bar pulse
+   - `Views/MainWindow.axaml.cs`: Added `_generationDotPulseTimer` field + `OnGenerationDotPulseTick` method
+
+2. **Generation ETA:**
+   - Added a `GenerationEtaText` property to `MainViewModel`
+   - Estimates the ETA based on a typical response length (500 tokens) and the current generation speed
+   - Displays the ETA in blue next to the generation detail text
+   - Shows "finishing…" when the response is nearly complete
+   - `ViewModels/MainViewModel.cs`: Added `GenerationEtaText` property + ETA calculation in the generation timer
+   - `Views/MainWindow.axaml`: Added a `StackPanel` with two `TextBlock`s for the generation detail + ETA
+
+3. **Fixed 'Ready' state:**
+   - The 'Ready' state no longer shows the prefill speed
+   - The prefill speed is much faster than the generation speed and can be misleading in the idle state
+   - Now just shows 'Ready' without a speed
+   - `ViewModels/MainViewModel.cs`: Updated `ResetPrefillIndicatorToIdle` to not show the prefill speed
+
+**Tests:** All 1728 tests pass.
+
+**State:** COMPILED & TESTED — 0 build errors, 1728/1728 tests pass.
+
+**Deploy:** Close the running app → `build-fluxmux.bat clean` → restart.
+
 ## ✅ DONE: Don't park llama-server on first-byte hang for long-load/YaRN profiles (10/29)
 
 **What was done:**
