@@ -1,4 +1,4 @@
-# AI-FluxMux 0.3.2 beta
+# AI-FluxMux 0.3.3 beta
 
 Desktop router for local and cloud models. Designed for any OpenAI-compatible Client app (Cline, DeepSeek Harness, and similar). Extensive control, turn by turn, or per stored model profile, or via port rules, over model behavior. Model tuning wizard, model switch testing, YaRN context extension and more.
 
@@ -13,12 +13,15 @@ Desktop router for local and cloud models. Designed for any OpenAI-compatible Cl
 - **Port rules (optional)** — watch a local Client-app turn for a hang, tool mill, repeated command, diagnostic dump, filling Context, or llama-server still loading. Pause in time and offer **Send this turn anyway**, **End this turn**, **Let me steer**, or switch to a ready cloud. Turn the whole set off to forward without intervention. Cloud models do not use Port rules.
 - **Compact and omit** — shorten older turns and stub older tool bodies on the pack forwarded to llama-server. The Client app still has the full chat.
 - **Route requests** — when the loaded local cannot take a turn, or a ready cloud would spare RAM, AI-FluxMux asks before switching. Overlay temperature / max tokens can apply without a reload.
+- **Generation progress** — live progress bar that moves during thinking/prefill and generation phases, with data-driven prefill estimates and generation ETA.
+- **Compaction controls respect the client** — when the selected client reinflates context with full chat history each turn (Cline-like), forward-prune, auto-compact, and compact controls are disabled automatically.
+- **YaRN context extension** — extend a local model's context far beyond its VRAM budget, up to 1M tokens, by spilling the KV cache into system RAM.
 - **In-app Help** — install, llama-server, Cline, Harness, and Port rules. Setting Help links keep a stable topic id so a later Help text update does not break the jump.
 
 ## Install (Release zip)
 
 1. Download the app zip. Use this direct link (it skips the GitHub releases page, whose asset list can fail to load):
-   [AI-FluxMux-0.3.2-beta.zip](https://github.com/ArchPrime/AI-FluxMux/releases/download/v0.3.2-beta/AI-FluxMux-0.3.2-beta.zip)
+   [AI-FluxMux-0.3.3-beta.zip](https://github.com/ArchPrime/AI-FluxMux/releases/download/v0.3.3-beta/AI-FluxMux-0.3.3-beta.zip)
    It is about 85 MB. Do **not** use the "Source code (zip)" download on the repo's Code menu — that is the source to build from, not the app, and it has no ready-to-run exe.
 2. Unzip it. You get a folder of files (no nested subfolder). Move or open that folder somewhere you own (for example `C:\AI-FluxMux`). Do not use Program Files — Help updates write next to the program, and Windows will refuse that there.
 3. Double-click `FluxMux.Avalonia.exe` **inside that unzipped folder**. If Windows SmartScreen appears, choose **More info**, then **Run anyway**. This build is not code-signed.
@@ -39,7 +42,7 @@ Do not copy `fluxmux_config.json` or `fluxmux_secrets.json` from a development P
 Publishing into `artifacts\publish` is safe while the Debug window is open:
 
 ```
-dotnet publish -c Release -p:PublishProfile=win-x64-selfcontained -o artifacts\publish\AI-FluxMux-0.3.2-beta
+dotnet publish -c Release -p:PublishProfile=win-x64-selfcontained -o artifacts\publish\AI-FluxMux-0.3.3-beta
 ```
 
 Zip that folder. Do not launch the daily app from `artifacts\`.
