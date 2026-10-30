@@ -373,7 +373,7 @@ It was added to fix a *stale* context after a profile switch (VRAM-only → YaRN
 
 **Deploy:** Close the running app → `build-fluxmux.bat clean` → restart.
 
-## 🔍 ADVERSARIAL CODE REVIEW (10/30)
+## 🔍 ADVERSARIAL CODE REVIEW (10/30, updated 10/31)
 
 Full review of the codebase for dead/brittle code, inefficient/bloated code, architectural shortcomings, and security problems. Findings ordered by severity.
 
@@ -385,11 +385,14 @@ Full review of the codebase for dead/brittle code, inefficient/bloated code, arc
 | **HIGH** | Security | Gateway has no authentication, CORS wildcard | `FluxMuxGatewayHost.cs:3825` |
 | **HIGH** | Architecture | God object: 20,875 lines, 330 properties, 682 methods | `MainViewModel.cs` |
 | **HIGH** | Architecture | Second god object: 9,066 lines, 13 nullable warnings suppressed | `FluxMuxRuntimeService.cs` |
+| **HIGH** | Cross-platform | Windows-specific code scattered across 7 files with no abstraction layer | `FluxMuxRuntimeService.cs`, `MainViewModel.cs`, `MainWindow.axaml.cs`, `App.axaml.cs`, `HostTelemetrySampler.cs`, `HarnessUpdateService.cs`, `StartupCrashLog.cs` |
 | **MEDIUM** | Security | Fire-and-forget tasks with no cancellation | `FluxMuxGatewayHost.cs:325` |
 | **MEDIUM** | Security | Non-atomic file writes (20+ state files) | `FluxMuxGatewayHost.cs`, `FluxMuxRuntimeService.cs` |
 | **MEDIUM** | Brittle | 97 `FindControl` calls by string name | `MainWindow.axaml.cs` |
 | **MEDIUM** | Brittle | 353 string-based config/JSON keys | `MainViewModel.cs`, services |
 | **MEDIUM** | Inefficiency | Forever-running 50ms timers with `FindControl` in hot path | `MainWindow.axaml.cs:200-211` |
+| **MEDIUM** | Performance | Launch monitor polls every 2s; VRAM settle wait is 20s fixed | `FluxMuxRuntimeService.cs:3854,3899`, `LocalLaunchStartupRetry.cs:14` |
+| **MEDIUM** | Performance | Gateway polls state every 250ms in multiple loops | `FluxMuxGatewayHost.cs` (6× `Task.Delay(250)`) |
 | **LOW** | Brittle | File-wide `#pragma warning disable` (13 nullable warnings) | `FluxMuxRuntimeService.cs:1` |
 | **LOW** | Dead code | 3 empty `catch (OperationCanceledException) { }` blocks | `ContextFillStressProbe.cs`, `MainViewModel.cs` |
 | **LOW** | Architecture | No DI container, no interface abstractions | `MainViewModel.cs` constructor |
@@ -455,6 +458,83 @@ Full review of the codebase for dead/brittle code, inefficient/bloated code, arc
 Items 1–4 are security fixes (do first). Items 5–8 are architectural improvements (incremental).
 
 **State:** REVIEW ONLY — no code changes made. Findings are analysis; none are yet implemented.
+
+### 6. Cross-Platform Concerns (NEW — 10/31)
+
+**6.1 Windows-specific code is scattered, not isolated.** Seven files use `OperatingSystem.IsWindows()` or `#if WINDOWS` to gate Windows-specific behavior:
+- `FluxMuxRuntimeService.cs` — GPU process enumeration, process management
+- `MainViewModel.cs` — GPU preference, display topology
+- `MainWindow.axaml.cs` — UI-specific Windows behavior
+- `App.axaml.cs` — startup crash logging
+- `HostTelemetrySampler.cs` — telemetry collection
+- `HarnessUpdateService.cs` — update mechanism
+- `StartupCrashLog.cs` — crash logging
+
+Two files are fully Windows-only (`[SupportedOSPlatform("windows")]`):
+- `WindowsGpuPreference.cs` — Registry-based GPU affinity
+- `DisplayTopologyService.cs` — P/Invoke `EnumDisplayDevices`
+
+**Impact:** To port to Linux/macOS, every one of these 7 files needs a platform check or a separate implementation. There is no `IGpuService`, `IDisplayService`, `IProcessService`, or `IUpdateService` interface to swap implementations against.
+
+**Recommendation:**
+1. Define platform-agnostic interfaces: `IGpuPreferenceService`, `IDisplayTopologyService`, `IProcessManager`, `IUpdateService`, `ICrashLogger`.
+2. Move Windows implementations into a `Services/Windows/` subfolder.
+3. Use a platform factory (`PlatformServiceFactory.CreateGpuPreference()`) that returns the right implementation at startup.
+4. This also makes unit testing easier — mock the interfaces instead of hitting the Registry or P/Invoke.
+
+**6.2 `WindowsGpuPreference` writes to the Registry directly.** The `Apply` method writes to `HKCU\Software\Microsoft\DirectX\UserGpuPreferences` and backs up the original values to a `.reg` file. On Linux/macOS, GPU affinity is managed differently (e.g., `nvidia-smi` on Linux, `system_profiler` on macOS). The Registry path is a hard blocker for cross-platform.
+
+**6.3 `DisplayTopologyService` uses P/Invoke `EnumDisplayDevices`.** This is Windows-only. On Linux, `xrandr` or `wayland` would be the equivalent; on macOS, `CGGetActiveDisplayList` (CoreGraphics). The pure decision logic (`ClassifyTopology`, `BuildAdvice`) is already separated from the P/Invoke, which is good — but the P/Invoke layer needs a platform abstraction.
+
+### 7. Performance Concerns (NEW — 10/31)
+
+**7.1 Launch monitor polls every 2s; VRAM settle wait is 20s fixed.**
+- `FluxMuxRuntimeService.cs:3854` — `await Task.Delay(2000, launchToken)` when model is not ready.
+- `FluxMuxRuntimeService.cs:3899` — `await Task.Delay(2000, launchToken)` when public endpoint probe fails.
+- `LocalLaunchStartupRetry.cs:14` — `VramSettleMs = 20000` (20s fixed wait for VRAM to settle after a kill).
+
+**Impact:** A cold launch that needs 30s to load the model will poll 15 times (30s / 2s). The 20s VRAM settle wait is a fixed delay that adds to launch time even when VRAM is already free. **User impact:** extends wait times by up to 20s on every launch that follows a kill.
+
+**Recommendation:**
+- Make the poll interval adaptive: start at 500ms, back off to 2s after 10 failed polls.
+- Make the VRAM settle wait adaptive: poll every 1s and exit as soon as VRAM looks settled (the `VramLooksSettled` logic already exists — just use it in a loop instead of a fixed 20s wait).
+
+**7.2 Gateway polls state every 250ms in multiple loops.**
+- `FluxMuxGatewayHost.cs` has 6× `Task.Delay(250)` in different polling loops.
+
+**Impact:** Each 250ms poll is a context switch + state read. With 6 loops running concurrently, that's 24 state reads per second. **User impact:** negligible for the user, but adds CPU overhead and makes the gateway less responsive to actual state changes.
+
+**Recommendation:** Consolidate the polling loops into a single timer with a 1s interval, or use event-driven state changes instead of polling.
+
+**7.3 `Task.Delay(0)` in `TestLocalServerReadinessAsync`.**
+- `FluxMuxRuntimeService.cs` — `await Task.Delay(0, cancellationToken)` at the start of the method.
+
+**Impact:** This is a no-op yield that adds a context switch for no reason. **User impact:** negligible, but it's a code smell.
+
+**Recommendation:** Remove the `Task.Delay(0)` unless it's specifically needed to yield to the message pump.
+
+### 8. Recent Changes Review (NEW — 10/31)
+
+**8.1 VRAM spill dialog rewording (commit `eaae71d`).** The Hail Mary sentence now says "If enabled and your client supports it, the Hail Mary option is a targeted last resort..." This is a good change — it makes clear the option only applies when it's enabled and the client supports it. No performance or brittleness concerns.
+
+**8.2 Scanner findings fixes (commit `9178c8c`).** Pinned GitHub Actions, added SECURITY.md, dependabot.yml, .codexignore, renamed `DummyApiKey` → `LocalApiKeyPlaceholder`. No performance or brittleness concerns. The rename is clean — all usages and tests updated.
+
+**8.3 Compaction controls gating (commit `ce94ca4`).** `CompactionControlsEnabled` disables forward-prune / auto-compact / compact when the client reinflates context (Cline-like). This is a good change — it prevents incompatible compaction from running. No performance concerns.
+
+**8.4 Diagnostics dropdown alignment (commit `ce94ca4`).** The "User client/agent?" dropdown now aligns with the adjacent buttons. No performance or brittleness concerns.
+
+### 9. Recommendations Summary (UPDATED — 10/31)
+
+| Priority | Recommendation | Effort | Impact |
+|----------|---------------|--------|--------|
+| **HIGH** | Define platform-agnostic interfaces for GPU, display, process, update, crash logging | Medium | Enables Linux/macOS port |
+| **HIGH** | Make launch monitor poll interval adaptive (500ms → 2s backoff) | Low | Reduces launch time by up to 10s |
+| **HIGH** | Make VRAM settle wait adaptive (poll + exit when settled) | Low | Reduces launch time by up to 20s |
+| **MEDIUM** | Consolidate gateway polling loops into a single 1s timer | Medium | Reduces CPU overhead |
+| **MEDIUM** | Fix nullable warnings in `FluxMuxRuntimeService.cs` and remove `#pragma warning disable` | High | Improves code safety |
+| **MEDIUM** | Use atomic writes for state files | Medium | Prevents corruption on crash |
+| **LOW** | Remove `Task.Delay(0)` in `TestLocalServerReadinessAsync` | Trivial | Code cleanliness |
+| **LOW** | Use constants for config/JSON keys instead of string literals | High | Prevents silent failures |
 
 ---
 
