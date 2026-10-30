@@ -47,7 +47,7 @@ Current version: **0.3.3 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs
 - **PLUGIN_JSON_MISSING/INVALID:** AI-FluxMux is a desktop app, not a Codex plugin. The scanner's "plugin" scope is a false positive. No `.codex-plugin/plugin.json` added (would be misleading).
 - **License clarity:** The README already clearly states PolyForm Noncommercial License 1.0.0 and that commercial use requires a separate licence. No change needed.
 
-**Next step:** Link a fresh source commit (`9178c8c` or later) for centralized rescan. The listing stays unapproved until a fresh centralized score ≥80 and independent review.
+**Next step:** ✅ DONE (10/31) — Commented on awesome-ai-plugins PR #961 linking the fresh source commit `eaae71d` and requesting a rescan. Awaiting the centralized scan result (score ≥80 required). The listing stays unapproved until a fresh centralized score ≥80 and independent review.
 
 ## ✅ FIXED: Autolaunch hang + 503 retry storm (10/30)
 
