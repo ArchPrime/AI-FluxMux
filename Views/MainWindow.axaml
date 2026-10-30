@@ -4039,8 +4039,10 @@
                                      container, and the divider-resize must not reflow the text.
                                      The ETA sits in the rightmost column (right edge of the row). -->
                                  <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" Margin="0,2,0,0" Height="16" ClipToBounds="False">
-                                    <!-- Left text: phase label (prefill status, generation phase, or idle). -->
-                                    <TextBlock Grid.Column="1"
+                                    <!-- Left text: phase label (prefill status, generation phase, or idle).
+                                         The prefill label pulses (like the generation phase text) so the
+                                         user sees live activity while the context is being read. -->
+                                    <TextBlock x:Name="PrefillStatusTextBlock" Grid.Column="1"
                                                FontSize="11"
                                                Foreground="#E4E7EC"
                                                VerticalAlignment="Center"

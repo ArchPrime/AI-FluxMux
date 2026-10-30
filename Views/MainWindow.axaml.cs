@@ -272,6 +272,13 @@ public partial class MainWindow : Window
         {
             text.Opacity = opacity;
         }
+        // Pulse the "Prefilling context…" label with the same rhythm, so the prefill phase
+        // shows the same live-activity feedback as the generation phase.
+        var prefillText = this.FindControl<global::Avalonia.Controls.TextBlock>("PrefillStatusTextBlock");
+        if (prefillText is { IsVisible: true })
+        {
+            prefillText.Opacity = opacity;
+        }
     }
 
     private void StartHailMaryPulse()

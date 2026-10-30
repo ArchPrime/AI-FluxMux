@@ -82,12 +82,13 @@ public static class LocalLoadingRetryPolicy
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
         var retryCount = EffectiveRetryCount(rules, localContext, gpuOffloadMode);
         var maxWait = EffectiveMaxTotalWaitSeconds(localContext, gpuOffloadMode);
-        // For long-load profiles (YaRN / extended-context / GPU+CPU), the 503-retry loop is
-        // essential to ride out the cold load. Bypass the Loading503Enabled gate so the retry
-        // works even when the user has Port rules off (the default). Without this, a cold YaRN
-        // load would fail immediately on the first 503 "Loading model" error.
+        // For ANY local 503 "Loading model" error, retry. The Loading503Enabled gate is too
+        // restrictive — it should be bypassed for all local 503 "Loading model" errors, not
+        // just long-load profiles. Without this, a cold load of a standard profile would fail
+        // immediately on the first 503 "Loading model" error if Port rules are off (the default).
         bool isLongLoad = IsLongLoadProfile(localContext, gpuOffloadMode);
-        if ((!live.Loading503Enabled && !isLongLoad) || retriesSoFar >= retryCount)
+        bool isDaemonLoading = LooksLikeDaemonLoading(status, detail);
+        if ((!live.Loading503Enabled && !isLongLoad && !isDaemonLoading) || retriesSoFar >= retryCount)
         {
             return false;
         }
@@ -97,6 +98,6 @@ public static class LocalLoadingRetryPolicy
             return false;
         }
 
-        return LooksLikeDaemonLoading(status, detail);
+        return isDaemonLoading;
     }
 }

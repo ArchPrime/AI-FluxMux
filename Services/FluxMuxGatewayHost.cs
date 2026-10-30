@@ -50,6 +50,17 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private int _portRuleSendAnywayGrace;
     private bool _currentTurnIsLongLoad;
 
+    // Shared "model is loading" state for coalescing 503 retries. When the local model is
+    // still loading (llama-server returns 503 "Loading model"), multiple concurrent requests
+    // would each spawn their own 503 retry loop, hammering the same llama-server. Instead,
+    // the first request to hit a 503 sets _localLoadingSignal; subsequent requests await the
+    // same signal instead of spawning a new retry loop. When the model becomes ready (a probe
+    // succeeds), the signal is set and all waiting requests proceed. This prevents the
+    // concurrent 503 retry storm that can interfere with the launch itself.
+    private readonly object _localLoadingLock = new();
+    private ManualResetEventSlim? _localLoadingSignal;
+    private DateTime _localLoadingSinceUtc = DateTime.MinValue;
+
     public FluxMuxGatewayHost(
         string statePath,
         string lastServedPath,
@@ -1410,46 +1421,76 @@ public sealed class FluxMuxGatewayHost : IDisposable
             var loadingRetries = 0;
             string? loadingDetail = null;
             int status;
-            while (true)
+            try
             {
-                response?.Dispose();
-                using var request = CreateUpstreamRequest();
-                response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
-                status = (int)response.StatusCode;
-                Log("upstream request: status=" + status
-                    + " route=" + routeKind
-                    + " loadingRetries=" + loadingRetries
-                    + " timeoutSec=" + timeoutSec);
-                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
-                    && !response.IsSuccessStatusCode)
+                while (true)
                 {
-                    loadingDetail = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
-                    // Pass the active profile's context + offload mode so the retry
-                    // budget adapts: YaRN / extended-context / GPU+CPU profiles load
-                    // slowly from cold and need a much longer 503-retry window than
-                    // the default, otherwise the gateway gives up and converts the
-                    // "still loading" into a non-transient error that fails the launch.
-                    var localCtxForRetry = ParseInt(Str(state, "local_context"), 0);
-                    var offloadForRetry = Str(state, "local_gpu_offload");
-                    if (LocalLoadingRetryPolicy.ShouldRetry(status, loadingDetail, loadingRetries, portRules, localCtxForRetry, offloadForRetry))
+                    response?.Dispose();
+                    using var request = CreateUpstreamRequest();
+                    response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
+                    status = (int)response.StatusCode;
+                    Log("upstream request: status=" + status
+                        + " route=" + routeKind
+                        + " loadingRetries=" + loadingRetries
+                        + " timeoutSec=" + timeoutSec);
+                    if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
+                        && !response.IsSuccessStatusCode)
                     {
-                        loadingRetries++;
-                        PatchPortRulesTelemetry(prev => prev with
+                        loadingDetail = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
+                        // Pass the active profile's context + offload mode so the retry
+                        // budget adapts: YaRN / extended-context / GPU+CPU profiles load
+                        // slowly from cold and need a much longer 503-retry window than
+                        // the default, otherwise the gateway gives up and converts the
+                        // "still loading" into a non-transient error that fails the launch.
+                        var localCtxForRetry = ParseInt(Str(state, "local_context"), 0);
+                        var offloadForRetry = Str(state, "local_gpu_offload");
+                        if (LocalLoadingRetryPolicy.ShouldRetry(status, loadingDetail, loadingRetries, portRules, localCtxForRetry, offloadForRetry))
                         {
-                            HasLocalTurn = true,
-                            LoadingRetries = loadingRetries
-                        });
-                        Log("local loading retry "
-                            + loadingRetries.ToString(CultureInfo.InvariantCulture)
-                            + "/"
-                            + portRules.LoadingRetryCount.ToString(CultureInfo.InvariantCulture)
-                            + " after llama-server 503");
-                        await Task.Delay(TimeSpan.FromSeconds(portRules.LoadingRetryDelaySeconds), timeoutCts.Token).ConfigureAwait(false);
-                        continue;
+                            loadingRetries++;
+                            PatchPortRulesTelemetry(prev => prev with
+                            {
+                                HasLocalTurn = true,
+                                LoadingRetries = loadingRetries
+                            });
+                            Log("local loading retry "
+                                + loadingRetries.ToString(CultureInfo.InvariantCulture)
+                                + "/"
+                                + portRules.LoadingRetryCount.ToString(CultureInfo.InvariantCulture)
+                                + " after llama-server 503");
+                            // Coalesce concurrent 503 retries onto a shared wait. The first request
+                            // to hit a 503 creates the shared signal; subsequent requests await the
+                            // same signal instead of spawning their own retry loop. This prevents
+                            // the concurrent 503 retry storm that can interfere with the launch.
+                            var loadingSignal = BeginLocalLoadingWait();
+                            // Wait for either the shared signal (model became ready) or the retry
+                            // delay to elapse. If the signal is set, the model is ready and we can
+                            // retry immediately. If the delay elapses first, we retry after the
+                            // normal backoff.
+                            var delayMs = portRules.LoadingRetryDelaySeconds * 1000;
+                            var completed = await Task.WhenAny(
+                                Task.Delay(delayMs, timeoutCts.Token),
+                                Task.Run(() => loadingSignal.Wait(timeoutCts.Token)));
+                            if (loadingSignal.IsSet)
+                            {
+                                Log("local loading: shared signal set, retrying immediately");
+                            }
+                            continue;
+                        }
                     }
-                }
 
-                break;
+                    break;
+                }
+            }
+            finally
+            {
+                // Always clear the shared loading signal when the retry loop exits (success,
+                // failure, OR cancellation). This prevents the race condition where a new 503
+                // creates a new signal that no one will ever set (because the model is already
+                // ready or the launch has failed/cancelled).
+                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+                {
+                    EndLocalLoadingWait();
+                }
             }
 
             using (response)
@@ -1966,6 +2007,68 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         return state;
+    }
+
+    /// <summary>
+    /// Marks the local model as "loading" and returns the shared signal that all concurrent
+    /// requests should await. The first request to hit a 503 "Loading model" calls this;
+    /// subsequent requests get the same signal and await it instead of spawning their own
+    /// 503 retry loop. This coalesces N concurrent retry loops into one, preventing the
+    /// storm that can interfere with the launch.
+    ///
+    /// IMPORTANT: The signal is only created if it doesn't already exist (regardless of its
+    /// set/unset state). This prevents the race condition where a request that just finished
+    /// (and set the signal) is followed by another request that creates a NEW signal, which
+    /// no one will ever set (because the model is already ready). The signal is cleared by
+    /// <see cref="EndLocalLoadingWait"/> when the retry loop exits (success OR failure).
+    /// </summary>
+    private ManualResetEventSlim BeginLocalLoadingWait()
+    {
+        lock (_localLoadingLock)
+        {
+            if (_localLoadingSignal is null)
+            {
+                _localLoadingSignal = new ManualResetEventSlim(false);
+                _localLoadingSinceUtc = DateTime.UtcNow;
+                Log("local loading: first 503 detected, coalescing concurrent requests onto a shared wait");
+            }
+            return _localLoadingSignal;
+        }
+    }
+
+    /// <summary>
+    /// Signals that the local model is ready (or the retry loop has exited for any reason)
+    /// and clears the shared signal so it can be reused for the next loading episode. All
+    /// requests awaiting the signal are released. Called from the 503 retry loop when it
+    /// exits (success OR failure), so that no request is left waiting on a stale signal.
+    /// </summary>
+    private void EndLocalLoadingWait()
+    {
+        lock (_localLoadingLock)
+        {
+            if (_localLoadingSignal is { IsSet: false })
+            {
+                var waitedMs = (long)(DateTime.UtcNow - _localLoadingSinceUtc).TotalMilliseconds;
+                _localLoadingSignal.Set();
+                Log("local loading: model ready after " + waitedMs + " ms, releasing coalesced requests");
+            }
+            // Clear the signal so it can be reused for the next loading episode. This prevents
+            // the race condition where a new 503 creates a new signal that no one will set.
+            _localLoadingSignal = null;
+            _localLoadingSinceUtc = DateTime.MinValue;
+        }
+    }
+
+    /// <summary>
+    /// True when a local model load is in progress (the shared loading signal is active and
+    /// not yet set). Used to decide whether to coalesce a 503 retry onto the shared wait.
+    /// </summary>
+    private bool IsLocalLoadingWaitActive()
+    {
+        lock (_localLoadingLock)
+        {
+            return _localLoadingSignal is { IsSet: false };
+        }
     }
 
     private (string Kind, string Url, string UpstreamMode, string Provider, string Model) ResolveTarget(

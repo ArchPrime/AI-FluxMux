@@ -4,6 +4,88 @@
 
 Current version: **0.3.3 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs` → `FluxMuxAppInfo`).
 
+## ✅ FIXED: Autolaunch hang + 503 retry storm (10/30)
+
+**Symptom:** Autolaunch would run indefinitely, launch telemetry would go blank, and the launch never completed. Concurrent 503 retry storms were also observed when submitting replies during model load.
+
+**Root cause (confirmed via `launch_monitor.log`):**
+1. The launch monitor set `local_phase` to `"warming"` while the model was loading (Fix 3).
+2. When the model became ready on the daemon port, the launch monitor probed the public endpoint **without** setting `local_phase` back to `"ready"`.
+3. The gateway's `LocalTargetReady` check requires `local_phase == "ready"` to route to the local model. With `local_phase` stuck at `"warming"`, the gateway returned **503 "No model is launched"** for the probe.
+4. The probe failed, the launch looped, and `local_phase` stayed `"warming"` → **deadlock**.
+
+**Fix (implemented and verified working):**
+- In `FluxMuxRuntimeService.cs`, when `IsModelActuallyReadyAsync` returns true (model is loaded on the daemon port), set `local_phase` to `"ready"` **before** probing the public endpoint. This allows the gateway to route the probe correctly.
+- Added `IsModelActuallyReadyAsync` (probes daemon port `/v1/models`, returns true only on 200, not 503) to distinguish "daemon port up" from "model actually loaded."
+- Added `LogLaunchMonitor` to write launch progress to `C:\AI_Workbench\Logs\launch_monitor.log` in real time, so future hangs can be diagnosed without guessing.
+
+**Verification:** User confirmed the deployed version now launches successfully.
+
+**Key files:**
+- `FluxMuxRuntimeService.cs` — launch loop, `IsModelActuallyReadyAsync`, `LogLaunchMonitor`
+- `FluxMuxGatewayHost.cs` — coalescing (Fix 2), `WaitForRoutableStateAsync`
+- `LocalLoadingRetryPolicy.cs` — retry gate (Fix 5)
+- `C:\AI_Workbench\Logs\launch_monitor.log` — real-time launch diagnostics
+
+## 📝 Notes
+
+- **Do NOT** set `local_phase` to `"warming"` and leave it there. The gateway requires `"ready"` to route. Always transition to `"ready"` when the model is actually loaded.
+- **Do NOT** probe the public endpoint while the model is still loading. Wait for `IsModelAlwaysReadyAsync` to return true first.
+- **Always** check `launch_monitor.log` when diagnosing launch hangs. It records every step in real time.
+- **Build verification:** After `build-fluxmux.bat clean`, confirm the new DLL timestamp is newer than the source files and contains the fix markers (e.g., `IsModelActuallyReadyAsync`, `_localLoadingSignal`).
+
+## 🔴 DEPLOYMENT BLOCKER: running build is stale / wrong (diagnosed 10/30 ~19:55)
+
+**The 503 storm persists because the running app has NONE of the fixes.** Confirmed by direct evidence:
+
+1. **Running process is the BACKUP, not the latest build:**
+   - PID 3116, started 19:35, path = `C:\AI_Workbench\Workspace\backups\FluxMux.Avalonia_0.3.2_2026-10-27_0155_source\bin\Debug\net10.0\FluxMux.Avalonia.exe`
+   - Its DLL is dated **10/27 01:44** (3 days old) and contains **none** of the fix markers.
+
+2. **The latest main-workspace build (7:33:16 pm) is STALE relative to the source:**
+   - `FluxMuxGatewayHost.cs` (Fix 2 coalescing) last edited **7:42:56 pm** — AFTER the 7:33 build → Fix 2 NOT in that build.
+   - `LocalLoadingRetryPolicy.cs` (Fix 5) edited 7:29:52 pm; marker check on the 7:33 DLL returned False → likely not picked up cleanly.
+   - `GenerationLengthModel` marker IS present (edited 6:20 pm, before build).
+   - Net: the 7:33 build is missing the 503-storm fixes.
+
+3. **Why the user fell back to the backup:** earlier compiles done *while the app was running* produced incomplete DLLs that crash on launch with:
+   `System.InvalidOperationException: Compiled Avalonia XAML marker XamlIlPopulateTrampoline was not found in this assembly.`
+   (See `C:\AI_Workbench\Logs\FluxMux_Startup_Error.log` — entries 10/26 and 10/27.) The 7:33 DLL *does* contain the marker (verified), so it is a complete build — the crash was from an earlier transient incomplete build.
+
+4. **Steady-state works; only launch-time fails.** Log 19:50–19:51 (from the backup process) shows `status=200`, `loadingRetries=0`, clean TTFB — because the model was already loaded. The 503 storm only happens *during a fresh model launch* (19:07–19:08 window), which is the unpatched launch-time behavior in the backup.
+
+**Resolution (user action — agent must NOT kill the running app, it serves this chat):**
+1. Close the running AI-FluxMux app (backup, PID 3116). This ends the chat; reopen after.
+2. In `c:\AI_Workbench\Workspace\FluxMux.Avalonia`: run `.\build-fluxmux.bat clean` (clean build, no app locking files → complete DLL with all fixes).
+3. Verify new `bin\Debug\net10.0\FluxMux.Avalonia.dll` timestamp is AFTER 7:42 pm and contains the fix markers.
+4. Launch via VS Code task **Start AI-FluxMux (Debug)** (main workspace, NOT the backup).
+5. Launch a model; watch `C:\AI_Workbench\Logs\Proxy_Cloud_Handshake.log` for: single `local loading: first 503 detected` (coalescing), `local_phase=warming` during load, no 503 storm.
+
+**Do NOT:** launch from the backup folder; build while the app is running (causes the XamlIlPopulateTrampoline crash); kill the app from the agent.
+
+
+**REGRESSION (10/30):** The initial implementation of Fix 2 had a race condition that caused requests to hang indefinitely. The `BeginLocalLoadingWait()` method created a NEW signal every time the previous one was set, but `EndLocalLoadingWait()` was only called on a *successful* response. This meant:
+1. Request A hits 503 → creates signal S1 (unset)
+2. Model finishes loading
+3. Request A's probe succeeds → `EndLocalLoadingWait()` sets S1
+4. Request B (still in-flight) hits 503 again → `BeginLocalLoadingWait()` sees S1 is set, creates **new signal S2** (unset)
+5. Request B waits on S2
+6. **No one ever sets S2** (model is already ready, no new 503 will trigger `EndLocalLoadingWait()`)
+7. **Request B hangs** until the 780s/900s timeout
+
+This caused the "blank lines after a long launch" and "can't relaunch" symptoms.
+
+**FIX (10/30):** 
+1. `BeginLocalLoadingWait()` now only creates a signal if it doesn't already exist (regardless of set/unset state).
+2. `EndLocalLoadingWait()` now **clears** the signal (sets it to null) after releasing waiters, so it can be reused for the next loading episode.
+3. The retry loop is now wrapped in a `try/finally` so `EndLocalLoadingWait()` is called on **any** exit (success, failure, OR cancellation).
+
+**NEW BUG (10/30):** The 503 retry loop was NOT being entered for standard profiles (non-long-load) when Port rules were off (the default). The `ShouldRetry` method had a gate: `if ((!live.Loading503Enabled && !isLongLoad) || retriesSoFar >= retryCount) return false;`. For standard profiles (`isLongLoad=false`) with Port rules off (`Loading503Enabled=false`), this returned false, so the retry loop broke out immediately and the 503s hit the `unavailable_error` path directly. This is why the 503 storm was still happening even with Fix 2 in place.
+
+**FIX 5 (10/30):** Updated `ShouldRetry` to retry for **any** local 503 "Loading model" error, not just long-load profiles. The new gate is: `if ((!live.Loading503Enabled && !isLongLoad && !isDaemonLoading) || retriesSoFar >= retryCount) return false;`. This ensures the retry loop is entered for all local 503 "Loading model" errors, regardless of profile type or Port rules setting.
+
+**Deploy:** Close the running app → `build-fluxmux.bat clean` → restart.
+
 ## 🐛 BUG: Auto-load on startup ignores the running llama-server's variant (10/30)
 
 **Symptom (user report):** "This chat had to be launched with a standard VRAM profile." The chat (Cline via the FluxMux gateway) was served by the **standard VRAM profile** (`Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf / max VRAM only context 2`), but the app's UI selection / last-launched record pointed at the **YaRN profile** (`YaRN test with vision`). The user had to manually launch the standard profile to get this chat working. Auto-load "used to work fine with the YaRN profile earlier today, before a recent round of edits."
@@ -137,9 +219,9 @@ It was added to fix a *stale* context after a profile switch (VRAM-only → YaRN
 - **Why this is safe:** during a normal launch of profile X, `_managedLocalModel`/`_managedLocalVariant` are set to X (L5175-5176) and the state is stamped with X, so `stateBelongsToManagedProfile` is true and the refresh still happens exactly as before. The guard only suppresses the overwrite when the state is for a *different* profile — the case that was corrupting YaRN.
 - **Verify after deploy:** a YaRN launch must show `long-load detect: ctx=393216` (not 262144) and `ContextDiag ... local_context=393216` in the gateway log.
 
-**State:** FIX APPLIED (compiled in `artifacts\testrun\`, 1728/1728 tests pass). NOT deployed — the running app still has the old code. The running app is healthy and serving this chat.
+**State:** FIX APPLIED, COMMITTED (`57246ed`), AND DEPLOYED. The running app (PID 29660, started 6:10:15 pm 10/30) was built from source that already contained the `stateBelongsToManagedProfile` guard. 1728/1728 tests pass. **VERIFIED WORKING (6:10 pm 10/30):** auto-load picked the YaRN variant (`last_launched_local.json` → "YaRN test with vision" @ 6:10:36 pm), llama-server (PID 41020) came up ready, and the gateway `/health` reports `phase=ready` / `local_phase=ready` on the Qwen3.8-27B model. The YaRN auto-load is working again.
 
-**Deploy:** close the running app → `build-fluxmux.bat clean` → restart. (The agent must NOT close the running app.)
+**Deploy:** Already deployed — no action needed. (Verified 10/30: working tree matches HEAD, HEAD contains the fix, and the running app's build post-dates the source change.)
 
 ## ✅ DONE: Prefill progress bar cold-start estimate (10/30)
 
@@ -316,6 +398,41 @@ Items 1–4 are security fixes (do first). Items 5–8 are architectural improve
 **State:** REVIEW ONLY — no code changes made. Findings are analysis; none are yet implemented.
 
 ---
+
+## ✅ DONE: Prefill text pulse + data-driven generation ETA (10/30)
+
+**What was done:**
+
+1. **Prefill "Prefilling context…" text now pulses** (like the generation phase text):
+   - `Views/MainWindow.axaml`: added `x:Name="PrefillStatusTextBlock"` to the prefill status TextBlock.
+   - `Views/MainWindow.axaml.cs`: `OnGenerationTextPulseTick` now also pulses `PrefillStatusTextBlock` with the same opacity rhythm (0.3→1.0) when visible. The existing 50ms `_generationTextPulseTimer` drives both — no new timer.
+
+2. **Generation ETA / progress-bar "total" is now data-driven** (no longer hard-coded 500):
+   - New `Services/GenerationLengthModel.cs`: a self-refining model that records each finished turn's actual completion token count and keeps a **rolling median** (robust to the right-skewed distribution of response lengths — a few long tool-calling turns don't drag it up). Persisted per model/variant in `gen_length_<key>.json` (mirrors `PrefillPerformanceModel`). Falls back to the conservative default (500) until enough turns are recorded.
+   - `ViewModels/MainViewModel.cs`:
+     - Added `_generationLengthModel` / `_generationLengthModelKey` fields + `GetOrCreateGenerationLengthModel()` helper.
+     - On stream end (generation timer, `!snapshot.Active`): records the turn's `CompletionTokens` into the model — **local routes only** (cloud routes have different latency characteristics and would pollute the local estimate).
+     - The ETA + progress-bar "total" now uses `EstimatedCompletionTokens` (the learned median) instead of `const int 500`.
+   - **Effect:** users on different hardware / with different prompt styles get an ETA and bar that match their real typical response length, converging within a few turns.
+
+**State:** COMPILED — 0 build errors (75 pre-existing CA1416 platform warnings, unrelated).
+
+**Deploy:** Close the running app → `build-fluxmux.bat clean` → restart.
+
+## ✅ DONE: Generation-phase progress bar driven by tokens/speed (capped at 80%) (10/30)
+
+**What was done:**
+- Previously the progress bar filled 0→100% during prefill, then **froze at 100%** during generation (only the text showed "Generating… · Ns · N tokens · N tok/s" + "~Xs remaining").
+- Now the bar is driven by the **same tokens/estimate the text ETA uses**, so the bar and the "~Xs remaining" text always agree:
+  - **On first byte** (prefill→generation transition): the bar resets to `0.0` (reads as "new phase starting" rather than sitting stuck at 100%).
+  - **Each generation tick (500ms):** `PrefillProgress = clamp(tokens / 500, 0.0, 0.8)` — fills as tokens arrive, **capped at 80%** (not 100%) because the 500-token estimate is rough; a full bar would imply "nearly done" when the response may still be far from over. The bar plateaus near 80% while the response continues.
+  - **On stream end:** the bar snaps to `1.0` (brief "done" flash) before the idle reset clears it.
+  - **Guard:** only drives the bar when `speed > 0`; on the first tick (no speed yet) the bar stays at 0 rather than jumping.
+- `ViewModels/MainViewModel.cs`: `PrefillFirstByteNotice` handler (reset to 0.0), `StartGenerationTimer` tick (drive bar + snap to 1.0 on end).
+
+**State:** COMPILED — 0 build errors (75 pre-existing CA1416 platform warnings, unrelated).
+
+**Deploy:** Close the running app → `build-fluxmux.bat clean` → restart.
 
 ## ✅ DONE: Generation ETA text color → black (10/30)
 

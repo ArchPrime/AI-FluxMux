@@ -359,6 +359,11 @@ public partial class MainViewModel : ViewModelBase
     // plus a timer that advances the bottom-bar progress bar while a local turn is prefilling.
     private Services.PrefillPerformanceModel? _prefillModel;
     private string _prefillModelKey = string.Empty;
+    // Generation-length model: learns the typical completion token count per model/variant from
+    // each finished turn, so the generation-phase ETA / progress bar use a data-driven "total"
+    // instead of a hard-coded 500. Persisted per model/variant like the prefill model.
+    private Services.GenerationLengthModel? _generationLengthModel;
+    private string _generationLengthModelKey = string.Empty;
     private DispatcherTimer? _prefillTimer;
     private DateTime _prefillStartUtc;
     private int _prefillEstimatedSeconds;
@@ -508,9 +513,11 @@ public partial class MainViewModel : ViewModelBase
                     GetOrCreatePrefillModel().RecordSample(_prefillPromptTokens, elapsedMs);
                 }
 
-                // Complete the prefill bar and switch to the generation phase.
+                // Complete the prefill bar, then reset it to 0 so the generation phase can
+                // drive it again (tokens/speed, capped at 80%). The brief reset reads as
+                // "new phase starting" rather than the bar sitting stuck at 100%.
                 StopPrefillTimer();
-                PrefillProgress = 1.0;
+                PrefillProgress = 0.0;
                 PrefillInProgress = false;
                 StartGenerationTimer();
             });
@@ -4068,6 +4075,23 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
+    /// Gets or creates the <see cref="Services.GenerationLengthModel"/> for the currently
+    /// running local model/variant. The model is persisted in the log directory so the learned
+    /// typical completion length survives restarts.
+    /// </summary>
+    private Services.GenerationLengthModel GetOrCreateGenerationLengthModel()
+    {
+        var key = Services.GenerationLengthModel.BuildKey(_runningLocalModel, _runningLocalVariant);
+        if (key != _generationLengthModelKey || _generationLengthModel is null)
+        {
+            _generationLengthModelKey = key;
+            var path = Path.Combine(_runtimeService.LogDirectory, "gen_length_" + key + ".json");
+            _generationLengthModel = new Services.GenerationLengthModel(path);
+        }
+        return _generationLengthModel;
+    }
+
+    /// <summary>
     /// Applies the eased prefill progress curve: linear 0–95%, then an exponential approach
     /// to 100% so the bar visibly decelerates near the end and only hits 100% on first byte.
     /// </summary>
@@ -4128,6 +4152,20 @@ public partial class MainViewModel : ViewModelBase
             // If the stream has ended (snapshot no longer active), stop the timer and reset.
             if (snapshot is not null && !snapshot.Active)
             {
+                // Record this turn's actual completion length so the generation-length model
+                // refits its median. This is what makes the ETA / progress-bar "total" data-
+                // driven (per user's hardware + prompt style) instead of a hard-coded 500.
+                // Only local turns feed the model — cloud routes have different latency
+                // characteristics and would pollute the local estimate.
+                if (snapshot.RouteKind.Equals("local", StringComparison.OrdinalIgnoreCase)
+                    && snapshot.CompletionTokens > 0)
+                {
+                    GetOrCreateGenerationLengthModel().RecordSample(snapshot.CompletionTokens);
+                }
+
+                // Mark the bar complete before the idle reset clears it, so the user sees
+                // a brief "done" flash rather than the bar snapping back to 0 mid-view.
+                PrefillProgress = 1.0;
                 StopGenerationTimer();
                 ResetPrefillIndicatorToIdle();
                 return;
@@ -4141,18 +4179,32 @@ public partial class MainViewModel : ViewModelBase
             GenerationDetailText = elapsedSeconds + "s" + (tokens > 0 ? " · " + tokens + " tokens" : "") +
                 (speed > 0 ? " · " + speed.ToString("0", CultureInfo.InvariantCulture) + " tok/s" : "");
 
-            // Estimate the ETA based on a typical response length (500 tokens) and the current speed.
-            // This is a rough estimate; the actual response length can vary widely.
+            // Estimate the ETA based on the learned typical response length (rolling median of
+            // this model/variant's past turns) and the current speed. Falls back to the
+            // conservative default (500) until enough turns have been recorded. This makes the
+            // estimate match the user's real hardware + prompt style instead of a fixed guess.
+            var estimatedTotalTokens = GetOrCreateGenerationLengthModel().EstimatedCompletionTokens;
             if (speed > 0)
             {
-                const int estimatedTotalTokens = 500;
                 var remainingTokens = Math.Max(0, estimatedTotalTokens - tokens);
                 var etaSeconds = (int)(remainingTokens / speed);
                 GenerationEtaText = etaSeconds > 0 ? "~" + etaSeconds + "s remaining" : "finishing…";
+
+                // Drive the progress bar with the same tokens/estimate the text ETA uses, so the
+                // bar and the "~Xs remaining" text always agree. Capped at 80% (not 100%) because
+                // the learned estimate is still a median (individual turns vary) — a full bar
+                // would imply "nearly done" when the response may still be far from over. The bar
+                // fills as tokens arrive and plateaus near 80% while the response continues.
+                var rawGenerationProgress = estimatedTotalTokens > 0
+                    ? (double)tokens / estimatedTotalTokens
+                    : 0.0;
+                PrefillProgress = Math.Clamp(rawGenerationProgress, 0.0, 0.8);
             }
             else
             {
                 GenerationEtaText = string.Empty;
+                // No speed yet (first tick before any tokens): leave the bar where it is
+                // (0 from the transition) rather than jumping.
             }
 
             ShowGenerationDot = true;

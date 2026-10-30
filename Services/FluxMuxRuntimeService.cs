@@ -3777,6 +3777,7 @@ public sealed class FluxMuxRuntimeService
 		bool retryStartup = false;
 		int publicProbeFailCount = 0;
 		DateTime publicProbeFirstFailUtc = DateTime.MinValue;
+		LogLaunchMonitor($"launch loop started; deadline={deadline:HH:mm:ss} localBackendPort={localBackendPort}");
 		while (DateTime.UtcNow < deadline)
 		{
 			launchToken.ThrowIfCancellationRequested();
@@ -3816,12 +3817,46 @@ public sealed class FluxMuxRuntimeService
 			}
 			if (await IsLlamaEndpointReadyAsync(localBackendPort, launchToken))
 			{
-				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "ready", "llama-server is responding on the daemon port; checking Port.", GetGatewayPid());
+				// The daemon port is up, but the model may still be loading (llama-server
+				// returns 503 "Loading model" until the model is fully loaded). Mark the
+				// proxy state as "warming" so the gateway's WaitForRoutableStateAsync waits
+				// for the model to finish loading instead of routing requests to a 503-
+				// returning llama-server. This prevents the concurrent 503 retry storm that
+				// occurs when the user submits replies while the model is still loading.
+				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "warming", "llama-server is responding on the daemon port; the model is still loading.", GetGatewayPid());
+				LogLaunchMonitor($"daemon port {localBackendPort} is up; setting local_phase=warming");
 				if (!modelLoadWaitActive)
 				{
-					progressReporter?.Invoke("AI-FluxMux is testing the public endpoint");
+					modelLoadWaitActive = true;
+					progressReporter?.Invoke("Loading model");
 				}
+
+				// Wait for the model to be actually ready (not just the daemon port is up).
+				// This prevents the launch monitor from probing the public endpoint while the
+				// model is still loading, which would trigger the gateway's 503 retry loop and
+				// interfere with the model load.
+				bool modelReady = await IsModelActuallyReadyAsync(localBackendPort, launchToken);
+				LogLaunchMonitor($"IsModelActuallyReadyAsync({localBackendPort}) = {modelReady}");
+				if (!modelReady)
+				{
+					// Model is still loading. Wait and retry.
+					LogLaunchMonitor("model not ready yet; waiting 2s and retrying");
+					await Task.Delay(2000, launchToken);
+					continue;
+				}
+
+				// Model is ready on the daemon port. Set local_phase to "ready" so the gateway
+				// will route requests to it. If we leave it at "warming", the gateway's
+				// LocalTargetReady check (which requires local_phase == "ready") will reject
+				// the public endpoint probe with "No model is launched", creating a deadlock.
+				LogLaunchMonitor("model ready on daemon port; setting local_phase=ready before public endpoint probe");
+				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "ready", "Model is loaded on the daemon port; verifying the public endpoint.", GetGatewayPid());
+
+				// Now probe the public endpoint to verify the gateway is working.
+				LogLaunchMonitor("probing public endpoint");
+				progressReporter?.Invoke("AI-FluxMux is testing the public endpoint");
 				LocalGenerationTimingResult publicProbe = await ProbePublicEndpointWithShortRetriesAsync(port, selectedLocalModel, launchToken);
+				LogLaunchMonitor($"public endpoint probe: success={publicProbe?.IsSuccess} details={publicProbe?.Details}");
 				if (!(publicProbe?.IsSuccess ?? false))
 				{
 					string probeDetails = FirstNonEmpty(publicProbe?.Details ?? string.Empty, "Public endpoint check failed.");
@@ -3851,11 +3886,6 @@ public sealed class FluxMuxRuntimeService
 
 						WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "warming", "llama-server is responding on the daemon port; the local model is still loading.");
 						WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "warming", probeDetails, GetGatewayPid());
-						if (!modelLoadWaitActive)
-						{
-							modelLoadWaitActive = true;
-							progressReporter?.Invoke("Loading model");
-						}
 						await Task.Delay(2000, launchToken);
 						continue;
 					}
@@ -3875,6 +3905,7 @@ public sealed class FluxMuxRuntimeService
 				publicProbeFailCount = 0;
 				publicProbeFirstFailUtc = DateTime.MinValue;
 				int readyMs = (int)Math.Min(2147483647L, launchStopwatch.ElapsedMilliseconds);
+				LogLaunchMonitor($"launch SUCCESS in {readyMs}ms; local_phase=ready");
 				WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "ready", "llama-server on the daemon port and Port are both responding.");
 				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "ready", "Port is ready.", GetGatewayPid());
 				SeedForwardCompactFromProfile(selectedLocalModel, selectedVariant);
@@ -4464,6 +4495,55 @@ public sealed class FluxMuxRuntimeService
 			}
 		}
 		return false;
+	}
+
+	/// <summary>
+	/// Checks if the model is actually ready (not just the daemon port is up).
+	/// Returns false if the daemon port is up but the model is still loading (503 "Loading model").
+	/// This is used by the launch monitor to wait for the model to be fully loaded before
+	/// probing the public endpoint, which prevents the 503 retry storm.
+	/// </summary>
+	private static async Task<bool> IsModelActuallyReadyAsync(int port, CancellationToken cancellationToken)
+	{
+		if (port < 1 || port > 65535)
+		{
+			return false;
+		}
+		if (!IsTcpPortOpen("127.0.0.1", port))
+		{
+			return false;
+		}
+		try
+		{
+			using HttpResponseMessage response = await HttpClient.GetAsync($"http://127.0.0.1:{port}/v1/models", cancellationToken);
+			// 200 = model is ready. 503 = model is still loading.
+			return response.StatusCode == HttpStatusCode.OK;
+		}
+		catch
+		{
+			return false;
+		}
+	}
+
+	/// <summary>
+	/// Writes a launch-monitor diagnostic line to the launch log file. This is used to
+	/// diagnose hangs during model launch, since the launch monitor only updates the UI
+	/// (via progressReporter) and does not otherwise write to a log.
+	/// </summary>
+	private void LogLaunchMonitor(string message)
+	{
+		try
+		{
+			string logPath = Path.Combine(_logDirectory, "launch_monitor.log");
+			lock (_proxyStateLock)
+			{
+				File.AppendAllText(logPath, $"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+			}
+		}
+		catch
+		{
+			// Ignore log write failures.
+		}
 	}
 
 	private static int[] BuildLocalEndpointDiscoveryCandidates(int preferredPort)
