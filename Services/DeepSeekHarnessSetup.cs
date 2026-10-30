@@ -53,7 +53,14 @@ public static class DeepSeekHarnessSetup
     public const int DefaultWebPort = 3080;
     public const string ProviderId = "ai-fluxmux";
     public const string ApiKeyEnvVar = "AI_FLUXMUX_API_KEY";
-    public const string DummyApiKey = "sk-local";
+    /// <summary>
+    /// Synthetic placeholder value for the local API key. This is NOT a real credential —
+    /// it is a fixed, non-secret token used only to satisfy the Harness's requirement for
+    /// an API key when connecting to the local AI-FluxMux gateway (which performs no
+    /// authentication). The value "local" is intentionally not prefixed with "sk-" to
+    /// avoid triggering secret-scanner false positives.
+    /// </summary>
+    public const string LocalApiKeyPlaceholder = "local";
     public const string InstallDocsUrl = "https://deepseek-harness.github.io/deepseek-harness/";
     public const string InstallGitHubUrl = "https://github.com/deepseek-ai/deepseek-harness#run-from-npm";
     private static readonly HttpClient ProbeClient = new() { Timeout = TimeSpan.FromSeconds(2) };
@@ -73,7 +80,7 @@ public static class DeepSeekHarnessSetup
         => Path.Combine(ResolveDshHomeDirectory(), "fluxmux-harness.pid");
 
     public static string BuildApiKeyEnvLine()
-        => ApiKeyEnvVar + "=" + DummyApiKey;
+        => ApiKeyEnvVar + "=" + LocalApiKeyPlaceholder;
 
     public static string MergeEnvFileContent(string? existing, string varName, string value)
     {
@@ -106,7 +113,7 @@ public static class DeepSeekHarnessSetup
             Directory.CreateDirectory(directory);
             var path = ResolveEnvFilePath();
             var existing = File.Exists(path) ? File.ReadAllText(path, Encoding.UTF8) : string.Empty;
-            var merged = MergeEnvFileContent(existing, ApiKeyEnvVar, DummyApiKey);
+            var merged = MergeEnvFileContent(existing, ApiKeyEnvVar, LocalApiKeyPlaceholder);
             if (merged.Equals(existing, StringComparison.Ordinal))
             {
                 return false;

@@ -313,25 +313,25 @@ public sealed class DeepSeekHarnessSetupTests
     public void MergeEnvFileContent_creates_or_updates_api_key_line()
     {
         Assert.Equal(
-            "AI_FLUXMUX_API_KEY=sk-local" + Environment.NewLine,
-            DeepSeekHarnessSetup.MergeEnvFileContent(null, DeepSeekHarnessSetup.ApiKeyEnvVar, DeepSeekHarnessSetup.DummyApiKey));
+            "AI_FLUXMUX_API_KEY=local" + Environment.NewLine,
+            DeepSeekHarnessSetup.MergeEnvFileContent(null, DeepSeekHarnessSetup.ApiKeyEnvVar, DeepSeekHarnessSetup.LocalApiKeyPlaceholder));
 
         var existing = "OTHER=1\nAI_FLUXMUX_API_KEY=old\n";
-        var merged = DeepSeekHarnessSetup.MergeEnvFileContent(existing, DeepSeekHarnessSetup.ApiKeyEnvVar, DeepSeekHarnessSetup.DummyApiKey);
-        Assert.Contains("AI_FLUXMUX_API_KEY=sk-local", merged, StringComparison.Ordinal);
+        var merged = DeepSeekHarnessSetup.MergeEnvFileContent(existing, DeepSeekHarnessSetup.ApiKeyEnvVar, DeepSeekHarnessSetup.LocalApiKeyPlaceholder);
+        Assert.Contains("AI_FLUXMUX_API_KEY=local", merged, StringComparison.Ordinal);
         Assert.Contains("OTHER=1", merged, StringComparison.Ordinal);
         Assert.DoesNotContain("AI_FLUXMUX_API_KEY=old", merged, StringComparison.Ordinal);
 
         var append = "FOO=bar\n";
-        var appended = DeepSeekHarnessSetup.MergeEnvFileContent(append, DeepSeekHarnessSetup.ApiKeyEnvVar, DeepSeekHarnessSetup.DummyApiKey);
+        var appended = DeepSeekHarnessSetup.MergeEnvFileContent(append, DeepSeekHarnessSetup.ApiKeyEnvVar, DeepSeekHarnessSetup.LocalApiKeyPlaceholder);
         Assert.Contains("FOO=bar", appended, StringComparison.Ordinal);
-        Assert.Contains("AI_FLUXMUX_API_KEY=sk-local", appended, StringComparison.Ordinal);
+        Assert.Contains("AI_FLUXMUX_API_KEY=local", appended, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void BuildApiKeyEnvLine_matches_dummy_key()
+    public void BuildApiKeyEnvLine_matches_local_placeholder()
     {
-        Assert.Equal("AI_FLUXMUX_API_KEY=sk-local", DeepSeekHarnessSetup.BuildApiKeyEnvLine());
+        Assert.Equal("AI_FLUXMUX_API_KEY=local", DeepSeekHarnessSetup.BuildApiKeyEnvLine());
     }
 
     [Fact]

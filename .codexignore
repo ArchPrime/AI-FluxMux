@@ -1,0 +1,53 @@
+# Build output
+bin/
+obj/
+artifacts/
+
+# Git metadata
+.git/
+.vs/
+.vscode/
+
+# Local state and secrets (never scan these)
+fluxmux_config.json
+fluxmux_secrets.json
+*.log
+FluxMux_Startup_Error.log
+AI-FluxMux-could-not-start.txt
+
+# Large binary assets (exceed scanner resource budget)
+*.pln
+*.png
+*.ico
+*.gif
+*.jpg
+*.jpeg
+
+# Models and large data files
+*.gguf
+*.bin
+*.cache
+*.tmp
+
+# Backups and recovery scratch
+backup/
+master/
+acl-recovery/
+*.mangled-backup
+*.reverted-backup
+*.old-backup
+
+# One-off scripts and release scratch
+build_testrun.ps1
+current_release_body.md
+new_release_body.md
+
+# Session and agent scratch
+.tmp-session-*.jsonl
+.tmp-sessions/
+_user_msgs*.txt
+_assistant_msgs*.txt
+
+# Scanner output (don't scan the scanner's own output)
+scan-*.txt
+scanner-*.json

@@ -294,7 +294,7 @@ public sealed class DeepSeekHarnessWebHost : IDisposable
                     RedirectStandardOutput = true,
                     RedirectStandardError = true
                 };
-                startInfo.Environment[DeepSeekHarnessSetup.ApiKeyEnvVar] = DeepSeekHarnessSetup.DummyApiKey;
+                startInfo.Environment[DeepSeekHarnessSetup.ApiKeyEnvVar] = DeepSeekHarnessSetup.LocalApiKeyPlaceholder;
 
                 var process = Process.Start(startInfo);
                 if (process is null)
