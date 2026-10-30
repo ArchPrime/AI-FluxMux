@@ -4059,17 +4059,17 @@
                                          <StackPanel Orientation="Horizontal">
                                              <TextBlock x:Name="GenerationPhaseTextBlock"
                                                         FontSize="11"
-                                                        Foreground="#E4E7EC"
+                                                        Foreground="#000000"
                                                         VerticalAlignment="Center"
                                                         Text="{Binding GenerationPhaseText}" />
                                              <TextBlock FontSize="11"
-                                                        Foreground="#D0D5DD"
+                                                        Foreground="#000000"
                                                         VerticalAlignment="Center"
                                                         Margin="8,0,0,0"
                                                         Text="{Binding GenerationDetailText}" />
                                          </StackPanel>
                                          <TextBlock FontSize="11"
-                                                    Foreground="#D0D5DD"
+                                                    Foreground="#000000"
                                                     Margin="0,1,0,0"
                                                     Text="{Binding GenerationEtaText}" />
                                      </StackPanel>
