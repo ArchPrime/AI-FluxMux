@@ -4,14 +4,15 @@
 
 Current version: **0.3.3 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs` → `FluxMuxAppInfo`).
 
-## 📦 RELEASE: v0.3.3-beta published to GitHub (10/31)
+## 📦 RELEASE: v0.3.3-beta published to GitHub (10/31, updated 10/31)
 
 - **Release:** https://github.com/ArchPrime/AI-FluxMux/releases/tag/v0.3.3-beta
 - **Asset:** `AI-FluxMux-0.3.3-beta.zip` (~85 MB, self-contained win-x64, bundles .NET 10).
-- **Tag:** `v0.3.3-beta` on `main` (commit `5e40bb6`).
+- **Tag:** `v0.3.3-beta` on `main` (commit `289c257`).
 - **csproj version bumped** `0.3.2` → `0.3.3` (`<Version>` + `<InformationalVersion>`) so the zip is named correctly — committed + pushed.
 - **Built via the safe temp-copy publish flow** (copy source → temp dir, build updater + publish self-contained win-x64, move output back, zip). The running app was never touched.
-- Release notes cover: autolaunch hang + 503 storm fix, compaction-controls gating on client style, Diagnostics dropdown alignment, generation/prefill progress, YaRN/long-load stability, llama-server min b12000, and assorted fixes.
+- **Updated 10/31:** Rebuilt the zip to include the VRAM spill dialog rewording, scanner findings fixes (pinned actions, SECURITY.md, dependabot.yml, .codexignore, DummyApiKey rename), and Dependabot label fixes. Release notes updated to reflect all changes.
+- Release notes cover: autolaunch hang + 503 storm fix, compaction-controls gating on client style, Diagnostics dropdown alignment, generation/prefill progress, YaRN/long-load stability, llama-server min b12000, VRAM spill dialog rewording, and security hardening.
 
 ## 📋 OUTSTANDING ITEMS (as of 10/31)
 
