@@ -13,10 +13,10 @@ namespace FluxMux.Avalonia.Services;
 
 public sealed class DependencyAuditService
 {
-    // llama.cpp uses release tags like b7000, not dotted 0.0.0. Model Profiles can emit
+    // llama.cpp uses release tags like b12000, not dotted 0.0.0. Model Profiles can emit
     // -fa, --jinja, --spec-type, --swa-full, and --reasoning* against this floor.
-    private const int LlamaMinimumBuild = 7000;
-    private const string LlamaMinimumLabel = "b7000";
+    private const int LlamaMinimumBuild = 12000;
+    private const string LlamaMinimumLabel = "b12000";
 
     private readonly string _configPath;
 
