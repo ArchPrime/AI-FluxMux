@@ -4024,7 +4024,7 @@
                                              Maximum="1"
                                              Value="{Binding PrefillProgress}"
                                              IsIndeterminate="False"
-                                             Foreground="#FFFFFF"
+                                             Foreground="#22C55E"
                                              Background="#1E293B"
                                              ToolTip.Tip="{Binding PrefillStatusText}"
                                              HorizontalAlignment="Left">
@@ -4044,7 +4044,7 @@
                                          user sees live activity while the context is being read. -->
                                     <TextBlock x:Name="PrefillStatusTextBlock" Grid.Column="1"
                                                FontSize="11"
-                                               Foreground="#E4E7EC"
+                                               Foreground="#000000"
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillStatusText}"
                                                IsVisible="{Binding PrefillInProgress}" />
