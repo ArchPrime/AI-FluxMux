@@ -651,6 +651,7 @@ public sealed class FluxMuxRuntimeService
 		host.EnrichState = EnrichProxyRuntimeState;
 		host.GetLocalAutoCompactSettings = GetLocalAutoCompactSettings;
 		host.GetForwardPruneEnabled = GetForwardPruneEnabled;
+		host.GetUserClientReinflatesContext = () => UserClientReinflatesContext;
 		host.ReportHailMaryApplied = tokens => HailMaryAppliedNotice?.Invoke(tokens);
 		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);
 		host.ReportPortRulesTelemetry = snap => PortRulesTelemetryNotice?.Invoke(snap);
@@ -662,9 +663,9 @@ public sealed class FluxMuxRuntimeService
 			// Only forward user-relevant lines to the terminal. The gateway logs many internal
 			// lines (route decide, overlay, ContextDiag, long-load, ttfb, upstream ok, etc.)
 			// that are useful in the log file but clutter the UI. Forward only:
-			//   - [turn] ...       (one line per turn: route, timing, forward-prune result)
-			//   - hail-mary ...    (only when armed and executed)
-			if (line.StartsWith("[turn]", StringComparison.Ordinal)
+			//   - [turn N] ...   (one line per turn: route, timing, forward-prune result)
+			//   - hail-mary ...  (only when armed and executed)
+			if (line.StartsWith("[turn ", StringComparison.Ordinal)
 				|| line.StartsWith("hail-mary", StringComparison.Ordinal))
 			{
 				GatewayLogLine?.Invoke(line);
@@ -823,6 +824,15 @@ public sealed class FluxMuxRuntimeService
 
 	public void SetGenerationSpeedTelemetryEnabled(bool enabled)
 		=> _generationSpeedTracker.SetEnabled(enabled);
+
+	/// <summary>
+	/// Sets whether the user's client reinflates the context (forwards the full chat each turn,
+	/// e.g. Cline). When true, the gateway skips FluxMux compaction on every turn, regardless
+	/// of the per-profile compact mode. This is a global flag, not per-profile.
+	/// </summary>
+	private bool _userClientReinflatesContext;
+	public void SetUserClientReinflatesContext(bool reinflates) => _userClientReinflatesContext = reinflates;
+	public bool UserClientReinflatesContext => _userClientReinflatesContext;
 
 	private void EnsureIdleTimeoutLoop()
 	{

@@ -405,20 +405,20 @@
                                                                                         FontSize="11"
                                                                                         FontWeight="SemiBold" />
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
-                                                                                  <CheckBox IsChecked="{Binding LocalForwardPruneEnabled}"
+                                                                                  <CheckBox IsChecked="{Binding LocalForwardPruneEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                             VerticalAlignment="Center"
                                                                                             Content="Trim waste per turn (forward pruning)"
                                                                                             ToolTip.Tip="Forward pruning: on every turn, trim this turn's own waste (duplicate messages, repeated tool loops, oversized older tool results) so the context fills more slowly. Conservative — it never touches your current task. A per-turn throttle, separate from Compaction (which summarizes older turns). Toggle takes effect on the next turn, no reload needed." />
                                                                               </StackPanel>
 
                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
-                                                                                 <CheckBox IsChecked="{Binding LocalAutoCompactEnabled}"
+                                                                                 <CheckBox IsChecked="{Binding LocalAutoCompactEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                            VerticalAlignment="Center"
                                                                                            Content="Auto-compact"
                                                                                            ToolTip.Tip="Silently summarize older turns when the prompt gets long. No pause, no dialog. The model continues with a compressed memory of early work." />
                                                                              </StackPanel>
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
-                                                                                  <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}"
+                                                                                  <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}" IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                             SelectedItem="{Binding SelectedLocalAutoCompactModeOption}"
                                                                                             HorizontalAlignment="Stretch"
                                                                                             ToolTip.Tip="Choose how auto-compact settings are sourced for this profile. Use Port rules applies the shared settings from Servers - Advanced: Port rules. Profile-specific uses the per-profile settings below. None / endpoint managed disables FluxMux compaction and lets the endpoint manage context. Compaction only happens according to the selected option." />
@@ -559,6 +559,7 @@
                                                                                   Grid.Column="5"
                                                                                   VerticalAlignment="Center"
                                                                                   IsChecked="{Binding LocalVariantAutoCompressEnabled}"
+                                                                                  IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                   Content="On"
                                                                                   ToolTip.Tip="On: when Context is filling, AI-FluxMux may shorten older turns it forwards to llama-server. The Client app still keeps the full chat. Off: never auto-compact forwarded history." />
                                                                             </Grid>
@@ -1518,6 +1519,7 @@
                                                             <CheckBox FontWeight="SemiBold"
                                                                       Content="Compact"
                                                                       IsChecked="{Binding PortRules.CompactEnabled}"
+                                                                      IsEnabled="{Binding CompactionControlsEnabled}"
                                                                       ToolTip.Tip="When off, AI-FluxMux does not shorten older turns forwarded to llama-server. The Client app still has the full chat." />
                                                         </DockPanel>
                                                         <Grid ColumnSpacing="8" RowDefinitions="Auto,Auto,Auto" RowSpacing="6"
@@ -3131,7 +3133,7 @@
                 BorderThickness="0,1,0,0">
             <Grid RowDefinitions="Auto,*" RowSpacing="3">
                 <StackPanel Grid.Row="0" Spacing="4">
-                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,*,Auto,Auto,Auto" ColumnSpacing="6" ClipToBounds="True">
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto" ColumnSpacing="6" ClipToBounds="True">
                         <TextBlock Grid.Column="0" VerticalAlignment="Center" FontWeight="SemiBold" Text="Diagnostics" />
                         <shapes:Ellipse Grid.Column="1"
                                         Width="14"
@@ -3151,13 +3153,36 @@
                                    TextWrapping="NoWrap"
                                    TextTrimming="CharacterEllipsis"
                                    ToolTip.Tip="{Binding ActiveRouteStatusTooltip}" />
-                        <Button Grid.Column="5"
+                        <Grid Grid.Column="3">
+                            <ComboBox ItemsSource="{Binding UserClientStyleOptions}"
+                                      SelectedItem="{Binding UserClientStyle}"
+                                      Width="180"
+                                      Height="32"
+                                      FontSize="12"
+                                      VerticalAlignment="Center"
+                                      ToolTip.Tip="Tell AI-FluxMux which chat client you're using so it can adjust context compaction. &quot;Other&quot; = AI-FluxMux compaction works normally. &quot;Cline-like&quot; = AI-FluxMux compaction incompatible, due to client reinflating context with full chat history each turn">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}" FontSize="12" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
+                            <TextBlock Text="User client/agent?"
+                                       FontSize="12"
+                                       FontWeight="Bold"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Opacity="0.7" />
+                        </Grid>
+                        <Button Grid.Column="4"
                                 x:Name="HailMaryButton"
                                 Classes="hailMary"
-                                IsVisible="{Binding HailMaryButtonVisible}"
+                                IsEnabled="{Binding HailMaryButtonEnabled}"
+                                Height="32"
                                 VerticalAlignment="Center"
+                                VerticalContentAlignment="Center"
                                 FontFamily="Segoe UI Emoji, Segoe UI, Arial"
-                                FontSize="14"
+                                FontSize="12"
                                 Content="🙏&#xFE0E; Hail Mary Context Trim"
                                 Background="#1A1A1A"
                                 Foreground="White"
@@ -3209,7 +3234,7 @@
                             </StackPanel>
                             </Border>
                         </Popup>
-                        <TextBlock Grid.Column="5"
+                        <TextBlock Grid.Column="4"
                                    IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
                                    VerticalAlignment="Center"
                                    FontSize="10"
@@ -3217,11 +3242,13 @@
                                    HorizontalAlignment="Left"
                                    Opacity="0.9"
                                    Text="{Binding HailMaryOutcome}" />
-                        <Button Grid.Column="6"
+                        <Button Grid.Column="5"
                                 VerticalAlignment="Center"
+                                Height="32"
+                                VerticalContentAlignment="Center"
                                 MinWidth="72"
                                 Padding="10,4"
-                                FontSize="11"
+                                FontSize="12"
                                 FontWeight="SemiBold"
                                 Content="■ Stop model"
                                 Background="#DC2626"
@@ -3320,6 +3347,7 @@
                                     <Button Content="Compact"
                                             Margin="0,0,8,4"
                                             IsVisible="{Binding LocalReloadCompactVisible}"
+                                            IsEnabled="{Binding CompactionControlsEnabled}"
                                             Command="{Binding CompactLocalReloadRecommendCommand}"
                                             ToolTip.Tip="Compact: shorten the older turns that AI-FluxMux forwards to the local model so the current turn fits in the loaded Context. The Client app still has the full chat.\n\nWhen to use: this is typically a last resort to reanimate a dead chat — use it when the current turn became large enough to kill the chat before auto-compact could trigger.\n\nIf the suggested model profile's Context is too small for this chat, Compact also loads that model profile." />
                                     <Button Content="Load suggested model profile"

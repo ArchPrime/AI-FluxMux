@@ -27,7 +27,8 @@ public static class GatewayRouteExplanation
         string? differingOverlayVariant,
         bool compactApplied,
         bool reloadOffered,
-        bool cloudConsent)
+        bool cloudConsent,
+        bool omitCompactionText = false)
     {
         if (!modelLoaded)
         {
@@ -48,10 +49,13 @@ public static class GatewayRouteExplanation
                 parts.Add("this turn used model profile " + differingOverlayVariant.Trim());
             }
 
-            parts.Add(compactApplied ? "Compact yes" : "Compact no");
-            if (reloadOffered)
+            if (!omitCompactionText)
             {
-                parts.Add("Load suggested offered");
+                parts.Add(compactApplied ? "Compact yes" : "Compact no");
+                if (reloadOffered)
+                {
+                    parts.Add("Load suggested offered");
+                }
             }
 
             if (cloudConsent)

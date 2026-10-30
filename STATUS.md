@@ -27,6 +27,20 @@ Current version: **0.3.3 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs
 - `LocalLoadingRetryPolicy.cs` — retry gate (Fix 5)
 - `C:\AI_Workbench\Logs\launch_monitor.log` — real-time launch diagnostics
 
+## ✅ FIXED: Diagnostics "User client" dropdown misaligned with adjacent buttons (10/31)
+
+**Symptom:** In the Diagnostics bar, the "User client" dropdown (column 3) sat ~8px higher than the adjacent **Hail Mary** (column 4) and **Stop model** (column 5) buttons.
+
+**Root cause:** The dropdown's column was a nested 2-row Grid — Row 0 = the `ComboBox` (Height=32), Row 1 = the "User client" label (FontSize=10). That made the whole column ~48px tall. The two buttons are single 32px controls centered on the row, so the dropdown (top 32px of a 48px column) centered ~8px above them.
+
+**First attempt (WRONG — reverted):** Added `Margin="0,0,0,16"` to the ComboBox to push it down. This backfired: it made the column even taller (~64px), so the dropdown sat *higher* and the Diagnostics bar got fatter. Reverted.
+
+**Fix (XAML-only, `Views/MainWindow.axaml` ~line 3156):** Removed the 2-row Grid entirely. The column is now just the 32px `ComboBox` (matching the buttons' height exactly), with the "User client" label **overlaid** on the same cell instead of occupying a second row. The label no longer adds height, so the column = 32px = the buttons, and the bar is back to its original height.
+
+**Label tweak (same cell, after user review):** The overlaid "User client" label is now `VerticalAlignment="Center"` (centred within the dropdown, not pinned to the bottom) and `FontSize="12"` (matching the Hail Mary / Stop model button font). `FontWeight="Bold"` and `Opacity="0.7"` kept.
+
+**Verification:** Compiled clean in a separate output dir (`artifacts\testrun\`) — **0 errors** (75 pre-existing CA1416 warnings, unrelated). **Deploy: compiled, NOT deployed** (user: close app → `build-fluxmux.bat clean` → restart).
+
 ## 📝 Notes
 
 - **Do NOT** set `local_phase` to `"warming"` and leave it there. The gateway requires `"ready"` to route. Always transition to `"ready"` when the model is actually loaded.

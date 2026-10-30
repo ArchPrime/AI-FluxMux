@@ -32,6 +32,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private readonly string _lastRouteExplanationPath;
     private readonly HttpClient _http;
     private readonly object _logLock = new();
+    public static int SharedTurnCounter = 0;
 
     private HttpListener? _listener;
     private CancellationTokenSource? _loopCts;
@@ -102,6 +103,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
     public Func<string, string, (string Mode, double TriggerPercent, int KeepTurns, int KeepToolResults, int PinUserChars)? >? GetLocalAutoCompactSettings { get; set; }
     public Func<string, string, int?>? GetLocalMaxForwardedImages { get; set; }
     public Func<string, string, (int Context, string Offload)>? GetLocalProfileContextAndOffload { get; set; }
+
+    /// <summary>
+    /// Returns true when the user's client reinflates the context (forwards the full chat each
+    /// turn, e.g. Cline). When true, the gateway skips FluxMux compaction entirely, because the
+    /// client will resend the full history on the next turn anyway. This is a global flag, not
+    /// per-profile.
+    /// </summary>
+    public Func<bool>? GetUserClientReinflatesContext { get; set; }
 
     /// <summary>
     /// Per-profile forward-prune toggle ("LocalForwardPruneEnabled", default on). Read live each
@@ -1414,8 +1423,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // (503 retries) the measurement is null, and logging "n/a tokens" is just noise.
             if (measuredPromptTokens is not null)
             {
-                var pruneBit = forwardPruneSummary is not null ? " · " + forwardPruneSummary : string.Empty;
-                Log("[turn] " + routeKind + " · " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms" + pruneBit);
+                SharedTurnCounter++;
+                // Only include the forward-prune summary if the client doesn't reinflate the context.
+                // When the client reinflates (e.g. Cline), forward pruning is disabled, so the
+                // summary would be misleading.
+                var pruneBit = (forwardPruneSummary is not null && GetUserClientReinflatesContext?.Invoke() != true) 
+                    ? " · " + forwardPruneSummary 
+                    : string.Empty;
+                Log("[turn " + (SharedTurnCounter - 1) + "] " + routeKind + " · " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms" + pruneBit);
             }
             HttpResponseMessage? response = null;
             var loadingRetries = 0;
@@ -2441,6 +2456,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn, int? measuredPromptTokens = null, bool forceCompact = false)
     {
         var rules = CurrentRules();
+
+        // If the user's client reinflates the context (forwards the full chat each turn, e.g. Cline),
+        // skip FluxMux compaction entirely. The client will resend the full history on the next turn
+        // anyway, so compacting here is wasted work. Let the client manage its own context.
+        if (GetUserClientReinflatesContext?.Invoke() == true)
+        {
+            return false;
+        }
 
         // Check if the user has chosen "full fidelity" for a document. In this case, we skip
         // auto-compaction to let the document run in RAM at full precision.

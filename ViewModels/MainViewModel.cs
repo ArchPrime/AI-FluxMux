@@ -629,6 +629,55 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial string SelectedSelection2CloudVariant { get; set; } = BaseVariantDisplayName;
 
+    /// <summary>
+    /// The user's chat client style. "Other" = non-reinflating (compaction works normally).
+    /// "Cline-like" = forwards the full chat history each turn (reinflates context, so
+    /// FluxMux compaction is disabled). This is a declaration of fact about which client
+    /// the user is using, not a behavioral preference.
+    /// </summary>
+    [ObservableProperty]
+    public partial string UserClientStyle { get; set; } = "Which client?";
+
+    /// <summary>
+    /// Warning text shown when the user's client reinflates the context (e.g. Cline).
+    /// Explains that FluxMux compaction can't shrink what the client resends.
+    /// </summary>
+    public const string UserClientReinflationWarning =
+        "AI-FluxMux compaction can shorten what it sends to the model from your end. " +
+        "But endpoints that resend the full chat history every turn (e.g. Cline) will keep reinflating the context at their end from the full chat. " +
+        "If you use Cline or similar clients, you will need to manage compaction from the client side and/or start new chats more frequently.";
+
+    /// <summary>
+    /// True when the user's client reinflates the context (forwards the full chat each turn).
+    /// </summary>
+    public bool UserClientReinflatesContext =>
+        UserClientStyle.StartsWith("Cline-like", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when FluxMux compaction controls should be enabled. When the user's client
+    /// reinflates the context (e.g. Cline), compaction is disabled and the controls are
+    /// greyed out.
+    /// </summary>
+    public bool CompactionControlsEnabled => !UserClientReinflatesContext;
+
+    /// <summary>
+    /// True when the Hail Mary button should be enabled. The button is always visible,
+    /// but greyed out when:
+    /// - The user's client reinflates the context (e.g. Cline), OR
+    /// - There's no context data yet (no turns have been measured).
+    /// </summary>
+    public bool HailMaryButtonEnabled => CompactionControlsEnabled && HailMaryButtonVisible;
+
+    /// <summary>
+    /// Tooltip for the "User client" dropdown. Explains that this tells FluxMux which
+    /// chat client the user is using, so it can adjust compaction behavior.
+    /// </summary>
+    public string UserClientStyleTooltip => UserClientReinflatesContext
+        ? UserClientReinflationWarning
+        : "Tell AI-FluxMux which chat client you're using so it can adjust compaction. " +
+          "\"Other\" = your client keeps compacted context (AI-FluxMux compaction works normally). " +
+          "\"Cline-like\" = your client forwards the full chat history each turn (AI-FluxMux compaction is disabled).";
+
     [ObservableProperty]
     public partial bool IsFirstProfileBootstrapPending { get; set; } = false;
 
@@ -748,6 +797,19 @@ public partial class MainViewModel : ViewModelBase
         "Cline",
         "DeepSeek Harness",
         "Other"
+    ];
+
+    /// <summary>
+    /// Options for the "User client" dropdown in the Diagnostics panel. This tells FluxMux
+    /// which chat client the user is using, so it can adjust compaction behavior.
+    /// "Which client?" = placeholder (no selection yet).
+    /// "Other" = non-reinflating (compaction works normally).
+    /// "Cline-like" = reinflating (compaction disabled).
+    /// </summary>
+    public IReadOnlyList<string> UserClientStyleOptions { get; } =
+    [
+        "Other",
+        "Cline-like"
     ];
 
     [ObservableProperty]
@@ -956,6 +1018,90 @@ public partial class MainViewModel : ViewModelBase
         TrySyncEndpointSettingsForMountedRoute();
         RefreshCloudRecommendBanner();
         RefreshLocalReloadRecommendBanner();
+    }
+
+    partial void OnUserClientStyleChanged(string value)
+    {
+        if (_isLoadingConfig)
+        {
+            return;
+        }
+
+        var trimmedValue = value?.Trim() ?? "Which client?";
+        
+        // If the user selects the "Which client?" placeholder, don't save it to the config.
+        // This way, next time the app starts, the dropdown will show "Which client?" again.
+        if (trimmedValue.Equals("Which client?", StringComparison.Ordinal))
+        {
+            _config.SetString("UserClientStyle", string.Empty);
+        }
+        else
+        {
+            _config.SetString("UserClientStyle", trimmedValue);
+        }
+        
+        ApplyUserClientStyle();
+        OnPropertyChanged(nameof(UserClientStyleTooltip));
+        OnPropertyChanged(nameof(CompactionControlsEnabled));
+        OnPropertyChanged(nameof(HailMaryButtonEnabled));
+    }
+
+    /// <summary>
+    /// Applies the user client style: when the client reinflates the context (e.g. Cline),
+    /// disable FluxMux compaction and grey out the compaction controls. When the client
+    /// doesn't reinflate, enable compaction normally.
+    /// </summary>
+    private void ApplyUserClientStyle()
+    {
+        _isApplyingUserClientStyle = true;
+        try
+        {
+            if (UserClientReinflatesContext)
+            {
+                // Disable FluxMux compaction globally. The gateway checks this flag on every
+                // turn and skips compaction if it's true, regardless of the per-profile setting.
+                _runtimeService.SetUserClientReinflatesContext(true);
+                
+                // Save the current settings and disable them.
+                if (_savedLocalAutoCompactMode == null)
+                {
+                    _savedLocalAutoCompactMode = LocalAutoCompactMode;
+                    _savedLocalAutoCompactEnabled = LocalAutoCompactEnabled;
+                    _savedLocalForwardPruneEnabled = LocalForwardPruneEnabled;
+                    _savedLocalVariantAutoCompressEnabled = LocalVariantAutoCompressEnabled;
+                    _savedPortRulesCompactEnabled = PortRules.CompactEnabled;
+                }
+                LocalAutoCompactMode = "none";
+                LocalAutoCompactEnabled = false;
+                LocalForwardPruneEnabled = false;
+                LocalVariantAutoCompressEnabled = false;
+                PortRules.CompactEnabled = false;
+            }
+            else
+            {
+                // Enable compaction normally.
+                _runtimeService.SetUserClientReinflatesContext(false);
+                
+                // Revert to the saved settings if they were changed.
+                if (_savedLocalAutoCompactMode != null)
+                {
+                    LocalAutoCompactMode = _savedLocalAutoCompactMode;
+                    LocalAutoCompactEnabled = _savedLocalAutoCompactEnabled ?? true;
+                    LocalForwardPruneEnabled = _savedLocalForwardPruneEnabled ?? true;
+                    LocalVariantAutoCompressEnabled = _savedLocalVariantAutoCompressEnabled ?? false;
+                    PortRules.CompactEnabled = _savedPortRulesCompactEnabled ?? true;
+                    _savedLocalAutoCompactMode = null;
+                    _savedLocalAutoCompactEnabled = null;
+                    _savedLocalForwardPruneEnabled = null;
+                    _savedLocalVariantAutoCompressEnabled = null;
+                    _savedPortRulesCompactEnabled = null;
+                }
+            }
+        }
+        finally
+        {
+            _isApplyingUserClientStyle = false;
+        }
     }
 
     partial void OnHarnessWebPortChanged(decimal value)
@@ -3403,6 +3549,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var snapshot = _runtimeService.ReadLastRouteExplanation();
+        var omitCompactionText = UserClientReinflatesContext;
         if (snapshot is not { } turn
             || string.IsNullOrWhiteSpace(turn.Model)
             || !turn.Model.Equals(loadedModel, StringComparison.OrdinalIgnoreCase))
@@ -3414,7 +3561,8 @@ public partial class MainViewModel : ViewModelBase
                 differingOverlayVariant: null,
                 compactApplied: false,
                 reloadOffered: false,
-                cloudConsent: false);
+                cloudConsent: false,
+                omitCompactionText: omitCompactionText);
         }
 
         var differingOverlay = !string.IsNullOrWhiteSpace(turn.OverlayVariant)
@@ -3430,7 +3578,8 @@ public partial class MainViewModel : ViewModelBase
             differingOverlayVariant: differingOverlay,
             compactApplied: turn.CompactApplied,
             reloadOffered: turn.ReloadOffered,
-            cloudConsent: turn.CloudConsent);
+            cloudConsent: turn.CloudConsent,
+            omitCompactionText: omitCompactionText);
     }
 
     private void NoteActiveQuickSelectInFlightTransition()
@@ -3872,6 +4021,7 @@ public partial class MainViewModel : ViewModelBase
             ResetHailMaryPicker();
         }
         HailMaryShrinkTurnCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(HailMaryButtonEnabled));
     }
 
     public IBrush HailMaryBannerAccentBrush
@@ -4571,11 +4721,16 @@ public partial class MainViewModel : ViewModelBase
     // TTFT (s) vs turn index, and tok/s vs turn index. This reuses the same two graph panels so
     // no new UI is needed; the stress test and the turn view are mutually exclusive because the
     // stress test's SetSeries() call re-titles and clears the axes.
-    private int _turnTelemetryIndex;
     private bool _turnTelemetryArmed;
     private bool _lastTurnTelemetryActive;
     private DateTimeOffset _lastPlottedTurnUtc = DateTimeOffset.MinValue;
     private const int TurnTelemetryWindow = 20;
+    private string? _savedLocalAutoCompactMode;
+    private bool? _savedLocalAutoCompactEnabled;
+    private bool? _savedLocalForwardPruneEnabled;
+    private bool? _savedLocalVariantAutoCompressEnabled;
+    private bool? _savedPortRulesCompactEnabled;
+    private bool _isApplyingUserClientStyle;
 
     /// <summary>
     /// Plots one point per completed chat turn on the two telemetry graphs. Called from
@@ -4596,8 +4751,7 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        _turnTelemetryIndex++;
-        var x = _turnTelemetryIndex;
+        var x = FluxMuxGatewayHost.SharedTurnCounter;
 
         // Re-title the axes for the turn view the first time it is used in this session, so the
         // stress-test axis titles ("Context (tok)") are replaced by "Turn". SetSeries clears the
@@ -4631,10 +4785,6 @@ public partial class MainViewModel : ViewModelBase
                 $"turn {x}: {snapshot.TtftSeconds:0.##}s");
             TelemetryGraphThroughput.AddPoint(x, snapshot.TokensPerSecond,
                 $"turn {x}: {snapshot.TokensPerSecond:0.##} tok/s");
-
-            // Log the turn completion to the diagnostic terminal with the turn number, so the
-            // user can correlate the terminal telemetry with the graph turn numbers.
-            AppendDiagnosticEntry("TURN", $"Turn {x} complete: TTFT {snapshot.TtftSeconds:0.##}s, {snapshot.TokensPerSecond:0.##} tok/s, {snapshot.CompletionTokens} tokens");
 
             // Keep a rolling window so the graphs stay readable over a long session. The graph VM
             // holds points in a public collection; trim the oldest so only the last N turns show.
@@ -7057,6 +7207,17 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     private string _localAutoCompactMode = "port-rules";
+
+    partial void OnLocalAutoCompactModeChanged(string value)
+    {
+        // Sync the SelectedLocalAutoCompactModeOption with the LocalAutoCompactMode.
+        var option = LocalAutoCompactModeOptions.FirstOrDefault(o => 
+            string.Equals(o.Value, value, StringComparison.OrdinalIgnoreCase));
+        if (option != null && !ReferenceEquals(option, SelectedLocalAutoCompactModeOption))
+        {
+            SelectedLocalAutoCompactModeOption = option;
+        }
+    }
 
     /// <summary>
     /// Per-profile forward-prune toggle ("LocalForwardPruneEnabled", default on). When on, every
@@ -9992,7 +10153,6 @@ public partial class MainViewModel : ViewModelBase
         // scroll mode so the sliding-window positioning is disabled and the stress test's fixed
         // axis range (evenly-spaced fill-level bars) is used instead.
         _turnTelemetryArmed = false;
-        _turnTelemetryIndex = 0;
         TelemetryGraph.EndScrollMode();
         TelemetryGraphThroughput.EndScrollMode();
 
@@ -12757,6 +12917,12 @@ public partial class MainViewModel : ViewModelBase
             _config.GetString("EndpointApp", SelectedEndpointApp),
             "Cline");
         SyncEndpointAppToRuntime();
+        UserClientStyle = FirstNonEmpty(
+            _config.GetString("UserClientStyle", UserClientStyle),
+            "Which client?");
+        // Apply the user client style now that the setting is loaded. This sets the global
+        // flag that the gateway checks to decide whether to skip compaction.
+        ApplyUserClientStyle();
         var harnessWebPort = _config.GetInt("HarnessWebPort", (int)HarnessWebPort);
         if (harnessWebPort is >= 1 and <= 65535)
         {
@@ -13843,6 +14009,13 @@ public partial class MainViewModel : ViewModelBase
 
     private bool HasUnsavedEditsForTreeItem(CloudVariantTreeItemViewModel item, bool isLocal)
     {
+        // Don't report unsaved edits when the settings are being saved/restored due to
+        // client type changes (e.g. Cline-like). These are visual changes, not user edits.
+        if (_isApplyingUserClientStyle)
+        {
+            return false;
+        }
+        
         if (isLocal)
         {
             if (_isHydratingLocalVariantForm || _isValidatingLocalProfile || _isApplyingLocalPriorityWizard)
@@ -14361,6 +14534,7 @@ public partial class MainViewModel : ViewModelBase
         _config.SetString("LlamaCudaMinor", LlamaCudaMinor?.Trim() ?? string.Empty);
         _config.SetInt("OrchestratorPort", (int)OrchestratorPort);
         _config.SetString("EndpointApp", SelectedEndpointApp?.Trim() ?? string.Empty);
+        _config.SetString("UserClientStyle", UserClientStyle?.Trim() ?? "Other");
         _config.SetInt("HarnessWebPort", (int)HarnessWebPort);
         _config.SetBool("IdleTimeoutEnabled", IdleTimeoutEnabled);
         _config.SetBool("GenerationSpeedTelemetryEnabled", true);
