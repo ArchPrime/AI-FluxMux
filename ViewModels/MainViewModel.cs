@@ -4175,7 +4175,11 @@ public partial class MainViewModel : ViewModelBase
             var tokens = snapshot?.CompletionTokens ?? 0;
             var speed = snapshot?.TokensPerSecond ?? 0.0;
 
-            GenerationPhaseText = "Generating…";
+            // When the model is still thinking (no tokens have arrived yet), add a suffix to let
+            // the user know this phase may take a while. This sets expectations and reduces
+            // the perception that the app is frozen. Once tokens start arriving, show the
+            // active telemetry instead.
+            GenerationPhaseText = tokens > 0 ? "Generating…" : "Generating… (this may take a while)";
             GenerationDetailText = elapsedSeconds + "s" + (tokens > 0 ? " · " + tokens + " tokens" : "") +
                 (speed > 0 ? " · " + speed.ToString("0", CultureInfo.InvariantCulture) + " tok/s" : "");
 
@@ -4184,33 +4188,37 @@ public partial class MainViewModel : ViewModelBase
             // conservative default (500) until enough turns have been recorded. This makes the
             // estimate match the user's real hardware + prompt style instead of a fixed guess.
             var estimatedTotalTokens = GetOrCreateGenerationLengthModel().EstimatedCompletionTokens;
+
+            // Token-based progress: how much of the estimated response has arrived.
+            var tokenProgress = estimatedTotalTokens > 0
+                ? (double)tokens / estimatedTotalTokens
+                : 0.0;
+
+            // Time-based progress: how much of the estimated total time has elapsed.
+            // This keeps the bar moving during the thinking/prefill phase, when few or no
+            // tokens have arrived yet but the model is still working. Without this, the bar
+            // would freeze at ~0% for the entire thinking phase (which can be 30-70+ seconds
+            // for YaRN models with large contexts).
+            var estimatedTotalSeconds = Math.Max(10, estimatedTotalTokens / 20.0); // ~20 tok/s average
+            var timeProgress = Math.Clamp(elapsedSeconds / estimatedTotalSeconds, 0.0, 1.0);
+
+            // Use the max of the two so the bar never regresses and always reflects the
+            // most-advanced signal. Capped at 80% (not 100%) because the learned estimate
+            // is still a median — a full bar would imply "nearly done" when the response
+            // may still be far from over. The bar fills as tokens arrive and plateaus near
+            // 80% while the response continues.
+            PrefillProgress = Math.Clamp(Math.Max(tokenProgress, timeProgress), 0.0, 0.8);
+
+            // ETA text: only show when we have a speed estimate (tokens are arriving).
             if (speed > 0)
             {
                 var remainingTokens = Math.Max(0, estimatedTotalTokens - tokens);
                 var etaSeconds = (int)(remainingTokens / speed);
                 GenerationEtaText = etaSeconds > 0 ? "~" + etaSeconds + "s remaining" : "finishing…";
-
-                // Drive the progress bar with the same tokens/estimate the text ETA uses, so the
-                // bar and the "~Xs remaining" text always agree. Capped at 80% (not 100%) because
-                // the learned estimate is still a median (individual turns vary) — a full bar
-                // would imply "nearly done" when the response may still be far from over. The bar
-                // fills as tokens arrive and plateaus near 80% while the response continues.
-                var rawGenerationProgress = estimatedTotalTokens > 0
-                    ? (double)tokens / estimatedTotalTokens
-                    : 0.0;
-                PrefillProgress = Math.Clamp(rawGenerationProgress, 0.0, 0.8);
             }
             else
             {
-                // No speed yet (first tick before any tokens, or model is still thinking/prefilling).
-                // Use elapsed time to estimate progress so the bar moves even when tokens aren't
-                // arriving yet. Assume a typical generation takes ~30 seconds (adjustable based on
-                // the learned estimate). This prevents the bar from freezing during long prefill
-                // or thinking phases.
                 GenerationEtaText = string.Empty;
-                var estimatedTotalSeconds = Math.Max(10, estimatedTotalTokens / 20.0); // ~20 tok/s average
-                var rawTimeProgress = Math.Clamp(elapsedSeconds / estimatedTotalSeconds, 0.0, 0.8);
-                PrefillProgress = rawTimeProgress;
             }
 
             ShowGenerationDot = true;
@@ -4623,6 +4631,10 @@ public partial class MainViewModel : ViewModelBase
                 $"turn {x}: {snapshot.TtftSeconds:0.##}s");
             TelemetryGraphThroughput.AddPoint(x, snapshot.TokensPerSecond,
                 $"turn {x}: {snapshot.TokensPerSecond:0.##} tok/s");
+
+            // Log the turn completion to the diagnostic terminal with the turn number, so the
+            // user can correlate the terminal telemetry with the graph turn numbers.
+            AppendDiagnosticEntry("TURN", $"Turn {x} complete: TTFT {snapshot.TtftSeconds:0.##}s, {snapshot.TokensPerSecond:0.##} tok/s, {snapshot.CompletionTokens} tokens");
 
             // Keep a rolling window so the graphs stay readable over a long session. The graph VM
             // holds points in a public collection; trim the oldest so only the last N turns show.
