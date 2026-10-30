@@ -4202,9 +4202,15 @@ public partial class MainViewModel : ViewModelBase
             }
             else
             {
+                // No speed yet (first tick before any tokens, or model is still thinking/prefilling).
+                // Use elapsed time to estimate progress so the bar moves even when tokens aren't
+                // arriving yet. Assume a typical generation takes ~30 seconds (adjustable based on
+                // the learned estimate). This prevents the bar from freezing during long prefill
+                // or thinking phases.
                 GenerationEtaText = string.Empty;
-                // No speed yet (first tick before any tokens): leave the bar where it is
-                // (0 from the transition) rather than jumping.
+                var estimatedTotalSeconds = Math.Max(10, estimatedTotalTokens / 20.0); // ~20 tok/s average
+                var rawTimeProgress = Math.Clamp(elapsedSeconds / estimatedTotalSeconds, 0.0, 0.8);
+                PrefillProgress = rawTimeProgress;
             }
 
             ShowGenerationDot = true;
