@@ -4076,14 +4076,14 @@
                                     <!-- Idle text: "Ready · <speed>" when not prefilling or generating. -->
                                     <TextBlock Grid.Column="1"
                                                FontSize="11"
-                                               Foreground="#D0D5DD"
+                                               Foreground="#000000"
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillStatusText}"
                                                IsVisible="{Binding IsIdle}" />
                                     <!-- Right text: ETA (prefill) or ETA (generation), right-aligned. -->
                                     <TextBlock Grid.Column="2"
                                                FontSize="11"
-                                               Foreground="#D0D5DD"
+                                               Foreground="#000000"
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillEtaText}"
                                                IsVisible="{Binding PrefillInProgress}" />
