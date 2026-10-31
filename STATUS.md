@@ -2,6 +2,32 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
+## 🏗️ CROSS-PLATFORM SEAMS (multi-phase) — Phase 1 DONE (10/31)
+
+**Goal (from user):** Make it easy for others to port AI-FluxMux to Linux/macOS, while keeping the Windows build the source of truth so new innovations reach all platforms (no divergent forks). The strategy is to define a small, stable set of platform-agnostic interfaces (the "seams") so a community member implements 5 small contracts in a `Services/<Platform>/` folder instead forking the 9K-line runtime service.
+
+**Phase 1 (DONE): Define the platform contracts + factory skeleton.**
+- New `Abstractions/` folder with 5 interfaces:
+  - `IGpuPreferenceService` — read/apply GPU affinity (Windows: DirectX Registry; Linux: nvidia-smi/prime-select; macOS: system GPU settings). Includes `GpuPreferenceCode` (stable app-level codes: Auto/MainGraphicsCard/Integrated/HighPerformance/PowerSaver) and `GpuPreferenceReadResult`/`GpuPreferenceApplyResult` records.
+  - `IDisplayTopologyService` — enumerate monitors + which GPU drives each. The pure decision logic (`ClassifyTopology`/`BuildAdvice`/`SummarizeTopology`) stays shared in `DisplayTopologyService`; only raw enumeration is platform-specific.
+  - `IProcessManager` — enumerate processes, resolve port owner, kill process tree, wait for port close. (Largest seam — process mgmt is scattered across the runtime service today.)
+  - `IUpdateService` — in-place update (download + backup + extract). The shared update-*check* logic (find newest version + URL) stays platform-agnostic; only the apply mechanism is behind the seam.
+  - `ICrashLogger` — unhandled-exception logging + startup-failure reporting.
+- New `PlatformServiceFactory` (root namespace) with one `Create*` method per interface. **Phase 1 returns `null` for all** — callers treat null as "use the existing static Windows code path," so the running app's behavior is **completely unchanged**. The interfaces are pure abstraction seams with no behavior yet.
+- **Build:** 0 errors. **Tests:** 1733/1733 pass.
+- **Deploy:** none needed (no behavior change).
+
+**Phase 2 (NEXT): Move the Windows implementations behind the seams.**
+- Write thin adapters in `Services/Windows/`: `WindowsGpuPreferenceService`, `WindowsDisplayTopologyService`, `WindowsProcessManager`, `WindowsUpdateService`, `WindowsCrashLogger` — each wraps the existing static class and implements the interface.
+- Update `PlatformServiceFactory` to return the Windows adapters (gated on `OperatingSystem.IsWindows()`).
+- Update call sites in `MainViewModel` / `FluxMuxRuntimeService` / `App` to use the factory (with a null-fallback to the static code so the transition is incremental and safe).
+- **Behavior must remain identical** — this is a pure refactor (wrap, don't change).
+
+**Phase 3 (LATER, community): Add Linux/macOS implementations.**
+- A contributor implements the 5 interfaces in `Services/Linux/` or `Services/MacOS/` and registers them in the factory. No core changes needed.
+
+**Guardrail (from AGENTS.md):** "Do not restructure MainViewModel.cs for GitHub cosmetics while behaviour is still changing." Phase 2 touches `MainViewModel`/`FluxMuxRuntimeService` call sites, so it should be done incrementally (one seam at a time) and only when the launch/telemetry work has settled.
+
 ## ✅ DONE: Atomic state-file writes + remove Task.Delay(0) (10/31)
 
 **What was done:**
