@@ -42,20 +42,38 @@ public static class LocalLoadingRetryPolicy
     /// <summary>
     /// The effective retry count for the active profile: the long-load budget when the
     /// profile loads slowly from cold, otherwise the user-configured count.
+    ///
+    /// IMPORTANT: A cold load of ANY profile (not just long-load/YaRN) can take 15–60s
+    /// (loading a large GGUF into GPU+RAM). The gateway's 503-retry loop must use the
+    /// long-load budget for ANY local 503 "Loading model" error, otherwise it bails after
+    /// ~12s (6 retries × 2s) — right when a ~15–20s cold load is about to finish — and the
+    /// client sees a failure while the model is still loading in the background.
+    /// The <paramref name="isDaemonLoading"/> flag indicates the 503 is a genuine
+    /// "still loading" error (not a different kind of failure), so the long budget
+    /// applies regardless of the profile's context/offload settings.
     /// </summary>
-    public static int EffectiveRetryCount(PortForwardingRules? rules, int localContext, string gpuOffloadMode)
+    public static int EffectiveRetryCount(PortForwardingRules? rules, int localContext, string gpuOffloadMode, bool isDaemonLoading = false)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
-        return IsLongLoadProfile(localContext, gpuOffloadMode)
-            ? Math.Max(live.LoadingRetryCount, LongLoadRetryCount)
-            : live.LoadingRetryCount;
+        // Use the long-load budget when the profile is a long-load profile OR when the
+        // 503 is a genuine "still loading" error (a cold load of any profile can take
+        // minutes, and the gateway must not bail early and misreport it as a failure).
+        if (IsLongLoadProfile(localContext, gpuOffloadMode) || isDaemonLoading)
+        {
+            return Math.Max(live.LoadingRetryCount, LongLoadRetryCount);
+        }
+        return live.LoadingRetryCount;
     }
 
     /// <summary>
     /// The effective total-wait cap for the active profile.
+    ///
+    /// Like <see cref="EffectiveRetryCount"/>, a cold load of ANY profile can take
+    /// minutes, so the long-load wait cap applies when the 503 is a genuine
+    /// "still loading" error, not just for long-load profiles.
     /// </summary>
-    public static int EffectiveMaxTotalWaitSeconds(int localContext, string gpuOffloadMode)
-        => IsLongLoadProfile(localContext, gpuOffloadMode) ? LongLoadMaxTotalWaitSeconds : MaxTotalWaitSeconds;
+    public static int EffectiveMaxTotalWaitSeconds(int localContext, string gpuOffloadMode, bool isDaemonLoading = false)
+        => (IsLongLoadProfile(localContext, gpuOffloadMode) || isDaemonLoading) ? LongLoadMaxTotalWaitSeconds : MaxTotalWaitSeconds;
 
     public static bool LooksLikeDaemonLoading(int status, string? detail)
     {
@@ -80,14 +98,18 @@ public static class LocalLoadingRetryPolicy
         string gpuOffloadMode = "")
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
-        var retryCount = EffectiveRetryCount(rules, localContext, gpuOffloadMode);
-        var maxWait = EffectiveMaxTotalWaitSeconds(localContext, gpuOffloadMode);
+        bool isDaemonLoading = LooksLikeDaemonLoading(status, detail);
+        // Pass isDaemonLoading so the long-load retry budget applies to ANY local 503
+        // "Loading model" error, not just when the profile is detected as long-load from
+        // state. A cold load of any profile takes 15–60s; the gateway must not bail after
+        // ~12s (right when the load is about to finish) and misreport it as a failure.
+        var retryCount = EffectiveRetryCount(rules, localContext, gpuOffloadMode, isDaemonLoading);
+        var maxWait = EffectiveMaxTotalWaitSeconds(localContext, gpuOffloadMode, isDaemonLoading);
         // For ANY local 503 "Loading model" error, retry. The Loading503Enabled gate is too
         // restrictive — it should be bypassed for all local 503 "Loading model" errors, not
         // just long-load profiles. Without this, a cold load of a standard profile would fail
         // immediately on the first 503 "Loading model" error if Port rules are off (the default).
         bool isLongLoad = IsLongLoadProfile(localContext, gpuOffloadMode);
-        bool isDaemonLoading = LooksLikeDaemonLoading(status, detail);
         if ((!live.Loading503Enabled && !isLongLoad && !isDaemonLoading) || retriesSoFar >= retryCount)
         {
             return false;

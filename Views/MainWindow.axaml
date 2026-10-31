@@ -3126,14 +3126,14 @@
         <Border Grid.Row="3"
                 x:Name="DiagnosticsPanelBorder"
                 Padding="14,6,14,8"
-                ClipToBounds="True"
+                ClipToBounds="False"
                 HorizontalAlignment="Stretch"
                 Background="{DynamicResource FluxChromeBackground}"
                 BorderBrush="{DynamicResource FluxChromeEdge}"
                 BorderThickness="0,1,0,0">
             <Grid RowDefinitions="Auto,*" RowSpacing="3">
                 <StackPanel Grid.Row="0" Spacing="4">
-                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto" ColumnSpacing="6" ClipToBounds="True">
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto" ColumnSpacing="6" ClipToBounds="False">
                         <TextBlock Grid.Column="0" VerticalAlignment="Center" FontWeight="SemiBold" Text="Diagnostics" />
                         <shapes:Ellipse Grid.Column="1"
                                         Width="14"
@@ -3153,10 +3153,10 @@
                                    TextWrapping="NoWrap"
                                    TextTrimming="CharacterEllipsis"
                                    ToolTip.Tip="{Binding ActiveRouteStatusTooltip}" />
-                        <Grid Grid.Column="3">
+                        <Grid Grid.Column="3" ClipToBounds="False">
                             <ComboBox ItemsSource="{Binding UserClientStyleOptions}"
                                       SelectedItem="{Binding UserClientStyle}"
-                                      Width="180"
+                                      Width="120"
                                       Height="32"
                                       FontSize="12"
                                       VerticalAlignment="Center"
@@ -3168,10 +3168,11 @@
                                 </ComboBox.ItemTemplate>
                             </ComboBox>
                             <TextBlock Text="User client/agent?"
-                                       FontSize="12"
+                                       FontSize="10"
                                        FontWeight="Bold"
                                        HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"
+                                       VerticalAlignment="Bottom"
+                                       Margin="0,0,0,-14"
                                        Opacity="0.7" />
                         </Grid>
                         <Button Grid.Column="4"
@@ -4075,7 +4076,7 @@
                                                Foreground="#000000"
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillStatusText}"
-                                               IsVisible="{Binding PrefillInProgress}" />
+                                               IsVisible="{Binding IsBottomBarPrefill}" />
                                      <!-- Generation phase: line 1 = "Generating…" + detail (seconds/tokens/speed),
                                           line 2 = ETA. Vertical layout so the ETA sits on its own line
                                           below the detail text instead of overlapping it. -->
@@ -4083,7 +4084,7 @@
                                                  Orientation="Vertical"
                                                  VerticalAlignment="Center"
                                                  HorizontalAlignment="Left"
-                                                 IsVisible="{Binding ShowGenerationDot}">
+                                                 IsVisible="{Binding IsBottomBarGenerate}">
                                          <StackPanel Orientation="Horizontal">
                                              <TextBlock x:Name="GenerationPhaseTextBlock"
                                                         FontSize="11"
@@ -4107,14 +4108,14 @@
                                                Foreground="#000000"
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillStatusText}"
-                                               IsVisible="{Binding IsIdle}" />
+                                               IsVisible="{Binding IsBottomBarIdle}" />
                                     <!-- Right text: ETA (prefill) or ETA (generation), right-aligned. -->
                                     <TextBlock Grid.Column="2"
                                                FontSize="11"
                                                Foreground="#000000"
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillEtaText}"
-                                               IsVisible="{Binding PrefillInProgress}" />
+                                               IsVisible="{Binding IsBottomBarPrefill}" />
                                 </Grid>
                             </Grid>
                             <WrapPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">

@@ -3414,6 +3414,18 @@ public sealed class FluxMuxRuntimeService
 				}
 			}
 
+			// Cancel any in-flight gateway handlers so stale requests parked in the 503-retry
+			// loop stop retrying against the new llama-server. Without this, a stale handler
+			// can keep retrying for up to 300s and fire prefill telemetry into the new
+			// launch's UI state, causing garbled bottom-bar telemetry for minutes.
+			try
+			{
+				_gatewayHost?.CancelInFlightHandlers();
+			}
+			catch
+			{
+			}
+
 			// Create a new CTS linked to the caller's token. If the caller cancels OR a
 			// newer launch supersedes this one, the launch aborts.
 			var newCts = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
@@ -7421,15 +7433,40 @@ public sealed class FluxMuxRuntimeService
 			// The median tracks the typical launch time (~13-20s for this model), so the budget is
 			// generous enough for a normal cold load but not stuck at a historical worst-case value.
 			//
-			// The headroom is 60s (not 30s) to account for cold loads that are slower than the
-			// median (e.g., after a reboot, when the page cache is cold, or when the GPU is busy).
+			// The headroom is 60s for normal profiles, but 120s for long-load (YaRN / extended-context
+			// / GPU+CPU) profiles. A YaRN cold load can legitimately take 30–60s (model load + large
+			// KV allocation into GPU+RAM), and the launch loop has to wait for the port to open, the
+			// model to load, AND probe the public endpoint — all within the budget. If the previous
+			// server was holding the port (eating 15s+), or the page cache is cold, the 60s headroom
+			// isn't enough and the loop bails before the model is ready. The 120s headroom gives a
+			// cold YaRN load the time it needs without being stuck at a historical worst-case value.
+			//
 			// The readiness monitor (180s deadline) will keep polling if the model takes longer.
 			int recordedMs = medianMs > 0 ? medianMs : (slowestMs > 0 ? slowestMs : fastestMs);
 			if (recordedMs <= 0)
 			{
 				return 90000;
 			}
-			return Math.Clamp(recordedMs + 60000, 60000, 180000);
+			// Check if this is a long-load profile (YaRN / extended-context / GPU+CPU).
+			bool isLongLoad = false;
+			try
+			{
+				JsonObject root = LoadJsonCached(_configPath);
+				JsonObject profile = ResolveLocalProfile(root, model, variant);
+				if (profile is not null)
+				{
+					int ctx = GetProfileInt(profile, "OverrideContext", 0);
+					string offload = GetString(profile, "LocalGpuOffloadMode");
+					isLongLoad = LocalLoadingRetryPolicy.IsLongLoadProfile(ctx, offload);
+				}
+			}
+			catch
+			{
+				// Best-effort; default to false.
+			}
+			int headroomMs = isLongLoad ? 120000 : 60000;
+			int maxMs = isLongLoad ? 240000 : 180000;
+			return Math.Clamp(recordedMs + headroomMs, 60000, maxMs);
 		}
 		catch
 		{

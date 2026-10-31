@@ -34,6 +34,14 @@
                 <Button x:Name="SmallerModelButton"
                         Margin="0,0,8,8"
                         Click="SmallerModel_Click" />
+                <Button x:Name="StopButton"
+                        Margin="0,0,8,8"
+                        IsVisible="False"
+                        Click="Stop_Click" />
+                <Button x:Name="WaitLongerButton"
+                        Margin="0,0,8,8"
+                        IsVisible="False"
+                        Click="WaitLonger_Click" />
             </WrapPanel>
         </StackPanel>
     </Border>

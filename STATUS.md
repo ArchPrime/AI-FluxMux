@@ -2,6 +2,166 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
+## 📋 TASKS: Overlapping telemetry + launch-failure recovery (10/31)
+
+**Symptom:** Bottom-bar telemetry overlaps ("Prefilling context…" + "Generating… 16s finishing…" on top of each other). Persists for minutes after launch partial-failure + retry. User wants: (a) kill stuck launch processes on new launch, (b) tick mark in agent dropdown, (c) graceful-exit dialog on launch failure.
+
+**Root cause:** Two mechanisms:
+- **A (handoff race, always):** `MainViewModel.cs` L506–523: `PrefillFirstByteNotice` sets `PrefillInProgress=false` immediately but `ShowGenerationDot=true` only on next 500ms tick. Both TextBlocks in `MainWindow.axaml` L4069 `Grid.Column="1"` briefly visible simultaneously.
+- **B (stale in-flight handler, persists after launch problem):** Launch bails "warming" (`FluxMuxRuntimeService.cs` L3987–4002) → Cline request parked in gateway 503-retry loop (`FluxMuxGatewayHost.cs` L1440–1497). Handler is fire-and-forget (`AcceptLoopAsync` L345) NOT linked to launch CTS. `SupersedeInProgressLocalLaunch` cancels the launch but NOT the handler. Stale handler retries against new llama-server up to 300s, then fires `ReportPrefillFirstByte` into same `GenerationSpeedTracker` + UI state → garbled telemetry for minutes.
+
+**Key code paths:**
+- `FluxMuxGatewayHost.cs` L345: in-flight handlers not tracked/cancellable
+- `FluxMuxGatewayHost.cs` L1440–1497: 503-retry loop uses `timeoutCts.Token` only
+- `FluxMuxGatewayHost.cs` L1690/L1710: `ReportPrefillStarted`/`ReportPrefillFirstByte`
+- `FluxMuxRuntimeService.cs` L3401–3423: `SupersedeInProgressLocalLaunch` (no handler cancel)
+- `MainViewModel.cs` L506–523: handoff race
+- `MainWindow.axaml` L4069–4118: bottom-bar text labels
+- `MainViewModel.cs` L8639–8665: warming→status only; OOM→dialog (3 buttons, no Stop)
+- `Views/LocalLaunchRecoveryDialog.axaml`: existing dialog
+- `MainViewModel.cs` L9473–9479: `StopLocalRouteAsync` (already cancels launch + kills process)
+
+**Tasks (execution order):**
+
+### Task 1: Fix handoff race (Mechanism A) — ✅ DONE (10/31)
+- `MainViewModel.cs` `PrefillFirstByteNotice`: clear `PrefillStatusText` + `PrefillEtaText` before `StartGenerationTimer()`.
+- `MainViewModel.cs`: added `BottomBarPhase` int property (0=Idle, 1=Prefill, 2=Generate) + `IsBottomBarIdle`/`IsBottomBarPrefill`/`IsBottomBarGenerate` helper properties. Phase set at each transition: `PrefillStartedNotice` → 1, `PrefillFirstByteNotice` → 2, `ResetPrefillIndicatorToIdle` → 0.
+- `MainWindow.axaml` L4069–4118: all four `IsVisible` bindings in the bottom-bar text row now use the phase properties instead of `PrefillInProgress`/`ShowGenerationDot`/`IsIdle`.
+- **Build:** 0 errors (76 pre-existing CA1416 warnings). **Tests:** 1728/1728 pass.
+- **Deploy:** close app → `build-fluxmux.bat clean` → restart.
+
+### Task 2: Unified launch-failure recovery dialog — ✅ DONE (10/31)
+- `LocalLaunchRecoveryDialog.axaml.cs`: extended `LocalLaunchRecoveryAction` with `StopAndCleanUp=4`, `WaitLonger=5`; added `StopButton`/`WaitLongerButton` fields + click handlers; `Configure` now takes `showSmallerContext`/`showStop`/`stopLabel`/`showWaitLonger` flags.
+- `LocalLaunchRecoveryDialog.axaml`: added "Stop and clean up" + "Wait longer" buttons (hidden by default).
+- `ThemedDialog.cs`: `LaunchRecovery` passes the new flags through.
+- `MainViewModel.cs`: added `LocalLaunchFailureKind` enum (Oom/PortInUse/CrashedOrTimeout) + pure static `ClassifyLocalLaunchFailure(result)`; generalized `HandleLocalOomRecoveryAsync` → `HandleLocalLaunchFailureAsync(model, variant, result)`:
+  - OOM: "Local model ran out of memory" + 4 btns (SmallerCtx/Retry/SmallerModel/Stop)
+  - Warming: "Model still loading" + 4 btns (WaitLonger/Retry/SmallerModel/Stop)
+  - Port in use: "Daemon port already in use" + 3 btns (Retry/Stop/SmallerModel)
+  - Crashed/timeout: "Local model failed to start" + 4 btns (Retry/SmallerCtx/SmallerModel/Stop)
+- `StopAndCleanUp` → `StopLocalRouteAsync`. `WaitLonger` → `WaitLongerOnLocalLaunchAsync` restarts `StartLocalReadinessMonitor` with `extraSeconds: 120` (new optional param added to the monitor).
+- `ApplyLocalLaunchOutcome` now calls `HandleLocalLaunchFailureAsync` for ALL non-success (not just OOM); `NoteLocalProfileConnectionFailure` still only fires for non-warming failures.
+- **Tests:** new `LocalLaunchFailureClassificationTests` (5 tests) covering OOM / port-in-use / crash-timeout / OOM-precedence classification.
+- **Build:** 0 errors (main + test projects). **Tests:** 1733/1733 pass.
+- **Deploy:** close app → `build-fluxmux.bat clean` → restart.
+
+### Task 3: Cancel in-flight gateway handlers on supersede (Mechanism B) — ✅ DONE (10/31)
+- `FluxMuxGatewayHost.cs`: added `_activeHandlerCts` field, linked to `_loopCts` in `StartAsync`; cleaned up in `StopAsync` (cancel + dispose).
+- `AcceptLoopAsync`: threads `_activeHandlerCts.Token` into `HandleContextAsync(context, handlerToken)`.
+- `HandleContextAsync` / `HandleChatCompletionsAsync`: accept and forward `handlerToken`.
+- 503-retry loop: creates `handlerLinkedCts` (linked `timeoutCts.Token` + `handlerToken`); uses it for `Task.Delay` + `loadingSignal.Wait`. Checks `handlerToken.IsCancellationRequested` at top of loop and after `Task.WhenAny` → break + clean 502.
+- `CancelInFlightHandlers()`: cancels `_activeHandlerCts`, logs "gateway: cancelled in-flight handler(s) on launch supersede".
+- `FluxMuxRuntimeService.cs` `SupersedeInProgressLocalLaunch`: calls `_gatewayHost?.CancelInFlightHandlers()` after cancelling the launch CTS.
+- **No guard** (cancel on every supersede incl. same-profile re-launch). Cline handles 502 gracefully.
+- **Build:** 0 errors (main + test projects). **Tests:** 1733/1733 pass.
+- **Deploy:** close app → `build-fluxmux.bat clean` → restart.
+- **Verify (manual):** launch → 503-retry → click Launch same profile → stale handler cancelled → no persistent overlap → clean 502 → new launch proceeds.
+
+### Task 4: User client dropdown label below the control — ✅ DONE (10/31)
+- `MainWindow.axaml` L3156–3178: the user-client/agent Grid cell is a single-cell Grid with `ClipToBounds="False"`. The ComboBox stays vertically centered (original position, no shift). The "User client/agent?" label is `VerticalAlignment="Bottom"` with `Margin="0,0,0,-14"` so it floats just below the dropdown and can partially overlap the row beneath without pushing the dropdown up.
+- `MainWindow.axaml` L3129, L3136: set `ClipToBounds="False"` on the `DiagnosticsPanelBorder` and the bottom-bar Grid so the floating label is not clipped by the parent containers.
+- `MainViewModel.cs`: removed the `"Which client?"` placeholder default. `UserClientStyle` now defaults to `"Other"` (the safe, compaction-enabled option). Updated `OnUserClientStyleChanged` to always save the trimmed value (no special-case for the placeholder). Updated config-loading fallback to `"Other"`.
+- `MainWindow.axaml` L3159: reduced ComboBox `Width` from 180 to 120 to fit the short option text ("Other" / "Cline-like").
+- **Build:** 0 errors. **Tests:** 1733/1733 pass.
+- **Deploy:** close app → `build-fluxmux.bat clean` → restart.
+
+**Deploy state:** Tasks 1–4 done (compiled + tested, not deployed).
+**Testing:** Separate-output-dir build/test (AGENTS.md). Targeted filter per task, then full suite.
+
+## ✅ FIXED: YaRN profile "stuck on Loading model then failed" (10/31)
+
+**Symptom (user):** Launching a YaRN profile gets stuck on "Loading model" / the countdown for a long
+time, then fails.
+
+**Root cause (CONFIRMED — final):** Commit `3c0b1ce` ("Fix autolaunch hang: set local_phase=ready
+before public endpoint probe", 10/30) added `IsModelActuallyReadyAsync` to the launch loop. Before
+that commit, the launch loop set `local_phase=ready` as soon as the port opened, and the public
+endpoint probe handled the "model still loading" case. After that commit, the launch loop waits for
+`IsModelActuallyReadyAsync` to return true (model *fully* loaded, not just port open) before setting
+`local_phase=ready`. On a cold page cache after a Windows restart, the model load takes 30–60s, and
+the 78s launch budget (18s median + 60s headroom) isn't enough — the loop bails before the model is
+ready, leaving it in a half-launched state.
+
+- A cold YaRN load with **empty context** does NOT take minutes — it's just loading the 17.8 GiB
+  GGUF into GPU+RAM. The 393K KV cache is allocated lazily on first use, not at launch. Telemetry
+  confirms: cold YaRN loads finish in **15–20s** (warm) to **30–60s** (cold, after a Windows
+  restart).
+- The 09:37 "77s to port" in `launch_monitor.log` was the new llama-server process taking 77s to
+  bind its port on a cold page cache (the 17.8 GiB model read from NVMe, not RAM). The launch loop's
+  78s budget expired before the model was ready.
+- **Why <20s launches worked before:** those were warm loads (model already resident in the page
+  cache). The failure only happens on a **cold load** (first launch after a Windows restart) where
+  the model has to be read from NVMe.
+
+**Key code paths:**
+- `FluxMuxGatewayHost.cs` ~1385: `_currentTurnIsLongLoad` set from `local_context` + `local_gpu_offload`
+  in gateway state. If these are stale/zero during a launch, long-load is NOT detected.
+- `FluxMuxGatewayHost.cs` ~1462: `ShouldRetry` uses `local_context`/`local_gpu_offload` from state.
+- `LocalLoadingRetryPolicy.cs` ~74: `ShouldRetry` stops at `retriesSoFar >= retryCount` (6 default).
+- `LocalLoadingRetryPolicy.cs` ~46: `EffectiveRetryCount` = 150 for long-load, 6 for normal.
+
+**Fix (IMPLEMENTED + TESTED):** Three changes, all targeting the *launch* stage (not context/prefill):
+
+1. **`LocalLoadingRetryPolicy.cs`** — `EffectiveRetryCount` / `EffectiveMaxTotalWaitSeconds` now
+   accept an `isDaemonLoading` flag. A genuine 503 "Loading model" error gets the long-load retry
+   budget (150 / 300s) for **ANY** profile, so the gateway rides out the cold load instead of
+   bailing at ~12s and returning a 503 (which triggers the cloud switch).
+
+2. **`FluxMuxRuntimeService.cs` `GetLocalLaunchWarmupBudgetMs`** — the launch-loop budget now uses
+   a **120s headroom** (not 60s) and a **240s ceiling** (not 180s) for long-load (YaRN /
+   extended-context / GPU+CPU) profiles. A cold YaRN load after a Windows restart takes 30–60s
+   (model read from NVMe on a cold page cache), and the launch loop now waits for the model to be
+   *fully* loaded (not just the port to open) before setting `local_phase=ready`. The old 78s
+   budget (18s median + 60s headroom) wasn't enough for a cold load. The new budget (18s median +
+   120s headroom = ~138s, capped at 240s) gives a cold load the time it needs without being stuck
+   at a historical worst-case value.
+
+3. **`MainViewModel.cs` `StartLocalReadinessMonitor`** — the readiness-monitor deadline is now
+   **240s** (not 180s) for long-load profiles, matching the extended launch-loop budget.
+
+4. **`MainViewModel.cs` — clear, plain-English "still loading" message** — when the launch timer
+   countdown hits zero but the model is still loading, the user now sees a clear explanation
+   (instead of blank lines or a cryptic "taking longer than expected"):
+   > "Your model is still loading — this is normal for a cold start (especially after a Windows
+   > restart, when the model has to be read from disk). AI-FluxMux is waiting for it to finish —
+   > do not cancel or switch to cloud. It's been Xs so far."
+   
+   This message is shown in three places:
+   - The countdown monitor (when `remainingMs < 0`)
+   - `ApplyLocalLaunchOutcome` (when the launch loop bails and returns "warming up")
+   - `StartLocalReadinessMonitor` (when the health check fails during the readiness poll)
+
+**Trigger:** This issue arose after a **Windows restart**, which means a **cold page cache** — the
+17.8 GiB model has to be read from NVMe, not RAM. The first launch after restart is always slow
+(cold cache), and the 09:37 log confirms it: 77s just for the port to open. The second launch
+(10:11) was fast (11s) because the page cache was now warm (thanks to the pre-warm from the first
+launch). The launch budget (78s) wasn't enough for the cold first launch, so the loop bailed before
+the model was ready.
+
+**Pre-warm note:** `PreWarmModelPageCache` runs in the background (fire-and-forget) and *is* called
+on the auto-load-at-startup path. It helps warm the cache for *subsequent* launches, but the *first*
+launch after restart still has to read the 17.8 GiB file from NVMe, which takes 30–77s. The 240s
+budget accommodates this.
+
+**Why this fixes "not getting past the launch stage":** the model now has up to 240s to finish
+loading (port open + model ready + public endpoint probe) before the launch loop gives up. The
+readiness monitor also has 240s to confirm the public endpoint is healthy. Cloud is NOT attempted
+automatically — the gateway's local 503 path never offers cloud; the switch was the client reacting
+to a premature 503, which no longer happens because the gateway waits for the model.
+
+**Tests updated:** `PortForwardingRulesTests.cs` — two tests now expect `ShouldRetry` to return
+true at retry 6 for a 503 "Loading model" error (long-load budget applies). All 1728 tests pass.
+
+**State:** COMPILED + TESTED (1728/1728 pass) — NOT deployed.
+
+**Deploy (user action):** close app → `build-fluxmux.bat clean` → restart.
+
+**Note:** the currently-running llama-server (PID 25044) is the **non-YaRN** variant
+("max VRAM only context 2", `-c 262144`, no rope args) because `last_launched_local.json` records that
+variant — auto-load faithfully restored the last *explicitly* launched profile, not the YaRN one.
+
+---
+
 Current version: **0.3.3 beta** (see `FluxMux.Updates.Core/AppVersionComparer.cs` → `FluxMuxAppInfo`).
 
 ## 📦 RELEASE: v0.3.3-beta published to GitHub (10/31, updated 10/31)

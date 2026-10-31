@@ -471,6 +471,7 @@ public partial class MainViewModel : ViewModelBase
         {
             SafeUiInvoke(() =>
             {
+                BottomBarPhase = 1; // Prefill
                 PrefillInProgress = true;
                 PrefillProgress = 0.0;
                 PrefillStatusText = promptTokens > 0
@@ -518,7 +519,14 @@ public partial class MainViewModel : ViewModelBase
                 // "new phase starting" rather than the bar sitting stuck at 100%.
                 StopPrefillTimer();
                 PrefillProgress = 0.0;
+                // Clear the prefill text BEFORE switching to the generation phase so the
+                // two labels never overlap in the same Grid column. The phase switch makes
+                // the prefill TextBlock invisible and the generation StackPanel visible in
+                // a single property-change notification.
+                PrefillStatusText = string.Empty;
+                PrefillEtaText = string.Empty;
                 PrefillInProgress = false;
+                BottomBarPhase = 2; // Generate
                 StartGenerationTimer();
             });
         };
@@ -636,7 +644,7 @@ public partial class MainViewModel : ViewModelBase
     /// the user is using, not a behavioral preference.
     /// </summary>
     [ObservableProperty]
-    public partial string UserClientStyle { get; set; } = "Which client?";
+    public partial string UserClientStyle { get; set; } = "Other";
 
     /// <summary>
     /// Warning text shown when the user's client reinflates the context (e.g. Cline).
@@ -802,7 +810,6 @@ public partial class MainViewModel : ViewModelBase
     /// <summary>
     /// Options for the "User client" dropdown in the Diagnostics panel. This tells FluxMux
     /// which chat client the user is using, so it can adjust compaction behavior.
-    /// "Which client?" = placeholder (no selection yet).
     /// "Other" = non-reinflating (compaction works normally).
     /// "Cline-like" = reinflating (compaction disabled).
     /// </summary>
@@ -1027,19 +1034,9 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        var trimmedValue = value?.Trim() ?? "Which client?";
-        
-        // If the user selects the "Which client?" placeholder, don't save it to the config.
-        // This way, next time the app starts, the dropdown will show "Which client?" again.
-        if (trimmedValue.Equals("Which client?", StringComparison.Ordinal))
-        {
-            _config.SetString("UserClientStyle", string.Empty);
-        }
-        else
-        {
-            _config.SetString("UserClientStyle", trimmedValue);
-        }
-        
+        var trimmedValue = value?.Trim() ?? "Other";
+        _config.SetString("UserClientStyle", trimmedValue);
+
         ApplyUserClientStyle();
         OnPropertyChanged(nameof(UserClientStyleTooltip));
         OnPropertyChanged(nameof(CompactionControlsEnabled));
@@ -4200,6 +4197,28 @@ public partial class MainViewModel : ViewModelBase
     /// </summary>
     public bool IsIdle => !PrefillInProgress && !ShowGenerationDot;
 
+    // --- Bottom-bar phase (mutually exclusive visibility for prefill / generation / idle) ---
+    // The prefill TextBlock, generation StackPanel, and idle TextBlock all live in the same
+    // Grid column. Previously their visibility was driven by separate booleans (PrefillInProgress,
+    // ShowGenerationDot, IsIdle) that could overlap for one 500ms tick during the prefill→generation
+    // handoff, showing both "Prefilling context…" and "Generating…" simultaneously. A single
+    // phase enum makes the three states mutually exclusive by construction.
+
+    [ObservableProperty]
+    private int _bottomBarPhase; // 0 = Idle, 1 = Prefill, 2 = Generate
+
+    public bool IsBottomBarIdle => BottomBarPhase == 0;
+    public bool IsBottomBarPrefill => BottomBarPhase == 1;
+    public bool IsBottomBarGenerate => BottomBarPhase == 2;
+
+    partial void OnBottomBarPhaseChanged(int value)
+    {
+        OnPropertyChanged(nameof(IsBottomBarIdle));
+        OnPropertyChanged(nameof(IsBottomBarPrefill));
+        OnPropertyChanged(nameof(IsBottomBarGenerate));
+        OnPropertyChanged(nameof(IsIdle));
+    }
+
     private static string FormatTokenCount(int tokens)
     {
         if (tokens < 1000) return tokens.ToString(CultureInfo.InvariantCulture);
@@ -4400,6 +4419,7 @@ public partial class MainViewModel : ViewModelBase
         // Show "Ready" without a speed. The prefill speed is not useful in the idle state
         // because it's much faster than the generation speed and can be misleading.
         PrefillStatusText = "Ready";
+        BottomBarPhase = 0; // Idle
     }
 
     private bool _approvingChosenCloud;
@@ -8632,7 +8652,20 @@ public partial class MainViewModel : ViewModelBase
         {
             _lastHealthDetail = result.Details;
             ConnectionHealthText = result.Details;
-            StatusMessage = result.Status;
+            // For the "warming up" case (launch loop bailed but the model is still loading),
+            // show a clear, plain-English explanation of what's happening and what to do.
+            // The user needs to know the model is still loading (not stuck), how long it's
+            // been, and that they should wait — not cancel or switch to cloud.
+            if (result.IsLocalRouteWarming)
+            {
+                StatusMessage = "Your model is still loading. This is normal for a cold start (especially after a Windows restart, when the model has to be read from disk). "
+                    + "AI-FluxMux is waiting for it to finish — do not cancel or switch to cloud. "
+                    + "It should be ready within a minute or two.";
+            }
+            else
+            {
+                StatusMessage = result.Status;
+            }
             LocalRouteIndicatorState = result.IsSuccess ? RouteIndicatorState.Amber : RouteIndicatorState.Fault;
             RememberMountedLocal(model, variant);
             if (!result.IsSuccess && !result.IsLocalRouteWarming)
@@ -8641,13 +8674,13 @@ public partial class MainViewModel : ViewModelBase
                     model,
                     variant,
                     FirstNonEmpty(result.Details, result.Status));
-                // Graceful OOM recovery: if the launch failed on out-of-memory, offer
-                // one-click actions (smaller context / retry / smaller model) instead of
-                // leaving the user with a bare status line.
-                if (LooksLikeLocalOomFailure(result.Details, result.Status))
-                {
-                    _ = HandleLocalOomRecoveryAsync(model, variant);
-                }
+            }
+            // Unified launch-failure recovery: for any non-success launch (OOM, port-in-use,
+            // crash/timeout, or still-warming), offer one-click actions (retry / smaller context /
+            // smaller model / stop / wait longer) instead of leaving the user with a bare status line.
+            if (!result.IsSuccess)
+            {
+                _ = HandleLocalLaunchFailureAsync(model, variant, result);
             }
         }
 
@@ -8675,13 +8708,60 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Shows the OOM recovery dialog when a local launch fails on out-of-memory.
-    /// Offers one-click actions: use a smaller context, retry as-is, or pick a smaller model.
+    /// The category of a local launch failure, used to pick the right recovery dialog
+    /// (heading, message, and which buttons are shown).
     /// </summary>
-    private async Task HandleLocalOomRecoveryAsync(string model, string variant)
+    private enum LocalLaunchFailureKind
+    {
+        Oom,
+        PortInUse,
+        CrashedOrTimeout,
+    }
+
+    /// <summary>
+    /// Classifies a non-success local launch result into a <see cref="LocalLaunchFailureKind"/>
+    /// so the recovery dialog can show the right message and buttons. OOM is detected from the
+    /// llama-server stderr/status text; port-in-use from the "Local port already in use" /
+    /// "Local switch blocked" statuses; everything else (crash, timeout, "still in progress",
+    /// missing executable, etc.) is treated as a generic crash/timeout.
+    /// </summary>
+    private static LocalLaunchFailureKind ClassifyLocalLaunchFailure(RuntimeActionResult result)
+    {
+        var status = result.Status ?? string.Empty;
+        var details = result.Details ?? string.Empty;
+        if (LooksLikeLocalOomFailure(result.Details, result.Status))
+        {
+            return LocalLaunchFailureKind.Oom;
+        }
+
+        if (status.Equals("Local port already in use", StringComparison.OrdinalIgnoreCase)
+            || status.Equals("Local switch blocked", StringComparison.OrdinalIgnoreCase)
+            || (details.Contains("daemon port", StringComparison.OrdinalIgnoreCase)
+                && details.Contains("already", StringComparison.OrdinalIgnoreCase)))
+        {
+            return LocalLaunchFailureKind.PortInUse;
+        }
+
+        return LocalLaunchFailureKind.CrashedOrTimeout;
+    }
+
+    /// <summary>
+    /// Shows the unified local-launch failure recovery dialog. The heading, message, and the set
+    /// of buttons depend on the failure kind:
+    /// <list type="bullet">
+    /// <item>OOM: "Use a smaller context", "Retry as-is", "Pick a smaller model", "Stop and clean up".</item>
+    /// <item>Warming (still loading after the window expired): "Wait longer", "Retry as-is", "Pick a smaller model", "Stop and clean up".</item>
+    /// <item>Port in use: "Retry as-is", "Stop and clean up", "Pick a smaller model".</item>
+    /// <item>Crashed/timeout: "Retry as-is", "Use a smaller context", "Pick a smaller model", "Stop and clean up".</item>
+    /// </list>
+    /// </summary>
+    private async Task HandleLocalLaunchFailureAsync(string model, string variant, RuntimeActionResult result)
     {
         try
         {
+            var kind = ClassifyLocalLaunchFailure(result);
+            var isWarming = result.IsLocalRouteWarming;
+
             // Compute the largest context target that should fit, to pre-fill the
             // "Use a smaller context" action.
             var advice = CurrentLocalHardwareAdvice();
@@ -8701,11 +8781,52 @@ public partial class MainViewModel : ViewModelBase
                 ? "Use a smaller context"
                 : $"Use {suggestedTarget} context";
 
+            string title;
+            string message;
+            bool showSmallerContext;
+            bool showWaitLonger;
+
+            if (isWarming)
+            {
+                title = "Model still loading";
+                message = "The local model '" + model + "' (" + variant + ") is still loading after the launch window expired. "
+                    + "This is normal for a cold start (especially after a Windows restart, when the model has to be read from disk). "
+                    + "You can wait a little longer, retry as-is, pick a smaller model, or stop and clean up.";
+                showSmallerContext = false;
+                showWaitLonger = true;
+            }
+            else if (kind == LocalLaunchFailureKind.Oom)
+            {
+                title = "Local model ran out of memory";
+                message = "The local model '" + model + "' (" + variant + ") did not start because it ran out of memory (VRAM or RAM). "
+                    + "You can try a smaller context window, retry as-is (in case memory was temporarily busy), pick a smaller model, or stop and clean up.";
+                showSmallerContext = true;
+                showWaitLonger = false;
+            }
+            else if (kind == LocalLaunchFailureKind.PortInUse)
+            {
+                title = "Daemon port already in use";
+                message = "The local model '" + model + "' (" + variant + ") could not start because another process is already using the daemon port. "
+                    + "Close that process, then retry as-is, or stop and clean up, or pick a smaller model.";
+                showSmallerContext = false;
+                showWaitLonger = false;
+            }
+            else
+            {
+                title = "Local model failed to start";
+                message = "The local model '" + model + "' (" + variant + ") did not start — llama-server crashed or did not finish launching. "
+                    + "You can retry as-is, try a smaller context window, pick a smaller model, or stop and clean up.";
+                showSmallerContext = true;
+                showWaitLonger = false;
+            }
+
             var action = Views.ThemedDialog.LaunchRecovery(
-                "Local model ran out of memory",
-                $"The local model '{model}' ({variant}) did not start because it ran out of memory (VRAM or RAM). "
-                + "You can try a smaller context window, retry as-is (in case memory was temporarily busy), or pick a smaller model.",
-                smallerContextLabel);
+                title,
+                message,
+                smallerContextLabel,
+                showSmallerContext: showSmallerContext,
+                showStop: true,
+                showWaitLonger: showWaitLonger);
 
             switch (action)
             {
@@ -8714,10 +8835,16 @@ public partial class MainViewModel : ViewModelBase
                     break;
                 case Views.LocalLaunchRecoveryAction.RetryAsIs:
                     StatusMessage = "Retrying local launch...";
-                    await LaunchLocalRouteAsync("OOM retry", model, variant);
+                    await LaunchLocalRouteAsync("Launch retry", model, variant);
                     break;
                 case Views.LocalLaunchRecoveryAction.PickSmallerModel:
                     StatusMessage = "Pick a smaller local model from Model Profiles, then launch it.";
+                    break;
+                case Views.LocalLaunchRecoveryAction.StopAndCleanUp:
+                    await StopLocalRouteAsync("Local launch recovery");
+                    break;
+                case Views.LocalLaunchRecoveryAction.WaitLonger:
+                    await WaitLongerOnLocalLaunchAsync(model, variant);
                     break;
                 default:
                     // Dialog could not be shown (no main window) or was dismissed.
@@ -8728,6 +8855,21 @@ public partial class MainViewModel : ViewModelBase
         {
             // Recovery is best-effort; never let it mask the original failure.
         }
+    }
+
+    /// <summary>
+    /// "Wait longer" recovery action: restarts the local readiness monitor with an extended
+    /// deadline (+120s) so a slow cold load can finish without the user having to re-launch.
+    /// </summary>
+    private async Task WaitLongerOnLocalLaunchAsync(string model, string variant)
+    {
+        StatusMessage = "Waiting a little longer for the local model to finish loading...";
+        LocalRouteIndicatorState = RouteIndicatorState.Amber;
+        var launchStartedUtc = _localLaunchActualStartUtc > DateTime.MinValue
+            ? _localLaunchActualStartUtc
+            : DateTime.UtcNow;
+        StartLocalReadinessMonitor((int)OrchestratorPort, model, variant, launchStartedUtc, extraSeconds: 120);
+        await Task.CompletedTask;
     }
 
     /// <summary>
@@ -8975,7 +9117,7 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
-    private void StartLocalReadinessMonitor(int port, string model, string variant, DateTime launchStartedUtc)
+    private void StartLocalReadinessMonitor(int port, string model, string variant, DateTime launchStartedUtc, int extraSeconds = 0)
     {
         _localReadinessPollCts?.Cancel();
         _localReadinessPollCts = new CancellationTokenSource();
@@ -8984,7 +9126,32 @@ public partial class MainViewModel : ViewModelBase
         {
             try
             {
-                var deadline = DateTime.UtcNow.AddSeconds(180);
+                // Long-load (YaRN / extended-context / GPU+CPU) profiles can take 30–60s to
+                // cold-load (model + large KV allocation into GPU+RAM). The launch loop now
+                // allows up to 300s for these, so the readiness monitor must match — otherwise
+                // it expires at 180s while the model is still loading, and the user sees a
+                // failure even though the model would have been ready a moment later.
+                int readinessDeadlineSec = 180;
+                try
+                {
+                    var settings = GetLiveLocalProfileSettings(variant ?? string.Empty, model);
+                    if (settings is not null)
+                    {
+                        int ctx = ParseInt(settings["OverrideContext"]?.ToString() ?? string.Empty, 0);
+                        string offload = settings["LocalGpuOffloadMode"]?.ToString() ?? string.Empty;
+                        if (LocalLoadingRetryPolicy.IsLongLoadProfile(ctx, offload))
+                        {
+                            readinessDeadlineSec = 240;
+                        }
+                    }
+                }
+                catch
+                {
+                    // Best-effort; default to 180s.
+                }
+                // "Wait longer" recovery action adds extra time on top of the base deadline.
+                readinessDeadlineSec += Math.Max(0, extraSeconds);
+                var deadline = DateTime.UtcNow.AddSeconds(readinessDeadlineSec);
                 var publicEndpointReady = false;
                 while (!cts.Token.IsCancellationRequested && DateTime.UtcNow < deadline)
                 {
@@ -8994,10 +9161,12 @@ public partial class MainViewModel : ViewModelBase
                     {
                         SafeUiInvoke(() =>
                         {
-                            if (_localLaunchCountdownCts is null)
-                            {
-                                StatusMessage = "Local route warming up... waiting for health check";
-                            }
+                            // Show a clear, plain-English message whether or not the countdown
+                            // monitor is still running. The user needs to know the model is
+                            // still loading (not stuck) and that they should wait.
+                            StatusMessage = "Your model is still loading. This is normal for a cold start (especially after a Windows restart, when the model has to be read from disk). "
+                                + "AI-FluxMux is waiting for it to finish — do not cancel or switch to cloud. "
+                                + "It should be ready within a minute or two.";
                         });
                         continue;
                     }
@@ -12917,9 +13086,14 @@ public partial class MainViewModel : ViewModelBase
             _config.GetString("EndpointApp", SelectedEndpointApp),
             "Cline");
         SyncEndpointAppToRuntime();
-        UserClientStyle = FirstNonEmpty(
+        var loadedClientStyle = FirstNonEmpty(
             _config.GetString("UserClientStyle", UserClientStyle),
-            "Which client?");
+            "Other").Trim();
+        // Sanitize: if the stored value is the old "Which client?" placeholder or anything
+        // not in the valid options list, fall back to "Other" so the dropdown never shows blank.
+        UserClientStyle = UserClientStyleOptions.Contains(loadedClientStyle, StringComparer.OrdinalIgnoreCase)
+            ? loadedClientStyle
+            : "Other";
         // Apply the user client style now that the setting is loaded. This sets the global
         // flag that the gateway checks to decide whether to skip compaction.
         ApplyUserClientStyle();
@@ -17571,9 +17745,13 @@ public partial class MainViewModel : ViewModelBase
                         else if (estimateMs > 0 && remainingMs < 0)
                         {
                             StatusMessageBrush = Brushes.DarkOrange;
-                            _localLaunchCountdownText = phase.Equals("Loading model", StringComparison.OrdinalIgnoreCase)
-                                ? $"llama-server is loading {target}... cold-load wait {FormatTelemetryDuration(estimateMs)} | taking longer than a cold load by {FormatTelemetryDuration(Math.Abs(remainingMs))}"
-                                : $"{phase}: {target} | taking longer than expected by {FormatTelemetryDuration(Math.Abs(remainingMs))}";
+                            // When the countdown hits zero but the model is still loading, show
+                            // a clear, plain-English explanation of what's happening and what to
+                            // do. The user needs to know the model is still loading (not stuck),
+                            // that this is normal for a cold start, and that they should wait.
+                            _localLaunchCountdownText = "Your model is still loading — this is normal for a cold start (especially after a Windows restart, when the model has to be read from disk). "
+                                + "AI-FluxMux is waiting for it to finish — do not cancel or switch to cloud. "
+                                + $"It's been {FormatTelemetryDuration(elapsedMs)} so far.";
                         }
                         else
                         {

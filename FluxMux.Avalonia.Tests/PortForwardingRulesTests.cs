@@ -244,7 +244,11 @@ public sealed class PortForwardingRulesTests
         Assert.True(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 0, rules));
         Assert.False(LocalLoadingRetryPolicy.ShouldRetry(503, "overloaded", 0, rules));
         Assert.False(LocalLoadingRetryPolicy.ShouldRetry(400, "Loading model", 0, rules));
-        Assert.False(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 6, rules));
+        // A 503 "Loading model" error now uses the long-load retry budget (150) for ANY
+        // profile, not just long-load profiles. A cold load of any profile takes 15–60s,
+        // so the gateway must not bail after 6 retries (~12s, right when the load is about
+        // to finish). Retry 6 is still within the budget.
+        Assert.True(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 6, rules));
     }
 
     [Fact]
@@ -265,9 +269,12 @@ public sealed class PortForwardingRulesTests
     {
         var rules = PortForwardingRules.Defaults with { LoadingRetryCount = 6, LoadingRetryDelaySeconds = 2 };
 
-        // Normal profile: stops retrying after the configured 6 retries.
+        // Normal profile: a 503 "Loading model" error now uses the long-load retry budget
+        // (150) for ANY profile, not just long-load profiles. A cold load of any profile
+        // takes 15–60s, so the gateway must not bail after 6 retries (~12s, right when the
+        // load is about to finish).
         Assert.True(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 5, rules, localContext: 32768, gpuOffloadMode: "GPU only"));
-        Assert.False(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 6, rules, localContext: 32768, gpuOffloadMode: "GPU only"));
+        Assert.True(LocalLoadingRetryPolicy.ShouldRetry(503, "Loading model", 6, rules, localContext: 32768, gpuOffloadMode: "GPU only"));
 
         // Long-load profile (YaRN / extended context): keeps retrying far past 6, up to the
         // long-load budget, so a cold load that takes minutes is ridden out instead of failing.

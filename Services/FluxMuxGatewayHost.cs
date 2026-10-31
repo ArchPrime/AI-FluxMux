@@ -36,6 +36,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
     private HttpListener? _listener;
     private CancellationTokenSource? _loopCts;
+    private CancellationTokenSource? _activeHandlerCts;
     private Task? _acceptLoop;
     private int _port;
     private readonly IdleSessionCoordinator _idleSession;
@@ -266,6 +267,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
         _port = port;
         _loopCts = new CancellationTokenSource();
         var loopToken = _loopCts.Token;
+        // _activeHandlerCts is linked to _loopCts so that stopping the gateway also cancels
+        // any in-flight handlers. It is cancelled independently (via CancelInFlightHandlers)
+        // when a new local launch supersedes an in-progress one, so stale handlers parked in
+        // the 503-retry loop stop retrying against the new llama-server.
+        _activeHandlerCts = CancellationTokenSource.CreateLinkedTokenSource(loopToken);
         _acceptLoop = Task.Run(() => AcceptLoopAsync(listener, loopToken), loopToken);
         Log($"managed bridge boot on 127.0.0.1:{port}");
         EmitContextEvent("bridge_boot", $"port={port}");
@@ -277,15 +283,25 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         var loop = _acceptLoop;
         var cts = _loopCts;
+        var handlerCts = _activeHandlerCts;
         var listener = _listener;
         _acceptLoop = null;
         _loopCts = null;
+        _activeHandlerCts = null;
         _listener = null;
         _port = 0;
 
         try
         {
             cts?.Cancel();
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            handlerCts?.Cancel();
         }
         catch
         {
@@ -312,6 +328,34 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         cts?.Dispose();
+        handlerCts?.Dispose();
+    }
+
+    /// <summary>
+    /// Cancels all in-flight gateway handlers (chat-completion requests currently being
+    /// processed). This is called when a new local launch supersedes an in-progress one, so
+    /// that stale handlers parked in the 503-retry loop stop retrying against the new
+    /// llama-server and instead return a clean 502. Without this, a stale handler can keep
+    /// retrying for up to 300s and fire prefill telemetry into the new launch's UI state,
+    /// causing garbled bottom-bar telemetry for minutes.
+    /// </summary>
+    public void CancelInFlightHandlers()
+    {
+        var handlerCts = _activeHandlerCts;
+        if (handlerCts is null)
+        {
+            return;
+        }
+
+        try
+        {
+            handlerCts.Cancel();
+        }
+        catch
+        {
+        }
+
+        Log("gateway: cancelled in-flight handler(s) on launch supersede");
     }
 
     public void Dispose()
@@ -342,11 +386,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 break;
             }
 
-            _ = Task.Run(() => HandleContextAsync(context), CancellationToken.None);
+            _ = Task.Run(() => HandleContextAsync(context, _activeHandlerCts?.Token ?? CancellationToken.None), CancellationToken.None);
         }
     }
 
-    private async Task HandleContextAsync(HttpListenerContext context)
+    private async Task HandleContextAsync(HttpListenerContext context, CancellationToken handlerToken)
     {
         try
         {
@@ -402,7 +446,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     await PrepareForChatAsync(CancellationToken.None).ConfigureAwait(false);
                 }
 
-                await HandleChatCompletionsAsync(context).ConfigureAwait(false);
+                await HandleChatCompletionsAsync(context, handlerToken).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
@@ -439,7 +483,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
     }
 
-    private async Task HandleChatCompletionsAsync(HttpListenerContext context)
+    private async Task HandleChatCompletionsAsync(HttpListenerContext context, CancellationToken handlerToken)
     {
         string bodyText;
         using (var reader = new StreamReader(context.Request.InputStream, context.Request.ContentEncoding ?? Encoding.UTF8))
@@ -1419,6 +1463,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
             }
             using var timeoutCts = new CancellationTokenSource();
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
+            // Combine the per-turn timeout with the handler-level cancellation token so that
+            // a launch supersede (CancelInFlightHandlers) aborts the 503-retry loop immediately
+            // instead of letting a stale handler keep retrying against the new llama-server.
+            using var handlerLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, handlerToken);
+            var handlerToken2 = handlerLinkedCts.Token;
             // Only log the [turn] line when we have a real token measurement. During launch
             // (503 retries) the measurement is null, and logging "n/a tokens" is just noise.
             if (measuredPromptTokens is not null)
@@ -1435,11 +1484,19 @@ public sealed class FluxMuxGatewayHost : IDisposable
             HttpResponseMessage? response = null;
             var loadingRetries = 0;
             string? loadingDetail = null;
-            int status;
+            int status = 0;
             try
             {
                 while (true)
                 {
+                    // If the handler was cancelled (launch supersede), stop immediately and
+                    // let the outer catch send a clean 502 instead of sending a new upstream
+                    // request that will be ignored.
+                    if (handlerToken.IsCancellationRequested)
+                    {
+                        Log("upstream request aborted: handler cancelled on launch supersede");
+                        break;
+                    }
                     response?.Dispose();
                     using var request = CreateUpstreamRequest();
                     response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token).ConfigureAwait(false);
@@ -1483,8 +1540,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
                             // normal backoff.
                             var delayMs = portRules.LoadingRetryDelaySeconds * 1000;
                             var completed = await Task.WhenAny(
-                                Task.Delay(delayMs, timeoutCts.Token),
-                                Task.Run(() => loadingSignal.Wait(timeoutCts.Token)));
+                                Task.Delay(delayMs, handlerToken2),
+                                Task.Run(() => loadingSignal.Wait(handlerToken2)));
+                            // If the handler was cancelled (launch supersede), stop retrying
+                            // immediately and let the outer catch send a clean 502.
+                            if (handlerToken.IsCancellationRequested)
+                            {
+                                Log("local loading retry aborted: handler cancelled on launch supersede");
+                                break;
+                            }
                             if (loadingSignal.IsSet)
                             {
                                 Log("local loading: shared signal set, retrying immediately");
@@ -1506,6 +1570,22 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 {
                     EndLocalLoadingWait();
                 }
+            }
+
+            // If the handler was cancelled (launch supersede) before a response was received,
+            // send a clean 502 and return. The outer catch in HandleContextAsync would also
+            // handle this, but sending the 502 here gives the client a clearer error.
+            if (response is null)
+            {
+                if (handlerToken.IsCancellationRequested)
+                {
+                    Log("handler cancelled before response: sending 502");
+                    await SendOpenAiErrorAsync(context.Response, "This turn was cancelled because a new model launch superseded it. Retry in a fresh chat.", 502, "proxy_error").ConfigureAwait(false);
+                    return;
+                }
+                // Should not happen in practice, but guard against it.
+                await SendOpenAiErrorAsync(context.Response, "AI-FluxMux could not finish this request. Retry in a fresh chat.", 502, "proxy_error").ConfigureAwait(false);
+                return;
             }
 
             using (response)

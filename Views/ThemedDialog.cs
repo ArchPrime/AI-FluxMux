@@ -20,18 +20,25 @@ public static class ThemedDialog
         => Show(title, message, showCancel: false, okLabel);
 
     /// <summary>
-    /// Shows the local-launch OOM recovery dialog with three actions:
-    /// "Use a smaller context", "Retry as-is", and "Pick a smaller model".
+    /// Shows the local-launch recovery dialog. The base actions are "Retry as-is" and
+    /// "Pick a smaller model"; "Use a smaller context" is shown when
+    /// <paramref name="showSmallerContext"/> is true, "Stop and clean up" when
+    /// <paramref name="showStop"/> is true, and "Wait longer" when
+    /// <paramref name="showWaitLonger"/> is true.
     /// Returns the chosen action, or <see cref="Views.LocalLaunchRecoveryAction.None"/> if the
     /// dialog could not be shown (no main window).
     /// </summary>
     public static Views.LocalLaunchRecoveryAction LaunchRecovery(
         string title,
         string message,
-        string smallerContextLabel = "Use a smaller context")
+        string smallerContextLabel = "Use a smaller context",
+        bool showSmallerContext = true,
+        bool showStop = false,
+        string stopLabel = "Stop and clean up",
+        bool showWaitLonger = false)
     {
         var dialog = new Views.LocalLaunchRecoveryDialog();
-        dialog.Configure(title, message, smallerContextLabel);
+        dialog.Configure(title, message, smallerContextLabel, showSmallerContext, showStop, stopLabel, showWaitLonger);
         dialog.RequestedThemeVariant = Application.Current?.RequestedThemeVariant ?? ThemeVariant.Light;
 
         var owner = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow;
