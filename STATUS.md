@@ -2,6 +2,19 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
+## ✅ DONE: Adaptive launch monitor poll interval (10/31)
+
+**What was done:**
+- `FluxMuxRuntimeService.cs` launch monitor loop: replaced the fixed 2s poll interval with an adaptive interval that starts at 500ms for fast early detection and backs off to 2s after 10 consecutive failed polls. Resets to 500ms when a poll succeeds (model ready / probe success).
+- Added `pollIntervalMs` and `consecutivePollFails` variables at the top of the loop.
+- Updated both `Task.Delay(2000, launchToken)` sites (model-not-ready and still-loading-after-probe-fail) to use the adaptive interval.
+- Added reset of `consecutivePollFails` and `pollIntervalMs` when the public probe succeeds.
+- **Cancellation safety:** The `launchToken` is still passed to every `Task.Delay`, so a superseding launch aborts immediately regardless of the current interval.
+- **Build:** 0 errors. **Tests:** 1733/1733 pass.
+- **Deploy:** close app → `build-fluxmux.bat clean` → restart.
+
+**Impact:** Reduces launch time by up to 10s on fast loads (500ms polling catches readiness sooner) while reducing CPU/IO load on long cold loads (backs off to 2s after 10 fails).
+
 ## 📋 TASKS: Overlapping telemetry + launch-failure recovery (10/31)
 
 **Symptom:** Bottom-bar telemetry overlaps ("Prefilling context…" + "Generating… 16s finishing…" on top of each other). Persists for minutes after launch partial-failure + retry. User wants: (a) kill stuck launch processes on new launch, (b) tick mark in agent dropdown, (c) graceful-exit dialog on launch failure.

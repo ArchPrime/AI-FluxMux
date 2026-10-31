@@ -3799,6 +3799,13 @@ public sealed class FluxMuxRuntimeService
 		bool retryStartup = false;
 		int publicProbeFailCount = 0;
 		DateTime publicProbeFirstFailUtc = DateTime.MinValue;
+		// Adaptive poll interval: start fast (500ms) for quick early detection, back off to 2s
+		// after 10 consecutive failed polls to reduce CPU/IO load on long cold loads. Resets to
+		// 500ms when a poll succeeds (model ready / probe success) so the next transition is
+		// detected quickly. The cancellation token is still respected on every delay, so a
+		// superseding launch aborts immediately regardless of the current interval.
+		int pollIntervalMs = 500;
+		int consecutivePollFails = 0;
 		LogLaunchMonitor($"launch loop started; deadline={deadline:HH:mm:ss} localBackendPort={localBackendPort}");
 		while (DateTime.UtcNow < deadline)
 		{
@@ -3861,9 +3868,11 @@ public sealed class FluxMuxRuntimeService
 				LogLaunchMonitor($"IsModelActuallyReadyAsync({localBackendPort}) = {modelReady}");
 				if (!modelReady)
 				{
-					// Model is still loading. Wait and retry.
-					LogLaunchMonitor("model not ready yet; waiting 2s and retrying");
-					await Task.Delay(2000, launchToken);
+					// Model is still loading. Wait and retry with the adaptive interval.
+					consecutivePollFails++;
+					pollIntervalMs = consecutivePollFails >= 10 ? 2000 : 500;
+					LogLaunchMonitor($"model not ready yet; waiting {pollIntervalMs}ms and retrying (fail {consecutivePollFails})");
+					await Task.Delay(pollIntervalMs, launchToken);
 					continue;
 				}
 
@@ -3908,7 +3917,9 @@ public sealed class FluxMuxRuntimeService
 
 						WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "warming", "llama-server is responding on the daemon port; the local model is still loading.");
 						WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "warming", probeDetails, GetGatewayPid());
-						await Task.Delay(2000, launchToken);
+						consecutivePollFails++;
+						pollIntervalMs = consecutivePollFails >= 10 ? 2000 : 500;
+						await Task.Delay(pollIntervalMs, launchToken);
 						continue;
 					}
 
@@ -3926,6 +3937,8 @@ public sealed class FluxMuxRuntimeService
 				// Reset the public probe fail counter on success.
 				publicProbeFailCount = 0;
 				publicProbeFirstFailUtc = DateTime.MinValue;
+				consecutivePollFails = 0;
+				pollIntervalMs = 500;
 				int readyMs = (int)Math.Min(2147483647L, launchStopwatch.ElapsedMilliseconds);
 				LogLaunchMonitor($"launch SUCCESS in {readyMs}ms; local_phase=ready");
 				WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "ready", "llama-server on the daemon port and Port are both responding.");
