@@ -673,11 +673,21 @@ Two files are fully Windows-only (`[SupportedOSPlatform("windows")]`):
 - ~~Make the VRAM settle wait adaptive: poll every 1s and exit as soon as VRAM looks settled.~~ **ALREADY IMPLEMENTED** — `SettleAfterFailedLocalStartupAsync` already polls every `VramPollMs` (1000ms) and exits as soon as `VramLooksSettled` returns true. The 20s is just the maximum deadline.
 
 **7.2 Gateway polls state every 250ms in multiple loops.**
-- `FluxMuxGatewayHost.cs` has 6× `Task.Delay(250)` in different polling loops.
+- `FluxMuxGatewayHost.cs` has 6× `Task.Delay(250)` in different polling loops:
+  - L2100 `WaitForRoutableStateAsync` — per-request wait for routable state
+  - L3112 cloud-return-to-local recommendation wait
+  - L3195 route recovery wait
+  - L3965 port-rule pause wait (turn halted, banner showing)
+  - L4091 `WatchLocalStreamHangAsync` — **background** hang watchdog (the only one that runs continuously)
+  - L4217 hang decision wait
 
-**Impact:** Each 250ms poll is a context switch + state read. With 6 loops running concurrently, that's 24 state reads per second. **User impact:** negligible for the user, but adds CPU overhead and makes the gateway less responsive to actual state changes.
+**Impact (corrected):** The "24 state reads per second" claim is overstated. Only **one** loop (L4091, the hang watchdog) runs continuously in the background. The other five are **per-request waits** that only run while a specific request is blocked. Each poll does a trivial JSON file read + string check (microseconds of CPU). Even at peak, the total CPU cost is well under 0.01% of a core. **User impact: negligible.**
 
-**Recommendation:** Consolidate the polling loops into a single timer with a 1s interval, or use event-driven state changes instead of polling.
+**Decision: WON'T DO — not worth the risk (10/31).**
+- Consolidating into a single 1s timer would add significant complexity (shared timer, signal handling, per-loop deadline management) for no measurable performance benefit.
+- **Risk 1:** The hang watchdog (L4091) is the one loop where the 250ms interval matters for user experience. Slowing it to 1s would delay hang detection by up to 750ms — a user-facing regression.
+- **Risk 2:** The per-request waits (L2100, L3112, L3195, L3965, L4217) are waiting for a state change or user click. A 250ms poll means the user's action is detected within 250ms. Slowing to 1s would make route decisions feel sluggish.
+- **If desired later:** the only defensible tweak is to slow the *background* hang watchdog (L4091) from 250ms to 500ms (halves background CPU, still fast enough for hang detection). That's a one-line change, not a consolidation.
 
 **7.3 `Task.Delay(0)` in `TestLocalServerReadinessAsync`.**
 - `FluxMuxRuntimeService.cs` — `await Task.Delay(0, cancellationToken)` at the start of the method.
@@ -703,7 +713,7 @@ Two files are fully Windows-only (`[SupportedOSPlatform("windows")]`):
 | **HIGH** | Define platform-agnostic interfaces for GPU, display, process, update, crash logging | Medium | Enables Linux/macOS port | OPEN |
 | **HIGH** | Make launch monitor poll interval adaptive (500ms → 2s backoff) | Low | Reduces launch time by up to 10s | ✅ DONE (10/31) |
 | **HIGH** | Make VRAM settle wait adaptive (poll + exit when settled) | Low | Reduces launch time by up to 20s | ✅ ALREADY IMPLEMENTED |
-| **MEDIUM** | Consolidate gateway polling loops into a single 1s timer | Medium | Reduces CPU overhead | OPEN |
+| **MEDIUM** | Consolidate gateway polling loops into a single 1s timer | Medium | Reduces CPU overhead | ❌ WON'T DO (10/31) — no measurable benefit; risks slowing hang detection + route responsiveness |
 | **MEDIUM** | Fix nullable warnings in `FluxMuxRuntimeService.cs` and remove `#pragma warning disable` | High | Improves code safety | OPEN |
 | **MEDIUM** | Use atomic writes for state files | Medium | Prevents corruption on crash | OPEN |
 | **LOW** | Remove `Task.Delay(0)` in `TestLocalServerReadinessAsync` | Trivial | Code cleanliness | OPEN |
