@@ -2448,7 +2448,6 @@ public sealed class FluxMuxRuntimeService
 
 	public async Task<RuntimeActionResult> TestLocalServerReadinessAsync(string modelDirectory, int port, CancellationToken cancellationToken = default(CancellationToken))
 	{
-		await Task.Delay(0, cancellationToken);
 		string serverPath = ResolveLlamaServerPath();
 		if (!File.Exists(serverPath))
 		{

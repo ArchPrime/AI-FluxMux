@@ -2,6 +2,17 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
+## ✅ DONE: Atomic state-file writes + remove Task.Delay(0) (10/31)
+
+**What was done:**
+- **Atomic state-file writes (item #2):** Added `AtomicWriteAllText(path, contents)` helper to `FluxMuxGatewayHost.cs`. It writes to a temp file in the **same directory** as the target, then uses `File.Move(temp, target, overwrite: true)` — a same-volume rename that is atomic on NTFS. A crash mid-write can no longer leave a state file truncated/corrupt. The temp file is cleaned up on failure.
+- Updated all 4 gateway state-write sites to use the helper: `SaveRecommend` (`_recommendPath`), `SaveLocalReload` (`_localReloadPath`), `SaveLastServed` (`_lastServedPath`), `SaveLastRouteExplanation` (`_lastRouteExplanationPath`).
+- **Remove `Task.Delay(0)` (item #3):** Deleted the no-op `await Task.Delay(0, cancellationToken)` at the start of `TestLocalServerReadinessAsync` in `FluxMuxRuntimeService.cs`. The method has other genuine `await` points, so it remains properly async.
+- **Build:** 0 errors. **Tests:** 1733/1733 pass.
+- **Deploy:** close app → `build-fluxmux.bat clean` → restart.
+
+**Impact:** Eliminates the corrupt-state-file window on crash/kill. The existing read-side try/catch already degraded gracefully to "no state," but atomic writes remove the corruption at the source. No performance impact (small files, infrequent writes).
+
 ## ✅ DONE: Adaptive launch monitor poll interval (10/31)
 
 **What was done:**
@@ -715,8 +726,8 @@ Two files are fully Windows-only (`[SupportedOSPlatform("windows")]`):
 | **HIGH** | Make VRAM settle wait adaptive (poll + exit when settled) | Low | Reduces launch time by up to 20s | ✅ ALREADY IMPLEMENTED |
 | **MEDIUM** | Consolidate gateway polling loops into a single 1s timer | Medium | Reduces CPU overhead | ❌ WON'T DO (10/31) — no measurable benefit; risks slowing hang detection + route responsiveness |
 | **MEDIUM** | Fix nullable warnings in `FluxMuxRuntimeService.cs` and remove `#pragma warning disable` | High | Improves code safety | OPEN |
-| **MEDIUM** | Use atomic writes for state files | Medium | Prevents corruption on crash | OPEN |
-| **LOW** | Remove `Task.Delay(0)` in `TestLocalServerReadinessAsync` | Trivial | Code cleanliness | OPEN |
+| **MEDIUM** | Use atomic writes for state files | Medium | Prevents corruption on crash | ✅ DONE (10/31) |
+| **LOW** | Remove `Task.Delay(0)` in `TestLocalServerReadinessAsync` | Trivial | Code cleanliness | ✅ DONE (10/31) |
 | **LOW** | Use constants for config/JSON keys instead of string literals | High | Prevents silent failures | OPEN |
 
 ---

@@ -3612,6 +3612,51 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
     }
 
+    /// <summary>
+    /// Atomically writes text to a file by writing to a temp file in the same directory and
+    /// then renaming it over the target. On NTFS, a same-volume rename is atomic, so a crash
+    /// mid-write can never leave the target file truncated or corrupt. The temp file is
+    /// created in the same directory as the target (required for the rename to be atomic).
+    /// If the write or rename fails, the temp file is cleaned up and the original target is
+    /// left untouched.
+    /// </summary>
+    private static void AtomicWriteAllText(string path, string contents)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        var dir = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
+        {
+            return;
+        }
+
+        var tempPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            File.WriteAllText(tempPath, contents);
+            // Same-directory rename is atomic on NTFS. Overwrite any existing target.
+            File.Move(tempPath, path, overwrite: true);
+        }
+        catch
+        {
+            // Best-effort cleanup of the temp file; never let a state-write failure propagate.
+            try
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch
+            {
+            }
+            throw;
+        }
+    }
+
     private JsonObject LoadRecommend()
     {
         if (!File.Exists(_recommendPath))
@@ -3633,7 +3678,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         try
         {
-            File.WriteAllText(_recommendPath, payload.ToJsonString());
+            AtomicWriteAllText(_recommendPath, payload.ToJsonString());
         }
         catch
         {
@@ -3666,7 +3711,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 return;
             }
 
-            File.WriteAllText(_localReloadPath, payload.ToJsonString());
+            AtomicWriteAllText(_localReloadPath, payload.ToJsonString());
         }
         catch
         {
@@ -3709,7 +3754,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 ["model"] = model ?? string.Empty,
                 ["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture)
             };
-            File.WriteAllText(_lastServedPath, payload.ToJsonString());
+            AtomicWriteAllText(_lastServedPath, payload.ToJsonString());
         }
         catch
         {
@@ -3794,7 +3839,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 requestId,
                 provider,
                 model);
-            File.WriteAllText(_lastRouteExplanationPath, payload.ToJsonString());
+            AtomicWriteAllText(_lastRouteExplanationPath, payload.ToJsonString());
         }
         catch
         {
