@@ -664,13 +664,13 @@ Two files are fully Windows-only (`[SupportedOSPlatform("windows")]`):
 **7.1 Launch monitor polls every 2s; VRAM settle wait is 20s fixed.**
 - `FluxMuxRuntimeService.cs:3854` — `await Task.Delay(2000, launchToken)` when model is not ready.
 - `FluxMuxRuntimeService.cs:3899` — `await Task.Delay(2000, launchToken)` when public endpoint probe fails.
-- `LocalLaunchStartupRetry.cs:14` — `VramSettleMs = 20000` (20s fixed wait for VRAM to settle after a kill).
+- `LocalLaunchStartupRetry.cs:14` — `VramSettleMs = 20000` (20s **maximum** deadline for VRAM to settle after a kill; the code already polls every 1s via `VramPollMs` and exits early as soon as `VramLooksSettled` returns true).
 
-**Impact:** A cold launch that needs 30s to load the model will poll 15 times (30s / 2s). The 20s VRAM settle wait is a fixed delay that adds to launch time even when VRAM is already free. **User impact:** extends wait times by up to 20s on every launch that follows a kill.
+**Impact:** A cold launch that needs 30s to load the model will poll 15 times (30s / 2s). The 20s VRAM settle wait is a **cap**, not a fixed delay — the code already exits early when VRAM looks settled. **User impact:** minimal; the adaptive poll interval change (done 10/31) already addresses the main concern.
 
 **Recommendation:**
-- Make the poll interval adaptive: start at 500ms, back off to 2s after 10 failed polls.
-- Make the VRAM settle wait adaptive: poll every 1s and exit as soon as VRAM looks settled (the `VramLooksSettled` logic already exists — just use it in a loop instead of a fixed 20s wait).
+- ~~Make the poll interval adaptive: start at 500ms, back off to 2s after 10 failed polls.~~ **DONE (10/31)** — see "Adaptive launch monitor poll interval" section above.
+- ~~Make the VRAM settle wait adaptive: poll every 1s and exit as soon as VRAM looks settled.~~ **ALREADY IMPLEMENTED** — `SettleAfterFailedLocalStartupAsync` already polls every `VramPollMs` (1000ms) and exits as soon as `VramLooksSettled` returns true. The 20s is just the maximum deadline.
 
 **7.2 Gateway polls state every 250ms in multiple loops.**
 - `FluxMuxGatewayHost.cs` has 6× `Task.Delay(250)` in different polling loops.
@@ -698,16 +698,16 @@ Two files are fully Windows-only (`[SupportedOSPlatform("windows")]`):
 
 ### 9. Recommendations Summary (UPDATED — 10/31)
 
-| Priority | Recommendation | Effort | Impact |
-|----------|---------------|--------|--------|
-| **HIGH** | Define platform-agnostic interfaces for GPU, display, process, update, crash logging | Medium | Enables Linux/macOS port |
-| **HIGH** | Make launch monitor poll interval adaptive (500ms → 2s backoff) | Low | Reduces launch time by up to 10s |
-| **HIGH** | Make VRAM settle wait adaptive (poll + exit when settled) | Low | Reduces launch time by up to 20s |
-| **MEDIUM** | Consolidate gateway polling loops into a single 1s timer | Medium | Reduces CPU overhead |
-| **MEDIUM** | Fix nullable warnings in `FluxMuxRuntimeService.cs` and remove `#pragma warning disable` | High | Improves code safety |
-| **MEDIUM** | Use atomic writes for state files | Medium | Prevents corruption on crash |
-| **LOW** | Remove `Task.Delay(0)` in `TestLocalServerReadinessAsync` | Trivial | Code cleanliness |
-| **LOW** | Use constants for config/JSON keys instead of string literals | High | Prevents silent failures |
+| Priority | Recommendation | Effort | Impact | Status |
+|----------|---------------|--------|--------|--------|
+| **HIGH** | Define platform-agnostic interfaces for GPU, display, process, update, crash logging | Medium | Enables Linux/macOS port | OPEN |
+| **HIGH** | Make launch monitor poll interval adaptive (500ms → 2s backoff) | Low | Reduces launch time by up to 10s | ✅ DONE (10/31) |
+| **HIGH** | Make VRAM settle wait adaptive (poll + exit when settled) | Low | Reduces launch time by up to 20s | ✅ ALREADY IMPLEMENTED |
+| **MEDIUM** | Consolidate gateway polling loops into a single 1s timer | Medium | Reduces CPU overhead | OPEN |
+| **MEDIUM** | Fix nullable warnings in `FluxMuxRuntimeService.cs` and remove `#pragma warning disable` | High | Improves code safety | OPEN |
+| **MEDIUM** | Use atomic writes for state files | Medium | Prevents corruption on crash | OPEN |
+| **LOW** | Remove `Task.Delay(0)` in `TestLocalServerReadinessAsync` | Trivial | Code cleanliness | OPEN |
+| **LOW** | Use constants for config/JSON keys instead of string literals | High | Prevents silent failures | OPEN |
 
 ---
 
