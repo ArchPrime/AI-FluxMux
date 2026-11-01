@@ -63,6 +63,25 @@ public sealed class PrefillPerformanceModel
     /// </summary>
     public const double OutlierSpeedRatio = 3.0;
 
+    /// <summary>
+    /// Minimum first-byte duration (ms) for a sample to be considered a FULL prefill (as opposed
+    /// to a warm-cache DELTA prefill). A delta prefill (KV cache already resident, only the new
+    /// tokens processed) completes in well under a second, so its implied speed
+    /// (fullPromptTokens / deltaSeconds) is absurdly high and not representative of the model's
+    /// true cold-prefill speed. A full prefill (processing the entire prompt from scratch) takes
+    /// many seconds to minutes. Only samples with a first-byte duration above this threshold are
+    /// recorded for fitting, so the learned speed reflects full prefills, not delta prefills.
+    /// 5000 ms (5s) is well above any realistic delta prefill and well below any realistic full
+    /// prefill for a prompt over MinFitTokens.
+    ///
+    /// This duration threshold is the SOLE mechanism for distinguishing full prefills from delta
+    /// prefills. There is intentionally NO speed cap: capping the speed would mask legitimate fast
+    /// full prefills (e.g. on next-gen hardware) and hide real diagnostic anomalies. The duration
+    /// threshold is accurate and future-proof because it's based on the *time* (which is
+    /// hardware-independent for a full prefill), not the *speed* (which varies with hardware).
+    /// </summary>
+    public const long MinFullPrefillMs = 5000;
+
     private readonly string _path;
     private readonly object _lock = new();
 
@@ -146,14 +165,34 @@ public sealed class PrefillPerformanceModel
 
         lock (_lock)
         {
-            // Always track the most recent measured speed for display, even for small prompts.
-            _lastMeasuredSpeed = promptTokens / (firstByteMs / 1000.0);
-
             if (promptTokens < MinFitTokens)
             {
-                // Too small to fit the prefill slope reliably; don't pollute the sample set.
+                // Small prompt: update the last-measured speed for display, but don't fit.
+                // The first-byte time for a small prompt is dominated by the first-token
+                // generation time, not the prefill time, so it's not representative of the
+                // model's true cold-prefill speed. But it's still useful for display.
+                _lastMeasuredSpeed = promptTokens / (firstByteMs / 1000.0);
                 return;
             }
+
+            // Only record a sample for fitting when the prefill is a FULL prefill (not a warm-cache
+            // DELTA prefill). A delta prefill completes in well under a second, so its implied speed
+            // (fullPromptTokens / deltaSeconds) is absurdly high and not representative of the
+            // model's true cold-prefill speed. A full prefill takes many seconds to minutes. Using
+            // the first-byte duration as the discriminator: a delta prefill is sub-second, while a
+            // full prefill is well above MinFullPrefillMs (5s). This is the SOLE mechanism for
+            // distinguishing full prefills from delta prefills — there is intentionally NO speed cap,
+            // because capping the speed would mask legitimate fast full prefills (e.g. on next-gen
+            // hardware) and hide real diagnostic anomalies.
+            if (firstByteMs < MinFullPrefillMs)
+            {
+                return; // delta prefill: not representative of the cold-prefill speed
+            }
+
+            // Track the most recent measured speed for display. Only update it for FULL prefills
+            // (not delta prefills), so the displayed speed is always representative of the model's
+            // true cold-prefill speed. No cap is applied: the speed is recorded at its actual value.
+            _lastMeasuredSpeed = promptTokens / (firstByteMs / 1000.0);
 
             _samples.Add(new PrefillSample(promptTokens, firstByteMs));
             while (_samples.Count > MaxSamples)
@@ -255,10 +294,12 @@ public sealed class PrefillPerformanceModel
         // negative intercept is a fitting artifact; a huge positive one is not physical.
         _overheadMs = Math.Clamp(a, 0.0, 5000.0);
 
-        // Sanity-clamp the speed to a plausible range so a single bad sample can't produce an
-        // absurd estimate. The upper bound is high (modern GPUs with a fully-loaded model can
-        // prefill well past 100k tokens/sec); the lower bound guards against a degenerate fit.
-        _tokensPerSec = Math.Clamp(_tokensPerSec, 50.0, 500000.0);
+        // Guard against a degenerate fit with a lower bound only. There is intentionally NO upper
+        // bound: the fitted speed is recorded at its actual value, so a legitimate fast full prefill
+        // (e.g. on next-gen hardware) is not masked. The MinFullPrefillMs duration threshold (which
+        // rejects delta prefills) is the sole mechanism for ensuring the fitted speed is
+        // representative of a full prefill, not a warm-cache delta.
+        _tokensPerSec = Math.Max(_tokensPerSec, 50.0);
         _hasData = true;
     }
 
@@ -277,6 +318,11 @@ public sealed class PrefillPerformanceModel
 
             if (root.TryGetProperty("tokensPerSec", out var vSpeed) && vSpeed.TryGetDouble(out var speed))
             {
+                // Load the persisted speed at its actual value. No cap is applied: the
+                // MinFullPrefillMs duration threshold (which filters out delta-prefill samples
+                // below) ensures the re-fit is based on full prefills only, so the loaded value
+                // is representative of a full prefill. A polluted value from an older build
+                // (which may have recorded a delta prefill) is corrected by the re-fit below.
                 _tokensPerSec = speed;
             }
             if (root.TryGetProperty("overheadMs", out var vOverhead) && vOverhead.TryGetDouble(out var overhead))
@@ -289,6 +335,9 @@ public sealed class PrefillPerformanceModel
             }
             if (root.TryGetProperty("lastMeasuredSpeed", out var vLast) && vLast.TryGetDouble(out var last))
             {
+                // Load the persisted last-measured speed at its actual value (no cap). The
+                // MinFullPrefillMs filter below ensures only full-prefill samples are retained,
+                // so the re-fit (if any) is based on full prefills only.
                 _lastMeasuredSpeed = last;
             }
             if (root.TryGetProperty("samples", out var vSamples) && vSamples.ValueKind == JsonValueKind.Array)
@@ -297,7 +346,17 @@ public sealed class PrefillPerformanceModel
                 {
                     if (item.TryGetProperty("promptTokens", out var vTokens) && item.TryGetProperty("firstByteMs", out var vMs))
                     {
-                        _samples.Add(new PrefillSample(vTokens.GetInt32(), vMs.GetInt64()));
+                        var tokens = vTokens.GetInt32();
+                        var ms = vMs.GetInt64();
+                        // Drop delta-prefill samples (first-byte duration below MinFullPrefillMs)
+                        // so they cannot pollute the re-fit on load. A delta prefill's implied speed
+                        // (fullPromptTokens / deltaSeconds) is absurdly high and not representative
+                        // of the model's true cold-prefill speed.
+                        if (ms < MinFullPrefillMs)
+                        {
+                            continue;
+                        }
+                        _samples.Add(new PrefillSample(tokens, ms));
                     }
                 }
                 while (_samples.Count > MaxSamples)
@@ -312,6 +371,15 @@ public sealed class PrefillPerformanceModel
             if (_samples.Count > 0)
             {
                 Refit();
+            }
+            else
+            {
+                // All loaded samples were delta prefills (filtered out), so there is no reliable
+                // full-prefill data. Reset to the default speed so the model learns from new
+                // full-prefill samples instead of using a polluted/stale value.
+                _tokensPerSec = DefaultTokensPerSec;
+                _overheadMs = 0.0;
+                _hasData = false;
             }
         }
         catch

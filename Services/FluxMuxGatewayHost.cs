@@ -36,7 +36,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
     private HttpListener? _listener;
     private CancellationTokenSource? _loopCts;
-    private CancellationTokenSource? _activeHandlerCts;
+    // Generation-based, one-shot supersede cancellation. The old design used a single shared
+    // _activeHandlerCts that was cancelled on every launch supersede and NEVER reset, so every
+    // subsequent local request inherited a dead token and 502'd immediately — the "keeps
+    // generating errors" storm when an impatient user mashes Launch/retry. Instead we now keep
+    // a monotonically increasing generation counter. Each handler captures the generation at
+    // request-start; it only honors a supersede if the generation advanced AFTER it started.
+    // A request that starts after the last supersede (talking to the new model) never sees a
+    // generation change and proceeds normally — so "next message just works" after a swap.
+    private int _launchSupersedeGeneration;
     private Task? _acceptLoop;
     private int _port;
     private readonly IdleSessionCoordinator _idleSession;
@@ -62,6 +70,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private readonly object _localLoadingLock = new();
     private ManualResetEventSlim? _localLoadingSignal;
     private DateTime _localLoadingSinceUtc = DateTime.MinValue;
+
+    // Semaphore to limit concurrent requests to the local model to 1. When the client sends
+    // multiple requests concurrently (e.g., a probe + the real request, or retries), the model
+    // processes them in parallel, which slows down each one. By limiting concurrent requests to
+    // 1, the model can focus on the real request and generate it faster.
+    private readonly SemaphoreSlim _localRequestSemaphore = new(1, 1);
 
     public FluxMuxGatewayHost(
         string statePath,
@@ -267,11 +281,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
         _port = port;
         _loopCts = new CancellationTokenSource();
         var loopToken = _loopCts.Token;
-        // _activeHandlerCts is linked to _loopCts so that stopping the gateway also cancels
-        // any in-flight handlers. It is cancelled independently (via CancelInFlightHandlers)
-        // when a new local launch supersedes an in-progress one, so stale handlers parked in
-        // the 503-retry loop stop retrying against the new llama-server.
-        _activeHandlerCts = CancellationTokenSource.CreateLinkedTokenSource(loopToken);
         _acceptLoop = Task.Run(() => AcceptLoopAsync(listener, loopToken), loopToken);
         Log($"managed bridge boot on 127.0.0.1:{port}");
         EmitContextEvent("bridge_boot", $"port={port}");
@@ -283,25 +292,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         var loop = _acceptLoop;
         var cts = _loopCts;
-        var handlerCts = _activeHandlerCts;
         var listener = _listener;
         _acceptLoop = null;
         _loopCts = null;
-        _activeHandlerCts = null;
         _listener = null;
         _port = 0;
 
         try
         {
             cts?.Cancel();
-        }
-        catch
-        {
-        }
-
-        try
-        {
-            handlerCts?.Cancel();
         }
         catch
         {
@@ -328,35 +327,38 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         cts?.Dispose();
-        handlerCts?.Dispose();
     }
 
     /// <summary>
-    /// Cancels all in-flight gateway handlers (chat-completion requests currently being
-    /// processed). This is called when a new local launch supersedes an in-progress one, so
-    /// that stale handlers parked in the 503-retry loop stop retrying against the new
-    /// llama-server and instead return a clean 502. Without this, a stale handler can keep
-    /// retrying for up to 300s and fire prefill telemetry into the new launch's UI state,
-    /// causing garbled bottom-bar telemetry for minutes.
+    /// Signals that a new local launch has superseded the in-progress one, so that stale
+    /// handlers parked in the 503-retry loop (talking to the OLD llama-server) stop retrying
+    /// and instead return a clean 502. This is a ONE-SHOT, generation-based signal: it bumps
+    /// the supersede generation, and each handler only honors it if the generation advanced
+    /// AFTER that handler started. A request that starts after this call (talking to the new
+    /// model) captures the new generation and is NOT cancelled — so "next message just works"
+    /// after a swap, instead of the old behavior where a single shared CTS stayed cancelled
+    /// forever and every subsequent request 502'd immediately.
     /// </summary>
     public void CancelInFlightHandlers()
     {
-        var handlerCts = _activeHandlerCts;
-        if (handlerCts is null)
-        {
-            return;
-        }
-
-        try
-        {
-            handlerCts.Cancel();
-        }
-        catch
-        {
-        }
-
-        Log("gateway: cancelled in-flight handler(s) on launch supersede");
+        Interlocked.Increment(ref _launchSupersedeGeneration);
+        Log("gateway: launch supersede signalled (generation=" + _launchSupersedeGeneration + "); in-flight handlers from the previous model will 502, new requests proceed normally");
     }
+
+    /// <summary>
+    /// Returns the current supersede generation. Call this at request-start and capture the
+    /// value; later, <see cref="WasSupersededAfterStart"/> tells you whether a supersede
+    /// happened after this request began.
+    /// </summary>
+    public int CurrentSupersedeGeneration => Volatile.Read(ref _launchSupersedeGeneration);
+
+    /// <summary>
+    /// True if a launch supersede was signalled AFTER the given start-generation was captured.
+    /// A handler uses this to decide whether to abort (superseded) or keep waiting (not
+    /// superseded — it is talking to the current model).
+    /// </summary>
+    public bool WasSupersededAfterStart(int startGeneration)
+        => Volatile.Read(ref _launchSupersedeGeneration) != startGeneration;
 
     public void Dispose()
     {
@@ -386,7 +388,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 break;
             }
 
-            _ = Task.Run(() => HandleContextAsync(context, _activeHandlerCts?.Token ?? CancellationToken.None), CancellationToken.None);
+            _ = Task.Run(() => HandleContextAsync(context, CancellationToken.None), CancellationToken.None);
         }
     }
 
@@ -484,6 +486,23 @@ public sealed class FluxMuxGatewayHost : IDisposable
     }
 
     private async Task HandleChatCompletionsAsync(HttpListenerContext context, CancellationToken handlerToken)
+    {
+        // Limit concurrent requests to the local model to 1. When the client sends multiple
+        // requests concurrently (e.g., a probe + the real request, or retries), the model
+        // processes them in parallel, which slows down each one. By limiting concurrent requests
+        // to 1, the model can focus on the real request and generate it faster.
+        await _localRequestSemaphore.WaitAsync(handlerToken).ConfigureAwait(false);
+        try
+        {
+            await HandleChatCompletionsCoreAsync(context, handlerToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _localRequestSemaphore.Release();
+        }
+    }
+
+    private async Task HandleChatCompletionsCoreAsync(HttpListenerContext context, CancellationToken handlerToken)
     {
         string bodyText;
         using (var reader = new StreamReader(context.Request.InputStream, context.Request.ContentEncoding ?? Encoding.UTF8))
@@ -1463,11 +1482,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
             }
             using var timeoutCts = new CancellationTokenSource();
             timeoutCts.CancelAfter(TimeSpan.FromSeconds(timeoutSec));
-            // Combine the per-turn timeout with the handler-level cancellation token so that
-            // a launch supersede (CancelInFlightHandlers) aborts the 503-retry loop immediately
-            // instead of letting a stale handler keep retrying against the new llama-server.
-            using var handlerLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, handlerToken);
-            var handlerToken2 = handlerLinkedCts.Token;
+            // Capture the supersede generation at request-start. A launch supersede
+            // (CancelInFlightHandlers) bumps this counter; we only honor it if it advanced
+            // AFTER this request began. A request that starts after the last supersede is
+            // talking to the current model and must keep waiting for it to load — it is NOT
+            // cancelled. This is what makes "next message just works" after a swap, instead
+            // of the old shared-CTS design where one supersede killed every later request.
+            int startSupersedeGeneration = CurrentSupersedeGeneration;
+            // The per-turn timeout still governs the upstream send + 503-retry waits.
+            var handlerToken2 = timeoutCts.Token;
             // Only log the [turn] line when we have a real token measurement. During launch
             // (503 retries) the measurement is null, and logging "n/a tokens" is just noise.
             if (measuredPromptTokens is not null)
@@ -1489,12 +1512,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
             {
                 while (true)
                 {
-                    // If the handler was cancelled (launch supersede), stop immediately and
-                    // let the outer catch send a clean 502 instead of sending a new upstream
-                    // request that will be ignored.
-                    if (handlerToken.IsCancellationRequested)
+                    // If a launch supersede was signalled AFTER this request started, this
+                    // request was talking to the OLD model — stop immediately and let the
+                    // outer code send a clean 502 instead of sending a new upstream request
+                    // that will be ignored. A request that started after the last supersede
+                    // (talking to the current model) does NOT abort here; it keeps waiting.
+                    if (WasSupersededAfterStart(startSupersedeGeneration))
                     {
-                        Log("upstream request aborted: handler cancelled on launch supersede");
+                        Log("upstream request aborted: superseded after request start (gen " + startSupersedeGeneration + " -> " + CurrentSupersedeGeneration + ")");
                         break;
                     }
                     response?.Dispose();
@@ -1542,11 +1567,13 @@ public sealed class FluxMuxGatewayHost : IDisposable
                             var completed = await Task.WhenAny(
                                 Task.Delay(delayMs, handlerToken2),
                                 Task.Run(() => loadingSignal.Wait(handlerToken2)));
-                            // If the handler was cancelled (launch supersede), stop retrying
-                            // immediately and let the outer catch send a clean 502.
-                            if (handlerToken.IsCancellationRequested)
+                            // If a launch supersede was signalled AFTER this request started,
+                            // stop retrying immediately and let the outer code send a clean 502.
+                            // A request that started after the last supersede keeps waiting for
+                            // the current model to load.
+                            if (WasSupersededAfterStart(startSupersedeGeneration))
                             {
-                                Log("local loading retry aborted: handler cancelled on launch supersede");
+                                Log("local loading retry aborted: superseded after request start (gen " + startSupersedeGeneration + " -> " + CurrentSupersedeGeneration + ")");
                                 break;
                             }
                             if (loadingSignal.IsSet)
@@ -1572,15 +1599,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 }
             }
 
-            // If the handler was cancelled (launch supersede) before a response was received,
-            // send a clean 502 and return. The outer catch in HandleContextAsync would also
-            // handle this, but sending the 502 here gives the client a clearer error.
+            // If a launch supersede was signalled AFTER this request started and no response
+            // was received, send a clean 502 and return. This request was talking to the OLD
+            // model; the user's next message (a fresh request, new generation) will target the
+            // new model and proceed normally.
             if (response is null)
             {
-                if (handlerToken.IsCancellationRequested)
+                if (WasSupersededAfterStart(startSupersedeGeneration))
                 {
-                    Log("handler cancelled before response: sending 502");
-                    await SendOpenAiErrorAsync(context.Response, "This turn was cancelled because a new model launch superseded it. Retry in a fresh chat.", 502, "proxy_error").ConfigureAwait(false);
+                    Log("superseded before response: sending 502 (gen " + startSupersedeGeneration + " -> " + CurrentSupersedeGeneration + ")");
+                    await SendOpenAiErrorAsync(context.Response, "This turn was cancelled because a new model launch superseded it. Your conversation is intact — send your next message and it will run on the new model.", 502, "proxy_error").ConfigureAwait(false);
                     return;
                 }
                 // Should not happen in practice, but guard against it.
@@ -1718,8 +1746,13 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 await using var upstream = await response.Content.ReadAsStreamAsync(timeoutCts.Token).ConfigureAwait(false);
                 using var hangCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token);
                 var gotUpstreamBytes = false;
-                hangClock = new LocalStreamHangClock(portRules);
-                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+                // Do NOT create a hang clock for probe requests. A probe is a tiny "Reply with the
+                // single word ready." check, not the user's real message. If the model is still
+                // loading (503 retries), the probe would hit the hang clock's first-byte deadline
+                // and abort, which is misleading (the probe is not a real turn). The 503-retry
+                // logic already handles the "model is still loading" case for probes.
+                hangClock = isProbeRequest ? null : new LocalStreamHangClock(portRules);
+                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase) && hangClock is not null)
                 {
                     var baseDeadline = LocalStreamHangPolicy.FirstByteDeadlineForThinkBudget(
                         ReadThinkingBudget(payload),
@@ -1733,8 +1766,19 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     {
                         var thinkingDeadline = TimeSpan.FromSeconds(portRules.ThinkingFirstByteSeconds);
                         hangClock.FirstByteDeadline = thinkingDeadline > baseDeadline ? thinkingDeadline : baseDeadline;
+                        // For long-load profiles, a quiet stream AFTER the first byte is NORMAL
+                        // (the model is working in RAM-spill, which can take many minutes). The
+                        // default stall deadline (45s) is far too short and causes false-positive
+                        // aborts of turns that would have completed. Use a much longer window
+                        // (1800s / 30 min) so the stall path only fires if the model is genuinely
+                        // stuck (no progress for 30 min+), not just working slowly in RAM-spill.
+                        // The first-byte deadline (600s) covers the "model is still loading" case;
+                        // the stall deadline covers the "model produced a byte then went quiet" case.
+                        hangClock.StallDeadline = TimeSpan.FromSeconds(1800);
                         Log("hang clock: long-load profile, FirstByteDeadline="
                             + (int)hangClock.FirstByteDeadline.TotalSeconds
+                            + "s, StallDeadline="
+                            + (int)hangClock.StallDeadline.TotalSeconds
                             + "s (ThinkingFirstByteSeconds=" + portRules.ThinkingFirstByteSeconds
                             + ", baseDeadline=" + (int)baseDeadline.TotalSeconds + "s)");
                     }
@@ -1767,7 +1811,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 // take. Fires for all routes (local and cloud) so the bar never sits idle while
                 // the user is awaiting a response. For cloud routes the "prefill" phase is really
                 // "waiting for first byte from the cloud provider."
-                ReportPrefillStarted?.Invoke(measuredPromptTokens ?? 0);
+                //
+                // Do NOT fire for probe requests (the launch "Reply with the single word ready."
+                // check). A probe is a tiny ~59-token request that is NOT the user's real message;
+                // firing PrefillStartedNotice for it would show a misleading "Reading a large
+                // conversation (~59 tokens)" line at launch time, before the model is even ready
+                // to prefill the user's actual (much larger) conversation.
+                if (!isProbeRequest)
+                {
+                    ReportPrefillStarted?.Invoke(measuredPromptTokens ?? 0);
+                }
                 try
                 {
                     var copy = await OpenAiStreamTelemetryProxy.CopyAsync(
@@ -1785,20 +1838,49 @@ public sealed class FluxMuxGatewayHost : IDisposable
                                 {
                                     firstByteLogged = true;
                                     Log($"ttfb: first byte after {ttfbStopwatch.ElapsedMilliseconds} ms (model={model})");
-                                    // Prefill/first-byte complete: tell the UI to switch to the
-                                    // generation phase. Fires for all routes.
-                                    ReportPrefillFirstByte?.Invoke(ttfbStopwatch.ElapsedMilliseconds);
+                                    // NOTE: Do NOT fire ReportPrefillFirstByte here. The first SSE
+                                    // byte arrives immediately (headers / an empty data line) and
+                                    // does NOT mark the end of prefill. For large / RAM-spilled
+                                    // prompts, the model can take many minutes to actually process
+                                    // the prompt before it produces the first real token. Firing
+                                    // the "switch to generation" event at the first byte would make
+                                    // the UI show "generating…" for the entire prefill duration,
+                                    // which is misleading. Instead, fire it at the first CONTENT
+                                    // token (see onFirstContentToken below), which is when the
+                                    // model has truly finished prefilling and started generating.
                                 }
                             }
-                            hangClock.NoteByte();
+                            hangClock?.NoteByte();
                         },
                         localDeclaredTools,
                         localAllowParallel,
                         sessionArtifacts,
-                        replyBudget).ConfigureAwait(false);
+                        replyBudget,
+                        onFirstContentToken: () =>
+                        {
+                            // This fires when the gateway first sends a REAL content token
+                            // (content / reasoning / tool_calls) to the client. This is the true
+                            // end of prefill: the model has finished processing the prompt and
+                            // started generating. Tell the UI to switch to the generation phase
+                            // NOW (not at the first byte, which arrives immediately).
+                            Log("ttfb: first content token after " + ttfbStopwatch.ElapsedMilliseconds + " ms (model=" + model + ")");
+                            ReportPrefillFirstByte?.Invoke(ttfbStopwatch.ElapsedMilliseconds);
+                        }).ConfigureAwait(false);
                     if (firstByteLogged)
                     {
                         Log($"ttfb: stream complete after {ttfbStopwatch.ElapsedMilliseconds} ms total (model={model})");
+                        // Diagnostic: log the actual generation stats so we can distinguish a
+                        // "long reply" (many tokens at normal speed) from a "slow generation"
+                        // (few tokens at a low rate). The tracker is disabled by default, so
+                        // this only logs when the operator has turned the generation-speed
+                        // graph on.
+                        var genSnap = _generationSpeed?.ReadSnapshot();
+                        if (genSnap is not null && genSnap.CompletionTokens > 0)
+                        {
+                            Log("gen stats: " + genSnap.CompletionTokens + " tokens at "
+                                + genSnap.TokensPerSecond.ToString("0.#", CultureInfo.InvariantCulture)
+                                + " tok/s (model=" + model + ")");
+                        }
                     }
                     responseSanitized = copy.Sanitized;
                     if (copy.ThinkCutOff)
@@ -1861,7 +1943,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // sent to the client, so the user waits during ReadAsByteArrayAsync. Fire the
             // prefill/first-byte notices here too so the bottom-bar indicator shows activity
             // instead of sitting idle. (The streaming path fires these earlier.)
-            ReportPrefillStarted?.Invoke(measuredPromptTokens ?? 0);
+            // Do NOT fire for probe requests (same reason as the streaming path above).
+            if (!isProbeRequest)
+            {
+                ReportPrefillStarted?.Invoke(measuredPromptTokens ?? 0);
+            }
             var nonStreamStopwatch = Stopwatch.StartNew();
             var bytes = await response.Content.ReadAsByteArrayAsync(timeoutCts.Token).ConfigureAwait(false);
             ReportPrefillFirstByte?.Invoke(nonStreamStopwatch.ElapsedMilliseconds);
@@ -2810,26 +2896,63 @@ public sealed class FluxMuxGatewayHost : IDisposable
         //               window) — compacting a few turns would pull it back onto the card.
         //   Urgency 2: the overflow is large (> 25% of the VRAM window) — most of the context is
         //               running in slow RAM; compacting is strongly recommended.
+        //
+        // HYSTERESIS: To prevent the dialog from flickering when the prompt hovers around the
+        // trigger threshold, use two separate thresholds:
+        //   - SHOW threshold: the prompt must exceed this to SHOW the dialog (90% VRAM, or
+        //     overflow > 30% of VRAM).
+        //   - HIDE threshold: the prompt must drop below this to HIDE the dialog (80% VRAM, or
+        //     overflow < 20% of VRAM).
+        // The show threshold is higher than the hide threshold, so the dialog doesn't flicker
+        // when the prompt hovers around a single value.
         int overflow = Math.Max(0, promptTokens - vramContext);
-        int headroomThreshold = (int)(vramContext * 0.85);
-        int recoverableThreshold = (int)(vramContext * 0.25);
+        int showHeadroomThreshold = (int)(vramContext * 0.90); // show at 90% VRAM
+        int hideHeadroomThreshold = (int)(vramContext * 0.80); // hide below 80% VRAM
+        int showOverflowThreshold = (int)(vramContext * 0.30); // show at overflow > 30% VRAM
+        int hideOverflowThreshold = (int)(vramContext * 0.20); // hide below overflow < 20% VRAM
+
+        // Check if the dialog is currently showing (i.e., the snapshot is "pending").
+        var existing = LoadLocalReload();
+        bool dialogCurrentlyShowing = Str(existing, "status").Equals("pending", StringComparison.OrdinalIgnoreCase)
+            && ParseBool(Str(existing, "spillCompact"));
 
         int urgency;
-        if (promptTokens >= headroomThreshold && overflow <= 0)
+        if (dialogCurrentlyShowing)
         {
-            urgency = 0; // at the edge of the VRAM window, not yet spilling
-        }
-        else if (overflow > 0 && overflow <= recoverableThreshold)
-        {
-            urgency = 1; // spilling, but recoverable with a modest compaction
-        }
-        else if (overflow > recoverableThreshold)
-        {
-            urgency = 2; // large overflow, most context in slow RAM
+            // Dialog is showing: use the HIDE threshold to decide whether to hide it.
+            if (promptTokens < hideHeadroomThreshold && overflow < hideOverflowThreshold)
+            {
+                // Prompt has dropped below the hide threshold: hide the dialog by setting the
+                // status to "idle" (which makes the dialog invisible).
+                existing["status"] = "idle";
+                existing["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+                SaveLocalReload(existing);
+                Log("local spill compact recommend dismissed: prompt=" + promptTokens + " vram=" + vramContext + " (below hide threshold)");
+                return;
+            }
+            // Prompt is still above the hide threshold: keep the dialog showing. Use the
+            // existing urgency level (or recompute it) to update the reason text.
+            urgency = ParseInt(Str(existing, "spillUrgency"), 1);
         }
         else
         {
-            return; // still comfortably within the VRAM window
+            // Dialog is not showing: use the SHOW threshold to decide whether to show it.
+            if (promptTokens >= showHeadroomThreshold && overflow <= 0)
+            {
+                urgency = 0; // at the edge of the VRAM window, not yet spilling
+            }
+            else if (overflow > 0 && overflow <= showOverflowThreshold)
+            {
+                urgency = 1; // spilling, but recoverable with a modest compaction
+            }
+            else if (overflow > showOverflowThreshold)
+            {
+                urgency = 2; // large overflow, most context in slow RAM
+            }
+            else
+            {
+                return; // still comfortably within the VRAM window (below show threshold)
+            }
         }
 
         // Dynamic SSD guardrail: sample live available RAM. If it's below a safety floor, the
@@ -2843,7 +2966,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
             urgency = 2;
         }
 
-        var existing = LoadLocalReload();
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         if (ParseLong(Str(existing, "suppress_until"), 0) > now)
         {
@@ -3778,6 +3900,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
         // the model answered fine, so dismiss the banner. Without this, a bogus offer
         // (e.g. from a stale local_context or an over-counting estimate) stays up and
         // misleads the user into thinking the turn was blocked when it actually succeeded.
+        // Note: spill-compact offers are NOT cleared here — the hysteresis logic in
+        // OfferSpillCompactIfNeeded handles the show/hide decision for those.
         if (routeKind.Equals(FluxMuxGatewayRouting.Local, StringComparison.OrdinalIgnoreCase))
         {
             ClearStaleLocalReloadOffer();
@@ -3804,6 +3928,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // Do not clear a vision or thinking miss — those are capability gaps that
             // persist across turns until the profile is changed.
             if (ParseBool(Str(existing, "needVision")) || ParseBool(Str(existing, "needThinking")))
+            {
+                return;
+            }
+
+            // Do not clear a spill-compact offer — the hysteresis logic in
+            // OfferSpillCompactIfNeeded handles the show/hide decision. Clearing it here
+            // would cause the dialog to flicker when the prompt hovers around the trigger
+            // threshold. The spill-compact offer will be hidden by OfferSpillCompactIfNeeded
+            // when the prompt drops below the hide threshold.
+            if (ParseBool(Str(existing, "spillCompact")))
             {
                 return;
             }
@@ -4131,6 +4265,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         try
         {
+            // Capture the original stall deadline so we can restore it after ResetForWaitLonger.
+            // For long-load profiles, the stall deadline is set to the first-byte deadline (600s+)
+            // because a quiet stream after the first byte is normal (RAM-spill prefill). Without
+            // this, ResetForWaitLonger would reset it to 90s and the false-positive abort would
+            // recur on the next wait-longer cycle.
+            var originalStallDeadline = clock.StallDeadline;
             while (!hangCts.IsCancellationRequested)
             {
                 await Task.Delay(250, hangCts.Token).ConfigureAwait(false);
@@ -4176,6 +4316,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 if (RouteRecoveryPolicy.IsWaitStatus(decision))
                 {
                     clock.ResetForWaitLonger();
+                    // Restore the long stall deadline for long-load profiles. ResetForWaitLonger
+                    // resets it to WaitLongerSeconds (90s), which is too short for a RAM-spill
+                    // prefill that can take minutes. The original deadline (600s+ for long-load)
+                    // is the correct window for "genuinely stuck" detection.
+                    if (clock.StallDeadline < originalStallDeadline)
+                    {
+                        clock.StallDeadline = originalStallDeadline;
+                    }
                     try
                     {
                         LocalStreamHangPolicy.ExtendCopyTimeout(timeoutCts, clock.Rules);

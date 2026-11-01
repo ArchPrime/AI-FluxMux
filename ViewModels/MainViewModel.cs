@@ -474,22 +474,82 @@ public partial class MainViewModel : ViewModelBase
                 BottomBarPhase = 1; // Prefill
                 PrefillInProgress = true;
                 PrefillProgress = 0.0;
+
+                // Detect RAM-spill prefill: the prompt exceeds the VRAM-resident context on a
+                // YaRN profile, so the overflow is running in ordinary RAM (much slower than VRAM).
+                // This is the case where a "resume" of a large chat can take many minutes.
+                int vramContext = _runtimeService.ManagedLocalVramContext;
+                int fullContext = _runtimeService.ManagedLocalContext;
+                bool isRamSpill = vramContext > 0
+                    && promptTokens > vramContext
+                    && fullContext > vramContext;
+                int spillTokens = isRamSpill ? promptTokens - vramContext : 0;
+
                 PrefillStatusText = promptTokens > 0
                     ? "Prefilling context… ~" + FormatTokenCount(promptTokens) + " tokens"
                     : "Prefilling context…";
 
                 _prefillPromptTokens = promptTokens;
                 _prefillStartUtc = DateTime.UtcNow;
-                // Cold start detection: when the local model is not yet ready (still loading,
-                // or no model loaded), the first request triggers a cold load (model load +
-                // KV cache allocation) which takes ~30s regardless of prompt size. The warm-speed
-                // model would under-estimate this as ~2s, so the bar fills instantly then sits
-                // at 100% for 28s. Use a conservative 60s estimate for cold starts so the bar
-                // advances slowly and the user knows to wait.
                 var isColdStart = _runtimeService.IsLocalModelCold;
-                _prefillEstimatedSeconds = isColdStart
-                    ? 60
-                    : GetOrCreatePrefillModel().EstimateSeconds(promptTokens);
+                var prefillModel = GetOrCreatePrefillModel();
+
+                if (isRamSpill)
+                {
+                    // RAM-spill prefill: the prompt exceeds the VRAM-resident context, so the
+                    // overflow is running in ordinary RAM. The prefill time is dominated by the
+                    // TOTAL prompt size, not just the overflow.
+                    //
+                    // IMPORTANT: Do NOT assume RAM is 10x slower than VRAM. On the user's hardware,
+                    // the RAM-spill prefill speed is roughly the same as the VRAM prefill speed
+                    // (the learned speed already reflects the real hardware behavior, including
+                    // the RAM-spill effect). Assuming RAM is 10x slower would make the estimate
+                    // ~6x too pessimistic (e.g., 1500s instead of the actual ~243s).
+                    //
+                    // Use the learned estimate (which is based on real full-prefill samples from
+                    // the user's hardware) for the TOTAL prompt size. This is the same as the VRAM
+                    // case, but without the conservative multiplier (because the learned speed
+                    // already reflects the real hardware, including any RAM-spill slowdown).
+                    //
+                    // Use the most recent full-prefill sample's speed (LastMeasuredSpeedTokensPerSec)
+                    // instead of the fitted speed (CurrentSpeedTokensPerSec), because the fitted
+                    // speed (least-squares over similar points) can be noisy and lower than the
+                    // actual speed. The most recent sample is the most representative of the
+                    // current hardware state.
+                    double speed = prefillModel.LastMeasuredSpeedTokensPerSec > 0
+                        ? prefillModel.LastMeasuredSpeedTokensPerSec
+                        : prefillModel.CurrentSpeedTokensPerSec;
+                    int baseEstimate = isColdStart
+                        ? 60
+                        : (int)Math.Ceiling((double)promptTokens / Math.Max(1.0, speed));
+                    _prefillEstimatedSeconds = baseEstimate;
+                    // Floor at 60s (RAM-spill prefill is never instant), cap at 1800s (30 min)
+                    // to avoid absurd estimates for very large prompts.
+                    _prefillEstimatedSeconds = Math.Clamp(_prefillEstimatedSeconds, 60, 1800);
+                }
+                else
+                {
+                    // VRAM prefill (or cold start). Use the learned estimate, but apply a
+                    // conservative multiplier for large prompts: prefill speed can drop as the
+                    // context grows (KV cache pressure, attention over a long sequence), so the
+                    // linear estimate from smaller samples can be optimistic. For prompts over
+                    // 32K tokens, apply a 1.5x multiplier; over 64K, 2x. This keeps the estimate
+                    // honest without being absurdly pessimistic.
+                    int baseEstimate = isColdStart
+                        ? 60
+                        : prefillModel.EstimateSeconds(promptTokens);
+                    double multiplier = 1.0;
+                    if (promptTokens > 65536) multiplier = 2.0;
+                    else if (promptTokens > 32768) multiplier = 1.5;
+                    _prefillEstimatedSeconds = (int)Math.Ceiling(baseEstimate * multiplier);
+                    // Floor at 30s for large prompts (even a fast VRAM prefill of 50K+ tokens
+                    // takes at least ~30s), cap at 1800s.
+                    if (promptTokens > 32768)
+                    {
+                        _prefillEstimatedSeconds = Math.Max(_prefillEstimatedSeconds, 30);
+                    }
+                    _prefillEstimatedSeconds = Math.Clamp(_prefillEstimatedSeconds, 0, 1800);
+                }
                 StartPrefillTimer();
 
                 // Only emit the warming-up terminal line once per session.
@@ -498,7 +558,26 @@ public partial class MainViewModel : ViewModelBase
                     var estimatedSeconds = _prefillEstimatedSeconds;
                     if (estimatedSeconds >= 30)
                     {
-                        AppendDiagnosticEntry("PREFILL", "warming up — give me a minute or two to read the conversation before I reply.");
+                        var minutes = Math.Max(1, (int)Math.Ceiling(estimatedSeconds / 60.0));
+                        if (isRamSpill)
+                        {
+                            // RAM-spill prefill: explain WHY this is slow and give a real estimate.
+                            AppendDiagnosticEntry("PREFILL",
+                                "This chat is resuming with a YaRN extended context that has spilled from VRAM into RAM "
+                                + "(~" + FormatTokenCount(spillTokens) + " tokens in RAM), so prefilling is slower — "
+                                + "it may take up to ~" + minutes + " minute" + (minutes == 1 ? "" : "s")
+                                + ". Generating my reply then takes additional time. "
+                                + "This is normal for large YaRN chats — the model is working, not stuck.");
+                        }
+                        else
+                        {
+                            // Large VRAM prefill (or cold start): be honest about the estimate.
+                            // Even a VRAM model can take minutes to prefill a large context.
+                            AppendDiagnosticEntry("PREFILL",
+                                "Prefilling this conversation may take up to ~" + minutes + " minute" + (minutes == 1 ? "" : "s")
+                                + ". Generating my reply then takes additional time — often several more minutes "
+                                + "for a conversation this size. The model is working, not stuck.");
+                        }
                         prefillWarmupShown = true;
                     }
                 }
@@ -2662,6 +2741,11 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial bool CloudRecommendVisible { get; set; }
 
+    partial void OnCloudRecommendVisibleChanged(bool value)
+    {
+        UpdateDiagnosticsPanelMinHeight();
+    }
+
     [ObservableProperty]
     public partial string CloudRecommendText { get; set; } = string.Empty;
 
@@ -3913,6 +3997,11 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial bool LocalReloadRecommendVisible { get; set; }
 
+    partial void OnLocalReloadRecommendVisibleChanged(bool value)
+    {
+        UpdateDiagnosticsPanelMinHeight();
+    }
+
     [ObservableProperty]
     public partial string LocalReloadRecommendText { get; set; } = string.Empty;
 
@@ -4115,6 +4204,19 @@ public partial class MainViewModel : ViewModelBase
     // to resize when the stress test starts.
     [ObservableProperty]
     public partial GridLength DiagnosticsRowHeight { get; set; } = new(1.0, GridUnitType.Star);
+
+    // The minimum height of the diagnostics panel row. Defaults to 120, but increases to 400
+    // when routing/recommendation dialogs (CloudRecommend, LocalReloadRecommend) are visible,
+    // so the panel auto-resizes to accommodate them without masking the context gauge. Returns
+    // to 120 when the dialogs are dismissed.
+    [ObservableProperty]
+    public partial double DiagnosticsPanelMinHeight { get; set; } = 120;
+
+    private void UpdateDiagnosticsPanelMinHeight()
+    {
+        var anyDialogVisible = CloudRecommendVisible || LocalReloadRecommendVisible;
+        DiagnosticsPanelMinHeight = anyDialogVisible ? 400 : 120;
+    }
 
     // How the context-fill stress test drives each fill level. Progressive (default) builds a
     // realistic multi-turn conversation up to the target, measuring the model's real token
@@ -5506,10 +5608,6 @@ public partial class MainViewModel : ViewModelBase
         if (text.StartsWith("restarting local model endpoint", StringComparison.OrdinalIgnoreCase))
         {
             return "launch: restarting local model";
-        }
-        if (text.StartsWith("launching an extended-context (YaRN) profile", StringComparison.OrdinalIgnoreCase))
-        {
-            return "launch: YaRN profile (cold load can take several minutes)";
         }
         if (text.StartsWith("stopping the active managed local runtime", StringComparison.OrdinalIgnoreCase))
         {
@@ -8529,11 +8627,41 @@ public partial class MainViewModel : ViewModelBase
         if (sameLocalProfileAlreadyRunning)
         {
             RememberMountedLocal(model, variant);
-            LocalRouteIndicatorState = RouteIndicatorState.Live;
             RegisterCompatibleQuickSelectLocalOverlays(model);
             ApplyLiveLocalRequestSettingsFor(model, variant);
-            StatusMessage = $"{slotLabel}: this profile is already running on the public endpoint.";
-            StartMountedEndpointHealthMonitor();
+
+            // Reconcile the gateway's routing state with the profile that is actually up, so
+            // the gateway keeps routing to this model (not a stale target). This is the fix
+            // for "green but the chat does not move" when the routing state desynced.
+            int proxyPort = (int)OrchestratorPort;
+            int daemonPort = proxyPort + 1;
+            _runtimeService.ReconcileLocalRouteState(
+                model,
+                proxyPort,
+                daemonPort,
+                "Local public endpoint is already running this profile.");
+
+            // NO false green: the process being alive is not proof the gateway can route a
+            // chat completion to it. Probe the public endpoint; only go green on a real
+            // success. Otherwise stay amber ("still verifying") so the user is never given a
+            // false assurance that the model is actually launched and serving.
+            var verifyProbe = await _runtimeService.TimeShortLocalReplyThroughPublicEndpointAsync(
+                proxyPort,
+                model,
+                requestTimeoutMs: FluxMuxRuntimeService.PublicEndpointReadyProbeTimeoutMs);
+            if (verifyProbe.IsSuccess)
+            {
+                ApplyLocalPublicEndpointSuccess(model, variant, verifyProbe.Details, launchElapsedMs: null, recordLaunchTelemetry: false);
+            }
+            else
+            {
+                LocalRouteIndicatorState = RouteIndicatorState.Amber;
+                _lastHealthDetail = verifyProbe.Details;
+                ConnectionHealthText = verifyProbe.Details;
+                StatusMessage = $"{slotLabel}: this profile is running, but the Port check did not succeed yet — still verifying. "
+                    + "Do not assume it is ready; send a message to confirm, or run Health.";
+                StartMountedEndpointHealthMonitor();
+            }
             UpdateRoutingPoolStatus();
             return;
         }
@@ -8577,14 +8705,12 @@ public partial class MainViewModel : ViewModelBase
             _runtimeService.PreWarmModelPageCache(modelPathForWarm);
         }
 
-        // Up-front warning for long-load profiles (YaRN / extended-context / GPU+CPU):
-        // tell the user this launch can take several minutes from cold, so they don't think
-        // it's hung. The countdown monitor below shows live elapsed time + estimate.
+        // The countdown monitor below shows live elapsed time + estimate, which tells the story
+        // of the launch progress. No up-front "several minutes" warning is needed: the model load
+        // typically takes ~20-30 seconds (a bit longer on a cold start), and the countdown makes
+        // the progress visible. (The conversation itself is read in when the user sends their
+        // first message, not during this launch.)
         var longLoadProfile = IsLongLoadLocalProfile(model, variant);
-        if (longLoadProfile)
-        {
-            StatusMessage = $"{slotLabel}: launching an extended-context (YaRN) profile — the first (cold) load can take several minutes while the model and its large KV cache load into GPU+RAM. A live progress timer is shown below.";
-        }
 
         RememberMountedLocal(model, variant);
         LocalRouteIndicatorState = RouteIndicatorState.Amber;
@@ -8652,20 +8778,12 @@ public partial class MainViewModel : ViewModelBase
         {
             _lastHealthDetail = result.Details;
             ConnectionHealthText = result.Details;
-            // For the "warming up" case (launch loop bailed but the model is still loading),
-            // show a clear, plain-English explanation of what's happening and what to do.
-            // The user needs to know the model is still loading (not stuck), how long it's
-            // been, and that they should wait — not cancel or switch to cloud.
-            if (result.IsLocalRouteWarming)
-            {
-                StatusMessage = "Your model is still loading. This is normal for a cold start (especially after a Windows restart, when the model has to be read from disk). "
-                    + "AI-FluxMux is waiting for it to finish — do not cancel or switch to cloud. "
-                    + "It should be ready within a minute or two.";
-            }
-            else
-            {
-                StatusMessage = result.Status;
-            }
+            // Do NOT show a "still loading / do not cancel" warning here. The ongoing launch
+            // countdown is itself the evidence that a launch attempt is in progress, so a
+            // separate "still loading" message is redundant and misleading (it implies success
+            // will follow, which is wrong when the launch has actually failed). Use the neutral
+            // status string instead, which accurately reflects the state without promising success.
+            StatusMessage = result.Status;
             LocalRouteIndicatorState = result.IsSuccess ? RouteIndicatorState.Amber : RouteIndicatorState.Fault;
             RememberMountedLocal(model, variant);
             if (!result.IsSuccess && !result.IsLocalRouteWarming)
@@ -8788,10 +8906,10 @@ public partial class MainViewModel : ViewModelBase
 
             if (isWarming)
             {
-                title = "Model still loading";
-                message = "The local model '" + model + "' (" + variant + ") is still loading after the launch window expired. "
-                    + "This is normal for a cold start (especially after a Windows restart, when the model has to be read from disk). "
-                    + "You can wait a little longer, retry as-is, pick a smaller model, or stop and clean up.";
+                title = "Launch did not finish in time";
+                message = "The local model '" + model + "' (" + variant + ") was still loading when the launch window expired, so this launch attempt did not complete. "
+                    + "This can happen on a cold start (especially after a Windows restart, when the model has to be read from disk). "
+                    + "You can wait a little longer and retry, retry as-is, pick a smaller model, or stop and clean up.";
                 showSmallerContext = false;
                 showWaitLonger = true;
             }
@@ -8926,12 +9044,16 @@ public partial class MainViewModel : ViewModelBase
             ? $" in {FormatTelemetryDuration(elapsedMs2)}"
             : string.Empty;
         // Honest "first reply" note. The model is launched and the endpoint is responding,
-        // but the first real message from the user may take a noticeable delay: the first
-        // large request triggers the cold KV-cache allocation (for YaRN / extended-context
-        // profiles) and prefill scales with prompt size. We don't quote a specific time
-        // because it depends on the user's message size, their settings, and their hardware.
-        // Just be honest about the uncertainty and ask for patience.
-        var firstReplyText = " · your model is now launched, but depending on your settings, and hardware, and the complexity of your first message, you should expect a noticeable delay before it can respond. Please be patient…";
+        // but the conversation has NOT been read yet — that happens on the user's first
+        // message. For YaRN / extended-context profiles, the first message can trigger a
+        // many-minute RAM-spill prefill. Be explicit about this so the user is not surprised
+        // by a long wait after seeing "ready."
+        int vramCtx = _runtimeService.ManagedLocalVramContext;
+        int fullCtx = _runtimeService.ManagedLocalContext;
+        bool isYarnProfile = vramCtx > 0 && fullCtx > vramCtx;
+        var firstReplyText = isYarnProfile
+            ? " · your model is now launched, but the conversation has NOT been read yet — that happens on your first message. For this YaRN profile, a large conversation can take several minutes (or more) to prefill from RAM. Please be patient on the first reply."
+            : " · your model is now launched, but depending on your settings, and hardware, and the complexity of your first message, you should expect a noticeable delay before it can respond. Please be patient…";
         StatusMessage = $"Local route ready{launchTimeText}{firstReplyText}";
         LocalRouteIndicatorState = RouteIndicatorState.Live;
         RememberMountedLocal(model, variant);

@@ -63,3 +63,10 @@ build_testrun.ps1
 current_release_body.md
 new_release_body.md
 
+
+# Scanner / lint artifacts
+scan-stderr.txt
+scan-stdout.txt
+scanner-lint.json
+scanner-output.json
+scanner-scan.json

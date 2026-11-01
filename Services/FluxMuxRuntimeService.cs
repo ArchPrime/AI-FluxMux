@@ -312,6 +312,12 @@ public sealed class FluxMuxRuntimeService
 	// second launch cancel the first immediately, so the user's revised intent wins.
 	private readonly object _localLaunchLock = new object();
 	private CancellationTokenSource? _inProgressLocalLaunchCts;
+	// Identity (model + variant) of the in-progress launch, used to make SupersedeInProgressLocalLaunch
+	// idempotent: re-launching the SAME profile while it is still loading must NOT cancel the
+	// in-flight load (that's the "mashing Launch resets the clock" loop). Only a genuine profile
+	// CHANGE supersedes. Guarded by _localLaunchLock.
+	private string _inProgressLocalLaunchModel = string.Empty;
+	private string _inProgressLocalLaunchVariant = string.Empty;
 
 	// RAM-overflow watchdog: monitors the llama-server process's working set and auto-kills it
 	// if it exceeds a threshold for a sustained period. This is the "belt" in the belt-and-
@@ -3397,11 +3403,28 @@ public sealed class FluxMuxRuntimeService
 	/// cancellation check. This ensures the user's revised intent (the second launch) wins
 	/// instead of both launches running concurrently.
 	/// </summary>
-	private CancellationTokenSource SupersedeInProgressLocalLaunch(CancellationToken callerToken)
+	/// <remarks>
+	/// Idempotent for the SAME profile: if a launch of the same model+variant is already in
+	/// progress, this returns the EXISTING launch CTS without cancelling it or signalling the
+	/// gateway. This is what makes "mashing Launch on the same profile while it loads" a no-op
+	/// instead of a cancel-and-restart loop. Only a genuine profile CHANGE supersedes.
+	/// </remarks>
+	private CancellationTokenSource SupersedeInProgressLocalLaunch(CancellationToken callerToken, string model, string variant)
 	{
 		lock (_localLaunchLock)
 		{
-			// Cancel the previous in-progress launch immediately.
+			// Same profile already loading? Attach to the in-flight launch instead of
+			// superseding it. The re-click just re-observes the same load (countdown keeps
+			// ticking); we do NOT cancel the launch or the gateway handlers.
+			if (_inProgressLocalLaunchCts is { } existing
+				&& _inProgressLocalLaunchModel.Equals(model ?? string.Empty, StringComparison.OrdinalIgnoreCase)
+				&& _inProgressLocalLaunchVariant.Equals(variant ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+			{
+				LogLaunchMonitor("same-profile re-launch while loading: attaching to in-flight launch (no supersede)");
+				return existing;
+			}
+
+			// Genuine profile change (or first launch): cancel the previous in-progress launch.
 			if (_inProgressLocalLaunchCts is { } previous)
 			{
 				try
@@ -3413,10 +3436,10 @@ public sealed class FluxMuxRuntimeService
 				}
 			}
 
-			// Cancel any in-flight gateway handlers so stale requests parked in the 503-retry
-			// loop stop retrying against the new llama-server. Without this, a stale handler
-			// can keep retrying for up to 300s and fire prefill telemetry into the new
-			// launch's UI state, causing garbled bottom-bar telemetry for minutes.
+			// Signal the gateway that a launch superseded the previous one, so stale handlers
+			// parked in the 503-retry loop (talking to the OLD model) stop retrying and return
+			// a clean 502. This is generation-based and one-shot: requests that start AFTER this
+			// (talking to the new model) are NOT cancelled, so "next message just works".
 			try
 			{
 				_gatewayHost?.CancelInFlightHandlers();
@@ -3429,6 +3452,8 @@ public sealed class FluxMuxRuntimeService
 			// newer launch supersedes this one, the launch aborts.
 			var newCts = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
 			_inProgressLocalLaunchCts = newCts;
+			_inProgressLocalLaunchModel = model ?? string.Empty;
+			_inProgressLocalLaunchVariant = variant ?? string.Empty;
 			return newCts;
 		}
 	}
@@ -3445,6 +3470,8 @@ public sealed class FluxMuxRuntimeService
 			if (ReferenceEquals(_inProgressLocalLaunchCts, launchCts))
 			{
 				_inProgressLocalLaunchCts = null;
+				_inProgressLocalLaunchModel = string.Empty;
+				_inProgressLocalLaunchVariant = string.Empty;
 			}
 		}
 	}
@@ -3469,6 +3496,8 @@ public sealed class FluxMuxRuntimeService
 				{
 				}
 				_inProgressLocalLaunchCts = null;
+				_inProgressLocalLaunchModel = string.Empty;
+				_inProgressLocalLaunchVariant = string.Empty;
 			}
 		}
 	}
@@ -3527,11 +3556,13 @@ public sealed class FluxMuxRuntimeService
 			};
 		}
 		RememberParkedLocalLaunch(selectedLocalModel, selectedVariant, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge);
-		// If another local launch is in progress, immediately cancel it so this launch
-		// (the user's revised intent) cleanly takes over instead of both running concurrently.
-		// The returned token is linked to the caller's cancellationToken, so the launch
-		// aborts if either the caller cancels OR a newer launch supersedes this one.
-		using var launchCts = SupersedeInProgressLocalLaunch(cancellationToken);
+		// If another local launch is in progress, supersede it so this launch (the user's
+		// revised intent) cleanly takes over instead of both running concurrently. EXCEPT when
+		// it's the SAME profile already loading — in that case we attach to the in-flight load
+		// (no cancel, no gateway signal), so mashing Launch on the same profile is a no-op.
+		// The returned token is linked to the caller's cancellationToken, so the launch aborts
+		// if either the caller cancels OR a newer launch supersedes this one.
+		using var launchCts = SupersedeInProgressLocalLaunch(cancellationToken, selectedLocalModel, selectedVariant);
 		var launchToken = launchCts.Token;
 		try
 		{
@@ -4742,6 +4773,12 @@ public sealed class FluxMuxRuntimeService
 			Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
 		};
 		request.Headers.ConnectionClose = true;
+		// Mark this as a probe request so the gateway does NOT fire PrefillStartedNotice for it.
+		// A probe is a tiny "Reply with the single word ready." check, not the user's real message;
+		// firing the prefill notice for it would show a misleading "Reading a large conversation
+		// (~59 tokens)" line at launch time, before the model is even ready to prefill the user's
+		// actual (much larger) conversation.
+		request.Headers.TryAddWithoutValidation(CloudEndpointValidationProbe.ProbeRequestHeader, "true");
 		if (!string.IsNullOrWhiteSpace(forceRoute))
 		{
 			request.Headers.TryAddWithoutValidation(CloudEndpointValidationProbe.ForceRouteHeader, forceRoute.Trim());
@@ -7988,6 +8025,19 @@ public sealed class FluxMuxRuntimeService
 		catch
 		{
 		}
+	}
+
+	/// <summary>
+	/// Reconciles the gateway's local routing state (local_port + local_preferred_model in
+	/// Proxy_Runtime_State.json) with a local profile that is ALREADY running. This is called
+	/// from the "already running" early-return path so that a re-click on a live profile keeps
+	/// the gateway pointed at the model that is actually up — without it, the gateway could
+	/// still be routing to a stale target and the chat would not move even though the UI shows
+	/// green. Best-effort: silently no-ops on failure.
+	/// </summary>
+	public void ReconcileLocalRouteState(string model, int proxyPort, int localPort, string details)
+	{
+		WriteProxyRuntimeStateForLocal(model, proxyPort, localPort, "ready", details, GetGatewayPid());
 	}
 
 	private static string CloudTraitCacheKey(string provider, string model)

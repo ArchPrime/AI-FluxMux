@@ -1010,7 +1010,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" MinHeight="160" />
             <RowDefinition Height="Auto" />
-            <RowDefinition Height="{Binding DiagnosticsRowHeight}" MinHeight="120" />
+            <RowDefinition Height="{Binding DiagnosticsRowHeight}" MinHeight="{Binding DiagnosticsPanelMinHeight}" />
         </Grid.RowDefinitions>
         <Border Grid.Row="0"
                 Padding="18,8,0,8"
@@ -3356,7 +3356,7 @@
                                             IsVisible="{Binding LocalReloadLoadVisible}"
                                             Command="{Binding ApproveLocalReloadRecommendCommand}"
                                             views:MarkedText.Tip="Unload the model profile that is running now and start the suggested model profile named in the blue note. The new local starts without the in-memory reading of this chat. If that model profile's Context is smaller than this chat, the next turn may still fail unless you **Compact** first." />
-                                    <Button Content="Keep current model profile"
+                                    <Button Content="Keep current model for now"
                                             Margin="0,0,8,4"
                                             Command="{Binding DeclineLocalReloadRecommendCommand}"
                                             ToolTip.Tip="Keep the local model profile that is already loaded. Hide this suggestion for 15 minutes. Does not shorten what AI-FluxMux forwards." />

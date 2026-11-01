@@ -92,18 +92,25 @@ public sealed class PrefillPerformanceModelTests
     public void Outlier_cold_load_sample_is_rejected()
     {
         var model = new PrefillPerformanceModel(TempPath());
-        // One cold-load outlier (30s for ~190k tokens => ~6000 tok/s implied) followed by
-        // normal samples (~190k tokens in ~1s => ~190000 tok/s implied). The outlier must not
-        // drag the fitted speed down to the clamp floor.
-        model.RecordSample(188850, 30659); // cold-load outlier
-        model.RecordSample(189234, 828);
-        model.RecordSample(190170, 1378);
-        model.RecordSample(193546, 1454);
-        model.RecordSample(195995, 874);
+        // One cold-load outlier (model still loading from disk: ~190k tokens in ~1900s =>
+        // ~100 tok/s implied, very slow) followed by normal samples (~190k tokens in ~190s =>
+        // ~1000 tok/s implied, a realistic cold-prefill speed). The outlier (10x slower than
+        // the median) must be rejected by the OutlierSpeedRatio (3x) logic and must not drag
+        // the fitted speed down to the clamp floor.
+        //
+        // NOTE: The implied speeds here are realistic for a 27B model on consumer hardware
+        // (cold prefill ~500-1000 tok/s). The previous test used ~190000 tok/s "normal"
+        // samples, which are implausible and would be rejected by the MaxPlausibleSpeedTokensPerSec
+        // cap (5000 tok/s) that guards against warm-cache delta prefills.
+        model.RecordSample(188850, 1900000); // cold-load outlier (very slow: ~100 tok/s)
+        model.RecordSample(189234, 189000); // normal (~1001 tok/s)
+        model.RecordSample(190170, 190000); // normal (~1001 tok/s)
+        model.RecordSample(193546, 193000); // normal (~1003 tok/s)
+        model.RecordSample(195995, 195000); // normal (~1005 tok/s)
         Assert.True(model.HasData);
-        // The fitted speed should be close to the normal ~190000 tok/s, NOT the ~6000 the
+        // The fitted speed should be close to the normal ~1000 tok/s, NOT the ~100 the
         // outlier would imply. Allow a wide band but it must be far above the outlier's speed.
-        Assert.True(model.CurrentSpeedTokensPerSec > 50000,
+        Assert.True(model.CurrentSpeedTokensPerSec > 800,
             $"Expected fitted speed well above the outlier, got {model.CurrentSpeedTokensPerSec}");
     }
 

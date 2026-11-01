@@ -2,6 +2,284 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
+## ✅ DONE: Remove misleading "several minutes" launch warning — countdown tells the story (11/1)
+
+**Symptom (user report):** The launch message said "the first (cold) load can take several minutes while the model weights are read from disk into GPU+RAM," but the actual model load takes ~20-30 seconds on the user's hardware (confirmed by launch telemetry: `ready total=20226 ms` and `ready total=26686 ms`). The "several minutes" wording was inaccurate and redundant (the countdown monitor already shows live elapsed time + estimate).
+
+**Root cause:** The message was a conservative worst-case estimate (probably written for slower hardware / a truly cold NVMe after a reboot). It's not accurate for the user's machine, and the countdown already tells the story of the launch progress.
+
+**Fix:**
+- **Removed the up-front "several minutes" warning** (`MainViewModel.cs`): The countdown monitor shows live elapsed time + estimate, which tells the story of the launch progress. No up-front warning is needed.
+- **Removed the now-dead `StartsWith` check** for the removed message text (in the status-label mapping function).
+- **Kept the `longLoadProfile` variable** (still needed by the countdown monitor for the estimate).
+
+**Files changed:** `ViewModels/MainViewModel.cs` (removed the launch message + the dead `StartsWith` check).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** The launch no longer shows the "several minutes" warning. The countdown monitor shows live elapsed time + estimate, which tells the story of the launch progress.
+
+## ✅ DONE: VRAM-spill dialog dismiss — single "Keep current model for now" (15 min) button (11/1)
+
+**Symptom (user report):** The ability to *ignore* the VRAM-spill/reload warnings is not obvious. The user initially wanted two dismiss options (15 min + "do not ask again for this chat"), but then simplified to a single "Keep current model for now" (15 minutes) button, reasoning that the chat will grow out of the VRAM-only range or end before there have been too many popups.
+
+**Root cause:** The "Keep current model profile" button was the only dismiss option, and its label was misleading (it implied you're *keeping* the model, not *ignoring* the warning).
+
+**Fix:**
+- **Relabeled the button** from "Keep current model profile" to "Keep current model for now" (clearer that it's a temporary dismiss, 15 minutes).
+- **Removed the "do not ask again for this chat" button** and its supporting code (`DismissLocalReloadForChatCommand`, `suppressForChat` parameter) — the user simplified to a single 15-minute dismiss.
+
+**Files changed:** `Views/MainWindow.axaml` (relabel, removed second button), `ViewModels/MainViewModel.cs` (removed `DismissLocalReloadForChat`), `Services/FluxMuxRuntimeService.cs` (removed `suppressForChat` parameter).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** (a) The "Keep current model for now" button dismisses the warning for 15 minutes. (b) The "Compact" button is visible when the user client is not Cline-like (FluxMux compaction works normally).
+
+## ✅ DONE: Fix VRAM-spill dialog flicker — don't clear spill-compact offers on successful turn (11/1)
+
+**Symptom (user report):** The VRAM-spill dialog was flickering (appearing and disappearing repeatedly) even after the hysteresis fix. The log showed the dialog being created ("pending") and then cleared ("cleared: turn succeeded, context warning was stale") every few seconds.
+
+**Root cause:** The `ClearStaleLocalReloadOffer` method was called after *every* successful local turn, and it was clearing the dialog even if the prompt was still above the show threshold. This was overriding the hysteresis logic in `OfferSpillCompactIfNeeded`, causing the dialog to flicker.
+
+**Fix:**
+- **Don't clear spill-compact offers in `ClearStaleLocalReloadOffer`** (`FluxMuxGatewayHost.cs`): The hysteresis logic in `OfferSpillCompactIfNeeded` handles the show/hide decision for spill-compact offers. Clearing them in `ClearStaleLocalReloadOffer` would cause the dialog to flicker when the prompt hovers around the trigger threshold. The spill-compact offer will be hidden by `OfferSpillCompactIfNeeded` when the prompt drops below the hide threshold.
+
+**Files changed:** `Services/FluxMuxGatewayHost.cs` (don't clear spill-compact offers in `ClearStaleLocalReloadOffer`).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** (a) The VRAM-spill dialog does not flicker when the context hovers around the trigger value. (b) The dialog appears when the context exceeds the show threshold (90% VRAM, or overflow > 30% of VRAM). (c) The dialog disappears only when the context drops below the hide threshold (80% VRAM, or overflow < 20% of VRAM), handled by `OfferSpillCompactIfNeeded`.
+
+## ✅ DONE: VRAM-spill dialog hysteresis — prevent flickering when context hovers around trigger (11/1)
+
+**Symptom (user report):** The VRAM-spill dialog (and other routing dialogs) can appear and disappear repeatedly while the context hovers around the trigger value. The context appears to go up and down, causing the dialog to flicker.
+
+**Root cause:** The `OfferSpillCompactIfNeeded` method is called on *every* turn. If the prompt hovers around the trigger threshold (85% VRAM, or overflow > 25% of VRAM), the urgency level would flicker between 0/1/2 (show dialog) and -1 (hide dialog), causing the dialog to flicker.
+
+**Fix:**
+- **Added two-threshold hysteresis** (`FluxMuxGatewayHost.cs` `OfferSpillCompactIfNeeded`): The dialog now uses two separate thresholds:
+  - **SHOW threshold:** The prompt must exceed this to *show* the dialog (90% VRAM, or overflow > 30% of VRAM).
+  - **HIDE threshold:** The prompt must drop below this to *hide* the dialog (80% VRAM, or overflow < 20% of VRAM).
+  - The show threshold is higher than the hide threshold, so the dialog doesn't flicker when the prompt hovers around a single value.
+- **Track whether the dialog is currently showing** (i.e., the snapshot is "pending" and `spillCompact` is true). If the dialog is showing, use the HIDE threshold to decide whether to hide it. If the dialog is not showing, use the SHOW threshold to decide whether to show it.
+- **Hide the dialog** by setting the status to "idle" (which makes the dialog invisible) when the prompt drops below the hide threshold.
+
+**Files changed:** `Services/FluxMuxGatewayHost.cs` (hysteresis logic in `OfferSpillCompactIfNeeded`).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** (a) The VRAM-spill dialog does not flicker when the context hovers around the trigger value. (b) The dialog appears when the context exceeds the show threshold (90% VRAM, or overflow > 30% of VRAM). (c) The dialog disappears only when the context drops below the hide threshold (80% VRAM, or overflow < 20% of VRAM).
+
+## ✅ DONE: Diagnostics panel auto-resizes to accommodate routing/recommendation dialogs (11/1)
+
+**Symptom (user report):** When routing/recommendation dialogs (VRAM spill, context warning, routing dialogs) appear in the diagnostics panel, the context gauge gets masked. The user wants the panel to auto-resize to accommodate the dialogs, and return to the previous size when they're dismissed.
+
+**Root cause:** The dialogs (`CloudRecommendVisible`, `LocalReloadRecommendVisible`) are in the `StackPanel` (Row 0) of the diagnostics panel. When they become visible, they add height to the `StackPanel`, which pushes the gauges (including the context gauge) down or masks them. The panel's `MinHeight` was hardcoded to 120, so it didn't expand to accommodate the dialogs.
+
+**Fix:**
+- **Added a `DiagnosticsPanelMinHeight` property** (`MainViewModel.cs`): Defaults to 120, but increases to 400 when routing/recommendation dialogs are visible. This makes the panel auto-resize to accommodate the dialogs without masking the context gauge.
+- **Added `UpdateDiagnosticsPanelMinHeight()` method**: Checks if any dialog is visible (`CloudRecommendVisible || LocalReloadRecommendVisible`) and sets the `DiagnosticsPanelMinHeight` accordingly.
+- **Added `OnCloudRecommendVisibleChanged` and `OnLocalReloadRecommendVisibleChanged` callbacks**: These call `UpdateDiagnosticsPanelMinHeight()` whenever the dialogs appear/disappear.
+- **Bound the panel's `MinHeight` to `DiagnosticsPanelMinHeight`** (`MainWindow.axaml`): The `RowDefinition` for the diagnostics panel now uses `MinHeight="{Binding DiagnosticsPanelMinHeight}"` instead of the hardcoded `MinHeight="120"`.
+
+**Files changed:** `ViewModels/MainViewModel.cs` (DiagnosticsPanelMinHeight property, UpdateDiagnosticsPanelMinHeight method, callbacks), `Views/MainWindow.axaml` (MinHeight binding).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** (a) When a routing/recommendation dialog appears, the diagnostics panel auto-resizes (gets taller) to accommodate it, and the context gauge is not masked. (b) When the dialog is dismissed, the panel returns to its previous size.
+
+## ✅ DONE: Fix misleading launch message — clarify that prefill happens on first message, not at launch (11/1)
+
+**Symptom (user report):** The launch message said "the first (cold) load can take several minutes while the model and its large KV cache load into GPU+RAM," which conflates the *model load* (loading the weights at launch) with the *prefill* (processing the conversation into the KV cache, which happens on the *first user message*, not at launch). The user noted that the KV cache is *not* loaded at launch — it's *built* during the prefill.
+
+**Root cause:** The message mentioned "the model and its large KV cache load into GPU+RAM," which implies the KV cache is loaded at launch. But the KV cache is *built* during the prefill (on the first user message), not loaded at launch. So the message is misleading.
+
+**Fix:**
+- **Reworded the launch message** (`MainViewModel.cs`): The message now says "the model weights are read from disk into GPU+RAM" (accurate — the weights *are* loaded at launch), and adds "(The conversation itself is read in when you send your first message, not during this launch.)" to clarify that the prefill happens on the first message, not at launch.
+
+**Files changed:** `ViewModels/MainViewModel.cs` (launch message rewording).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** The launch message now accurately describes what happens at launch (loading the model weights) and clarifies that the prefill happens on the first message, not at launch.
+
+## ✅ DONE: Fix implausible prefill tok/s — only record FULL prefill samples, no speed cap (11/1)
+
+**Symptom (user report):** The prefill progress bar showed an implausible "over 6000 tok/s" reading that persisted for many seconds during prefill. The user noted that next-gen hardware may legitimately reach high prefill speeds, so filtering out "implausible" results is the wrong approach — the calculation itself should be fixed, and a speed cap would mask legitimate fast full prefills and real diagnostic anomalies.
+
+**Root cause:** The prefill speed is computed as `promptTokens / firstByteSeconds`. For a **warm-cache delta prefill** (KV cache already resident, only the new tokens processed), the `firstByteSeconds` is *short* (sub-second, because only the delta is processed), but the `promptTokens` is the *full* prompt size (not just the delta). So the computed speed is `fullPrompt / shortTime` = absurdly high (e.g., 208K tokens / 0.5s = 416,000 tok/s). The log confirmed this: most turns have `first byte ≈ first content token` (sub-second, delta prefills), while the first turn after a launch has a long `first content token` time (minutes, full prefill).
+
+**Fix:**
+- **Only record a prefill sample for fitting when the prefill is a FULL prefill** (`PrefillPerformanceModel.cs`): added a `MinFullPrefillMs = 5000` constant. A delta prefill completes in well under a second, so its implied speed is not representative of the model's true cold-prefill speed. A full prefill takes many seconds to minutes. Using the first-byte duration as the discriminator: a delta prefill is sub-second, while a full prefill is well above `MinFullPrefillMs` (5s).
+- **NO speed cap** (removed `MaxPlausibleSpeedTokensPerSec`): The `MinFullPrefillMs` duration threshold is the *sole* mechanism for distinguishing full prefills from delta prefills. There is intentionally no speed cap, because capping the speed would mask legitimate fast full prefills (e.g. on next-gen hardware) and hide real diagnostic anomalies. The duration threshold is accurate and future-proof because it's based on the *time* (which is hardware-independent for a full prefill), not the *speed* (which varies with hardware).
+- **`RecordSample`** now: (a) for small prompts (< MinFitTokens), updates `_lastMeasuredSpeed` for display but doesn't fit; (b) for large prompts with `firstByteMs < MinFullPrefillMs` (delta prefills), does nothing; (c) for large prompts with `firstByteMs >= MinFullPrefillMs` (full prefills), updates `_lastMeasuredSpeed` AND fits.
+- **`Refit`** now uses a lower bound only (`Math.Max(_tokensPerSec, 50.0)`) to guard against a degenerate fit, with NO upper bound.
+- **`Load`** now filters out delta-prefill samples (where `firstByteMs < MinFullPrefillMs`) when loading persisted samples, and loads the persisted speed values at their actual value (no cap). If all samples are filtered out (i.e., all were delta prefills), the model resets to the default speed (500 tok/s) so it learns from new full-prefill samples instead of using a polluted/stale value.
+
+**Files changed:** `Services/PrefillPerformanceModel.cs` (MinFullPrefillMs constant, removed MaxPlausibleSpeedTokensPerSec, RecordSample logic, Refit lower-bound-only, Load filter + no-cap + reset).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** (a) Prefill progress bar shows the *actual* full-prefill speed (no clamping). (b) Delta prefills are still rejected (based on duration, not speed). (c) On next-gen hardware, fast full prefills are recorded at their actual speed (not masked by a cap).
+
+## ✅ DONE: Fix RAM-spill prefill estimate — remove 10x RAM penalty, use most recent full-prefill speed (11/1)
+
+**Symptom (user report):** After the previous fix, the RAM-spill prefill estimate became ~1500s @ 687 tok/s, which is ~6x too pessimistic (the actual prefill was ~243s @ ~1016 tok/s). The user noted that the 10x RAM penalty assumption was incorrect for their hardware.
+
+**Root cause:** The RAM-spill estimate assumed RAM is 10x slower than VRAM (`ramSpeed = vramSpeed / 10`), so it estimated the prefill time as the sum of (a) the VRAM-resident part at the VRAM speed, and (b) the RAM overflow at 1/10 the VRAM speed. But on the user's hardware, the RAM-spill prefill speed is roughly the *same* as the VRAM prefill speed (the learned speed already reflects the real hardware behavior, including the RAM-spill effect). So the 10x penalty made the estimate ~6x too pessimistic.
+
+**Fix:**
+- **Remove the 10x RAM penalty** (`MainViewModel.cs`): The RAM-spill estimate now uses the *actual* learned prefill speed for the *total* prompt size (VRAM + RAM), not a 10x-slower RAM speed. The learned speed already reflects the real hardware behavior, including any RAM-spill slowdown.
+- **Use the most recent full-prefill sample's speed** (`LastMeasuredSpeedTokensPerSec`) instead of the fitted speed (`CurrentSpeedTokensPerSec`), because the fitted speed (least-squares over similar points) can be noisy and lower than the actual speed. The most recent sample is the most representative of the current hardware state.
+
+**Files changed:** `ViewModels/MainViewModel.cs` (RAM-spill estimate logic).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** The RAM-spill prefill estimate is now accurate (reflecting the actual hardware speed, not a 10x penalty). For a 247K-token prompt at ~1000 tok/s, the estimate should be ~247s (~4 min), not ~1500s.
+
+## ✅ DONE: Fix misleading "generating" phase — switch to generation at first CONTENT token, not first byte (11/1)
+
+**Symptom (user report):** The "first reply" took ~14.5 min, but the progress bar showed "generating…" for most of that time, which was misleading. The user expected the "generating" phase to be short (the reply was only 80 tokens).
+
+**Root cause (revealed by the `onFirstContentToken` diagnostic):** The log showed:
+- `ttfb: first byte after 30,241 ms` (~30s) — the SSE stream opened (headers / empty data line).
+- `ttfb: first content token after 872,350 ms` (~14.5 min) — the model produced its first real token.
+- `gen stats: 80 tokens at 39.9 tok/s` — the entire reply was only 80 tokens, generated at a normal ~40 tok/s.
+
+This proved the "slow first reply" was **NOT** a generation-speed problem and **NOT** a Cline buffering problem. The model was **stalled for ~14.5 min prefilling** the 164K-token prompt (processing it into the KV cache) before it could generate the first token. The 80-token reply itself only took ~2s to generate. The progress bar was switching to "generating…" at the first *byte* (30s), which is when the SSE stream opens, NOT when the model finishes prefilling. So the user saw "generating…" for the entire ~14.5 min prefill, which is misleading.
+
+**Fix:**
+- **Switch the UI to "generating" at the first CONTENT token, not the first byte** (`FluxMuxGatewayHost.cs`): moved the `ReportPrefillFirstByte` event invocation from the `onUpstreamBytes` callback (first byte) to the `onFirstContentToken` callback (first real content token). Now the UI shows "prefilling context…" for the full prefill duration (~14.5 min), which is accurate, instead of "generating…" for 14.5 min, which is misleading.
+- **Bonus:** The prefill sample (for the performance model) is now recorded at the *true* prefill duration (time until the model starts generating), which is more accurate than the first-byte time.
+
+**Files changed:** `Services/FluxMuxGatewayHost.cs` (moved `ReportPrefillFirstByte` to `onFirstContentToken`).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** (a) On a large-context first reply, the progress bar shows "prefilling context…" for the full prefill duration, then switches to "generating…" only when the first real token arrives. (b) The prefill estimate is now based on the true prefill duration, not the first-byte time.
+
+## ✅ DONE: Fix "5s quiet" false abort (disposed NetworkStream) + implausible prefill tok/s (11/1)
+
+**Symptom (user report):** (1) After redeploying the ping/first-content-token refactor, a "Long-load first-byte hit 5s quiet (the limit is 600)" abort fired within seconds of auto-launch. (2) The prefill progress bar showed an implausible "72764 tok/s" reading.
+
+**Root cause:**
+1. **The "5s quiet" abort was a red herring.** The real failure was `Cannot access a disposed object. Object name: 'System.Net.Sockets.NetworkStream'` — the upstream stream was disposed 5s into the request. The `catch` block formatted this as a hang abort using the hang clock's `CopyStartUtc` (hence "5s quiet"). The disposed stream was caused by my **SSE ping mechanism**: I used `CancellationTokenSource.CancelAfter(5s)` to time out `StreamReader.ReadLineAsync`, but `ReadLineAsync` does NOT support safe cancellation/retry — cancelling it mid-read disposed the underlying `NetworkStream`.
+2. **The "72764 tok/s" was a polluted prefill model.** A warm-cache delta prefill (KV cache already resident, only new tokens processed) can appear to run at absurd effective speeds (e.g., 100K tokens in 1.4s = ~72K tok/s). The old upper clamp was 500000 tok/s, so this polluted sample drove the fitted speed to an implausible value.
+
+**Fix:**
+- **Removed the SSE ping mechanism** (`OpenAiStreamTelemetryProxy.cs`): reverted the `pingInterval` parameter and the cancel-based read timeout. The ping idea was sound but the implementation was broken (`ReadLineAsync` doesn't support safe cancellation).
+- **Capped the prefill speed** (`PrefillPerformanceModel.cs`): added `MaxPlausibleSpeedTokensPerSec = 5000.0`. (a) `RecordSample` now clamps `_lastMeasuredSpeed` and rejects samples that imply a speed above the cap (warm-cache delta prefills). (b) `Refit` now clamps `_tokensPerSec` to `[50, 5000]` instead of `[50, 500000]`. (c) `Load` now drops implausible persisted samples before re-fitting, so a polluted persisted model self-heals on load.
+- **Updated the outlier test** (`PrefillPerformanceModelTests.cs`): the old test used implausible ~190000 tok/s "normal" samples (which the new cap correctly rejects). Updated to realistic ~1000 tok/s normal samples and a ~100 tok/s cold-load outlier.
+
+**Files changed:** `Services/OpenAiStreamTelemetryProxy.cs` (ping removal), `Services/FluxMuxGatewayHost.cs` (ping arg removal), `Services/PrefillPerformanceModel.cs` (speed cap), `FluxMux.Avalonia.Tests/PrefillPerformanceModelTests.cs` (realistic test values).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** (a) Auto-launch no longer fires a "5s quiet" abort from a disposed stream. (b) Prefill progress bar shows a plausible tok/s (≤5000), not "72764 tok/s".
+
+## ✅ DONE: Fix slow "generating" phase — limit concurrent local requests to 1 (11/1)
+
+**Symptom (user report):** The "generating" phase took ~13 min in the dev build, then timed out ("779s quiet"). The backup completed the same chat much faster. Same model/variant, same (or larger) chat, same llama-server launch args.
+
+**Root cause:** The dev build was sending **multiple concurrent requests** to the local model (e.g., a probe + the real request, or retries). The model processed them in parallel, which slowed down each one. The backup sent the real request **once**, so it was faster.
+
+**Fix:**
+- **Added a semaphore to limit concurrent requests to the local model to 1** (`FluxMuxGatewayHost.cs`): added a `SemaphoreSlim` field `_localRequestSemaphore` and wrapped the `HandleChatCompletionsAsync` method body with it. This ensures only one request is processed at a time, so the model can focus on the real request and generate it faster.
+
+**Files changed:** `Services/FluxMuxGatewayHost.cs` (semaphore + method split).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** DEPLOYED (user: close app → `build-fluxmux.bat clean` → restart).
+**Verify (manual):** (a) First turn: cold prefill + generation (~221s for a 45K-token prompt). (b) Subsequent turns: warm KV cache (~3-8s). The "generating" phase no longer takes 13 min.
+
+## ✅ DONE: Reword PREFILL notice to be honest about both phases (11/1)
+
+**Symptom (user report):** The PREFILL notice ("Reading a large conversation (~45.4K tokens). This may take up to ~1 minute before I reply.") implied the *reply* would appear in a minute, when in fact the ~1 minute is only the prefill (reading the conversation into the KV cache) and generation starts *after* that. Log data confirmed: on a large-context turn (95K tokens), prefill was ~30s but generation was ~4.9 min — generation is usually the bigger chunk.
+
+**Root cause:** The notice only estimated the prefill time and said "before I reply," understating the total wait. The notice only fires when the prefill estimate is ≥30s (large context / cold start / RAM-spill), so a two-phase framing is always appropriate when it shows.
+
+**Fix:** Reworded both variants (`MainViewModel.cs` PREFILL notice) to name both phases honestly:
+- **VRAM / large-conversation:** "Prefilling this conversation may take up to ~X minute(s). Generating my reply then takes additional time — often several more minutes for a conversation this size. The model is working, not stuck."
+- **RAM-spill:** "This chat is resuming with a YaRN extended context that has spilled from VRAM into RAM (~Y tokens in RAM), so prefilling is slower — it may take up to ~X minute(s). Generating my reply then takes additional time. This is normal for large YaRN chats — the model is working, not stuck."
+
+**Files changed:** `ViewModels/MainViewModel.cs` (PREFILL notice text).
+
+**Build:** 0 errors. **Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart).
+
+## ✅ DONE: Fix probe-request prefill notice + extend long-load stall deadline (11/1)
+
+**Symptom (user report):** (1) The "PREFILL Reading a large conversation (~59 tokens)" line appeared at launch time, before the model was ready, with the wrong token count (59 = the launch probe, not the real ~270K conversation). (2) The "899s quiet" hang abort still fired on a large RAM-spilled chat.
+
+**Root cause:**
+1. `ReportPrefillStarted` fired for **probe requests** (the launch "Reply with the single word ready." check), which are tiny ~59-token requests, not the user's real message. This showed a misleading "Reading a large conversation (~59 tokens)" line at launch time. **The deeper root cause:** `SendChatProbeAsync` did NOT set the `X-FluxMux-Probe-Request` header, so the gateway's `isProbeRequest` check was never true for the launch probe — the probe was treated as a real user request.
+2. The long-load stall deadline was set to 600s (same as the first-byte deadline), but a large RAM-spill prefill can go quiet for ~869s after the first byte (the model is working in RAM, not stuck). The 600s stall deadline was still too short.
+
+**Fix:**
+- **Set the probe header on the launch probe** (`FluxMuxRuntimeService.cs` `SendChatProbeAsync`): added `request.Headers.TryAddWithoutValidation(CloudEndpointValidationProbe.ProbeRequestHeader, "true")` so the gateway recognizes the launch probe as a probe request.
+- **Guard `ReportPrefillStarted` against probe requests** (`FluxMuxGatewayHost.cs`): added `if (!isProbeRequest)` around both `ReportPrefillStarted` calls (stream + non-stream paths). With the header now set, probe requests no longer trigger the prefill notice, so the "Reading a large conversation" line only appears for the user's real message.
+- **Extend long-load stall deadline to 1800s** (`FluxMuxGatewayHost.cs`): for long-load/YaRN profiles, the stall deadline is now 1800s (30 min) instead of 600s, to accommodate the very long RAM-spill prefills where the model goes quiet for many minutes after the first byte. The first-byte deadline stays at 600s (for the "model is still loading" case).
+
+**Files changed:** `Services/FluxMuxGatewayHost.cs` (probe guard + stall deadline), `Services/FluxMuxRuntimeService.cs` (probe header).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed. User must: close app → `build-fluxmux.bat clean` → restart.
+**Verify (manual):** (a) Launch a YaRN profile → no "Reading a large conversation (~59 tokens)" line at launch time; the line only appears when the user sends a real message. (b) Resume a large RAM-spilled chat → no false-positive "899s quiet" abort; the turn completes.
+
+## ✅ DONE: RAM-spill prefill estimate + honest "ready" telemetry (11/1)
+
+**Symptom (user report):** (1) No user-facing warning when a many-minute RAM-spill prefill is expected; the "warming up" line said "a minute or two" but the actual prefill took ~20 min. (2) Misleading "ready" telemetry — the launch reported "ready" + "Port replied in 362 ms" but the conversation hadn't been read; the user's first message triggered many more minutes of prefill.
+
+**Root cause:** The prefill estimate used the VRAM-speed model (fast) even for RAM-spill prefills (slow). The "ready" status implied the conversation was read, when in fact it's read on the first message.
+
+**Fix:**
+- **RAM-spill detection + sensible estimate** (`MainViewModel.cs` `PrefillStartedNotice` handler): detect when the prompt exceeds `local_vram_context` on a YaRN profile (RAM-spill). Use the user's **actual** prefill speed (learned from real samples on their hardware via `PrefillPerformanceModel.CurrentSpeedTokensPerSec`), scaled down 10x for RAM (RAM is ~10x slower than VRAM for a 27B model). If no samples exist yet, fall back to the default (500 tokens/sec VRAM → 50 tokens/sec RAM). Floor at 60s, cap at 30 min.
+- **Large VRAM prefill estimate** (same handler): for non-RAM-spill prefills over 32K tokens, apply a conservative multiplier (1.5x for >32K, 2x for >64K) to the learned estimate, because prefill speed can drop as the context grows (KV cache pressure, attention over a long sequence). Floor at 30s for large prompts. This makes the estimate honest for **any** large prefill, not just RAM-spill.
+- **Honest "warming up" message** (same handler): the terminal line now explains the estimate for **any** large prefill (RAM-spill or VRAM), not just "a minute or two." E.g., "Reading a large conversation (~50K tokens). This may take up to ~2 minutes before I reply. The model is working, not stuck — please be patient."
+- **Honest "ready" telemetry** (`MainViewModel.cs` `ApplyLocalPublicEndpointSuccess`): for YaRN profiles, the "ready" message now explicitly says the conversation has NOT been read yet and that the first message can trigger a many-minute RAM-spill prefill.
+
+**Files changed:** `ViewModels/MainViewModel.cs` (prefill handler + ready message).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed. User must: close app → `build-fluxmux.bat clean` → restart.
+**Verify (manual):** Resume a large RAM-spilled chat on a YaRN profile → the "warming up" line should explain the RAM-spill and give a real estimate; the "ready" message should say the conversation hasn't been read yet.
+
+## ✅ DONE: Long-load stall deadline too short → false-positive hang abort (11/1)
+
+**Symptom (user report):** Resuming a large RAM-spilled chat on a YaRN profile failed with "Long-load first-byte hit 899s quiet (the limit is 600)." The model was actually working (next turn completed in ~5.8 min), but the hang-watch aborted the turn after ~899s of quiet.
+
+**Root cause:** The hang-watch's **stall** path (fires when the stream goes quiet AFTER the first byte) used the default `StallSeconds` (45s) even for long-load/YaRN profiles. On a RAM-spill prefill, the model produces a first byte (~30s in) then goes quiet for minutes while it works in RAM. The 45s stall deadline + 90s wait-longer cycles fired repeatedly, and the total quiet time reached ~899s before the turn was aborted. The "limit 600" in the message is the `FirstByteDeadline`, but the actual trigger was the stall path (misleading label).
+
+**Fix:** For long-load profiles, set `StallDeadline = FirstByteDeadline` (600s+) so the stall path only fires if the model is **genuinely stuck** (no progress for 600s+), not just working slowly in RAM-spill. Also preserve the long stall deadline across `ResetForWaitLonger` cycles (which would otherwise reset it to 90s).
+
+**Files changed:** `Services/FluxMuxGatewayHost.cs` (hang-clock setup + `WatchLocalStreamHangAsync` loop).
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed. User must: close app → `build-fluxmux.bat clean` → restart.
+**Verify (manual):** Resume a large RAM-spilled chat on a YaRN profile → the turn should complete (no false-positive abort at ~899s). Check `Proxy_Cloud_Handshake.log` for "hang clock: long-load profile, FirstByteDeadline=600s, StallDeadline=600s".
+
+## ✅ DONE: Survive impatient Launch/retry mashing + no false green (11/1)
+
+**Symptom (user report):** On the dev build, auto-load "timed out" and manually launching another profile "kept generating errors." Deeper: the launching profile panel stayed yellow, never reached green; clicking Launch again made it green but then "nothing progresses — the chat does not move." User mashes retry + Launch when things look stalled. **Hard requirement: chat continuity must be preserved when swapping models; NO false assurance (green) if the model is not actually launched.**
+
+**Root cause (three desynced states, nothing reconciling them):**
+1. **502 storm** — `FluxMuxGatewayHost._activeHandlerCts` was a single shared CTS cancelled on every launch supersede and **never reset**. Every subsequent local request inherited a dead token → immediate 502. Mashing Launch/retry kept re-triggering it. (Confirmed in `Proxy_Cloud_Handshake.log`: 7× "handler cancelled before response: sending 502" / "upstream request aborted" pairs.)
+2. **Optimistic green** — `MainViewModel.RunLocalRouteAsync` early-return path set `LocalRouteIndicatorState = Live` from `IsManagedLocalProfileLive` (process alive) with **no probe** → green even when the gateway couldn't route to it.
+3. **Stale gateway routing state** — the early-return path never rewrote `local_port`/`local_preferred_model` in `Proxy_Runtime_State.json`, so the gateway could keep routing to a stale target → "chat does not move."
+
+**Fix (4 changes + instrumentation):**
+- **Fix 3a — generation-based one-shot supersede** (`FluxMuxGatewayHost.cs`): replaced the persistent shared `_activeHandlerCts` with a monotonically increasing `_launchSupersedeGeneration` counter. `CancelInFlightHandlers()` now just bumps the generation. Each handler captures the generation at request-start (`startSupersedeGeneration`) and only honors a supersede if the generation advanced **after** it started (`WasSupersededAfterStart`). A request that starts after the last supersede (talking to the new model) is NOT cancelled → "next message just works." Updated the two 503-retry-loop checks + the "before response" 502 site. Reworded the 502 to "Your conversation is intact — send your next message and it will run on the new model."
+- **Fix 3b — idempotent same-profile Launch** (`FluxMuxRuntimeService.cs`): `SupersedeInProgressLocalLaunch(callerToken, model, variant)` now returns the EXISTING launch CTS (no cancel, no gateway signal) when the same model+variant is already in progress. Only a genuine profile CHANGE supersedes. Added `_inProgressLocalLaunchModel`/`_inProgressLocalLaunchVariant` fields (guarded by `_localLaunchLock`), cleared in `ClearInProgressLocalLaunch` + `CancelInProgressLocalLaunch`.
+- **Fix 1 — no false green** (`MainViewModel.cs` early-return path): replaced the optimistic `Live` with a real `TimeShortLocalReplyThroughPublicEndpointAsync` probe. Green only on probe success (via `ApplyLocalPublicEndpointSuccess`); otherwise stays Amber with "still verifying — do not assume it is ready."
+- **Fix 2 — reconcile routing state** (`MainViewModel.cs` + new `FluxMuxRuntimeService.ReconcileLocalRouteState`): the early-return path now writes `local_port`/`local_preferred_model` so the gateway routes to the model that's actually up.
+- **Instrumentation:** launch-monitor + handshake log lines now record the supersede generation transitions (`gen X -> Y`) so the next occurrence is self-explaining.
+
+**Files changed:** `Services/FluxMuxGatewayHost.cs`, `Services/FluxMuxRuntimeService.cs`, `ViewModels/MainViewModel.cs`, new `FluxMux.Avalonia.Tests/LaunchSupersedeGenerationTests.cs` (5 tests).
+
+**Build:** 0 errors (main + test). **Tests:** 1738/1738 pass (1733 prior + 5 new).
+**Deploy:** NOT deployed. User must: close app → `build-fluxmux.bat clean` → restart.
+**Verify (manual):** (a) mash Launch on the same loading profile → no restart, no 502 storm, countdown keeps ticking; (b) swap to a different profile mid-chat → one clean 502 for the in-flight turn, next message works on the new model; (c) re-click a live profile → green only after a real probe, else amber "still verifying"; (d) check `launch_monitor.log` for "same-profile re-launch ... attaching" and "launch supersede signalled (generation=...)".
+
 ## 🏗️ CROSS-PLATFORM SEAMS (multi-phase) — Phase 1 DONE (10/31)
 
 **Goal (from user):** Make it easy for others to port AI-FluxMux to Linux/macOS, while keeping the Windows build the source of truth so new innovations reach all platforms (no divergent forks). The strategy is to define a small, stable set of platform-agnostic interfaces (the "seams") so a community member implements 5 small contracts in a `Services/<Platform>/` folder instead forking the 9K-line runtime service.
