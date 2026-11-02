@@ -101,10 +101,11 @@ public sealed class UpdaterForm : Form
         // and detail label scale with the system DPI/font instead of using a static
         // pixel value. ~28 typical characters at the title size gives a comfortable
         // width that grows on high-DPI / large-font displays.
+        // Cap the width at 480px to prevent the progress bar from being too wide
+        // for the dialog on high-DPI or large-font displays.
         var titleFont = new Font("Segoe UI", 12F, FontStyle.Bold);
-        var contentWidth = Math.Max(
-            320,
-            TextRenderer.MeasureText("Updating llama-server", titleFont).Width + 80);
+        var measuredWidth = TextRenderer.MeasureText("Updating llama-server", titleFont).Width + 80;
+        var contentWidth = Math.Max(320, Math.Min(480, measuredWidth));
         titleFont.Dispose();
 
         // DPI-aware vertical spacing: derive the gap between the content block and the
@@ -113,15 +114,19 @@ public sealed class UpdaterForm : Form
         // the status/detail text above it on high-DPI or large-font displays.
         var uiFont = SystemFonts.MessageBoxFont ?? new Font("Segoe UI", 9F);
         var gap = Math.Max(12, (int)Math.Round(uiFont.Height * 0.75f));
-        var sidePad = Math.Max(16, (int)Math.Round(uiFont.Height * 0.6f));
+        var sidePad = Math.Max(24, (int)Math.Round(uiFont.Height * 0.8f));
         var topPad = Math.Max(16, (int)Math.Round(uiFont.Height * 0.6f));
         var bottomPad = Math.Max(12, (int)Math.Round(uiFont.Height * 0.5f));
         uiFont.Dispose();
 
         _progressBar.Width = contentWidth;
+        _progressBar.Anchor = AnchorStyles.None;
         _titleLabel.MaximumSize = new Size(contentWidth, 0);
+        _titleLabel.Anchor = AnchorStyles.None;
         _statusLabel.MaximumSize = new Size(contentWidth, 0);
+        _statusLabel.Anchor = AnchorStyles.None;
         _detailLabel.MaximumSize = new Size(contentWidth, 0);
+        _detailLabel.Anchor = AnchorStyles.None;
 
         // Stack content top-to-bottom. A FlowLayoutPanel (TopDown) sizes itself to
         // its widest child and stacks the rest, which avoids the width-collapse
@@ -146,6 +151,23 @@ public sealed class UpdaterForm : Form
         content.Controls.Add(_progressBar);
         content.Controls.Add(_progressLabel);
         content.Controls.Add(_detailLabel);
+        
+        // Center the content controls horizontally within the panel.
+        content.Layout += (s, e) =>
+        {
+            var panelWidth = content.ClientSize.Width;
+            foreach (Control control in content.Controls)
+            {
+                if (control is Label label)
+                {
+                    label.Left = Math.Max(0, (panelWidth - label.Width) / 2);
+                }
+                else if (control is ProgressBar progressBar)
+                {
+                    progressBar.Left = Math.Max(0, (panelWidth - progressBar.Width) / 2);
+                }
+            }
+        };
 
         // Center the action button horizontally in the button panel instead of
         // right-aligning it. The button is repositioned on layout so it stays

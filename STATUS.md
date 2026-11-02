@@ -2,7 +2,194 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
-## ✅ DONE: Remove misleading "several minutes" launch warning — countdown tells the story (11/1)
+## ✅ DONE: Fix update dialog progress bar width + centering (11/2)
+
+**Symptom (user report):** The llama-server, harness, and FluxMux update dialogs have progress bars that are too wide for the dialogs they sit in, and the bars are not centered within the dialog windows.
+
+**Root cause:** 
+1. The progress bar width was calculated from the title font size without a maximum cap, causing it to be too wide on high-DPI or large-font displays.
+2. The progress bar and labels were left-aligned by default, not centered within the dialog.
+
+**Fix:**
+1. Added a maximum width cap of 480px to the progress bar in `UpdaterForm.cs`
+2. The width is now calculated as `Math.Max(320, Math.Min(480, measuredWidth))` to ensure it's at least 320px but no more than 480px
+3. Added a layout handler to center the progress bar and labels horizontally within the dialog
+4. Increased the side padding from a minimum of 16px to 24px to provide more margin between the progress bar and the dialog edges
+
+**Files changed:** `FluxMux.Updates/UpdaterForm.cs` (added width cap + centering)
+
+**Build:** 0 errors. **Tests:** N/A (UI change, no unit tests)
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** The update dialogs now have progress bars that fit within the dialog width and are centered.
+
+**Symptom (user report):** The llama-server, harness, and FluxMux update dialogs have progress bars that are too wide for the dialogs they sit in.
+
+**Root cause:** The progress bar width was calculated from the title font size without a maximum cap, causing it to be too wide on high-DPI or large-font displays.
+
+**Fix:**
+- Added a maximum width cap of 480px to the progress bar in `UpdaterForm.cs`
+- The width is now calculated as `Math.Max(320, Math.Min(480, measuredWidth))` to ensure it's at least 320px but no more than 480px
+
+**Files changed:** `FluxMux.Updates/UpdaterForm.cs` (added width cap)
+
+**Build:** 0 errors. **Tests:** N/A (UI change, no unit tests)
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** The update dialogs now have progress bars that fit within the dialog width.
+
+---
+## 📋 CONSOLIDATED TASK LIST (verified 11/1)
+
+### 🏗️ HIGH PRIORITY
+
+#### 1. Cross-Platform Modularisation (Phase 2)
+**Status:** Still open — Phase 1 is done (interfaces defined), Phase 2 (Windows adapters) not started
+**User benefit:** High — enables community contributions for Linux/macOS support. No immediate user-facing change, but makes the app portable to other platforms.
+**Effort:** High (complex refactor, must maintain identical behavior)
+
+**Tasks:**
+1. Write thin Windows adapters in `Services/Windows/`: `WindowsGpuPreferenceService`, `WindowsDisplayTopologyService`, `WindowsProcessManager`, `WindowsUpdateService`, `WindowsCrashLogger`
+2. Update `PlatformServiceFactory` to return the Windows adapters (gated on `OperatingSystem.IsWindows()`)
+3. Update call sites in `MainViewModel` / `FluxMuxRuntimeService` / `App` to use the factory (with null-fallback)
+4. **Behavior must remain identical** — pure refactor (wrap, don''t change)
+
+**Guardrail:** Do this incrementally (one seam at a time) and only when the launch/telemetry work has settled.
+
+**Phase 3 (LATER, community):** A contributor implements the 5 interfaces in `Services/Linux/` or `Services/MacOS/` and registers them in the factory.
+
+#### 2. Test YaRN RAM-Spill End-to-End with Real Model — **LARGELY VERIFIED**
+**Status:** **LARGELY VERIFIED** — core functionality confirmed by real usage (YaRN sessions approaching 393K tokens)
+**User benefit:** High — verifies critical feature works. Users who rely on YaRN would have confidence that it's working correctly.
+**Effort:** Low (targeted testing only if issues arise)
+
+**What's already verified (by real usage):**
+- ✅ YaRN extends context beyond VRAM limit
+- ✅ KV cache spills to RAM
+- ✅ Conversation continues working after spill
+- ✅ Prefill works with large contexts
+- ✅ Generation works with large contexts
+
+**Remaining verification (only if issues arise):**
+- **Boundary conditions** — test exactly at the VRAM limit and just over
+- **Failure modes** — test OOM, slow spill, interrupted spill
+- **Performance validation** — confirm spill speed matches estimates
+
+**Recommendation:** Mark as **LARGELY VERIFIED** and only do targeted testing if you hit a specific issue. Exhaustive testing takes more time than available; focus on real-world usage and targeted debugging when problems occur.
+
+
+---
+
+### 🟡 MEDIUM PRIORITY
+
+#### 3. Flexible Model-Profile Migration for Running Chats
+**Status:** Still open — no in-place profile migration found; switching profiles mid-chat requires restart
+**User benefit:** Medium — users who switch profiles mid-chat would get immediate effect instead of needing to restart. This is a workflow improvement.
+**Effort:** High (complex refactor)
+
+**Tasks:**
+- When profile changes, update the gateway''s active context limit, compact thresholds, and YaRN settings in-place
+- The conversation history stays; only the "how much context is available" and "when to compact" parameters change
+- **Key files:** `Services/FluxMuxGatewayHost.cs` (profile switching), `Services/FluxMuxGatewayRouting.cs` (routing decisions), `ViewModels/MainViewModel.cs` (profile selection UI)
+
+#### 4. Cline Context Display in UI
+**Status:** Still open — no Cline context display found in UI
+**User benefit:** Medium — users who use Cline would be able to see context usage in the Diagnostics panel instead of relying on external tools.
+**Effort:** Medium
+
+**Tasks:**
+- Read context usage from the gateway state and display it in the Diagnostics panel
+- **Key files:** `ViewModels/MainViewModel.cs` (Diagnostics panel), `Services/FluxMuxGatewayHost.cs` (context usage tracking)
+
+---
+
+### 🟢 LOW PRIORITY
+
+#### 5. Stress Test Issues
+**Status:** Still open — no countdown feature found in stress test code; TTFT fluctuation mitigation not implemented
+**User benefit:** Low — stress test is a diagnostic tool, not a core feature. Users who run stress tests would get more reliable results.
+**Effort:** Medium
+
+**Tasks:**
+- Investigate whether the 8-sample window is being populated correctly, or whether the "historical slowest" fallback is masking the real issue
+- Options for TTFT fluctuation: (a) stop fill early if a background chat is active, (b) suspend chat + clear context before test begins
+- **Key files:** `Services/ContextFillStressProbe.cs`, `ViewModels/TelemetryGraphViewModel.cs`
+- **Tests:** `FluxMux.Avalonia.Tests/ContextFillStressProbeTests.cs`
+
+#### 6. YaRN Context in Terminal Output + Endpoint Metrics
+**Status:** Still open — no YaRN context in terminal output found
+**User benefit:** Low — users who check terminal output or endpoint metrics would see the YaRN-extended context limit. This is a diagnostic improvement.
+**Effort:** Low
+
+**Tasks:**
+- Update terminal output to show the YaRN-extended context limit when YaRN is active
+- Update endpoint metrics to reflect the YaRN-extended context limit
+- **Key files:** `Services/FluxMuxGatewayHost.cs` (terminal output), `Services/FluxMuxRuntimeService.cs` (endpoint metrics)
+
+#### 7. Reconcile Port-Rules vs Per-Profile Compact Terminology
+**Status:** Still open — "Port rules" terminology still in UI
+**User benefit:** Low — this is a terminology/clarity issue. Users who are confused by "port-rules" would benefit, but it doesn''t affect functionality.
+**Effort:** Low
+
+**Tasks:**
+- Rename "Port-rules compaction" to something user-facing like "Global context compaction defaults"
+- Ensure per-profile settings clearly override the global ones
+- **Key files:** `ViewModels/MainViewModel.cs` (settings UI), `Services/FluxMuxGatewayRouting.cs` (compact logic)
+
+---
+
+### ⚪ NO USER BENEFIT (code maintenance / deferred)
+
+#### 8. God-File Split
+**Status:** Still open — `MainWindow.axaml` (408KB) and `MainViewModel.cs` (1MB) are very large
+**User benefit:** None — this is a code-maintenance task with no user-facing impact.
+**Effort:** High
+
+**Tasks:** See `AGENTS.md` for the pattern. Do this only after behaviour settles.
+
+#### 9. Quick Commissioning Mode
+**Status:** Still open — not in UI
+**User benefit:** Low — this is a deferred feature that would help new users auto-qualify their setup. Only relevant if there''s a clear product need.
+**Effort:** High
+
+**Tasks:** See `COMMISSIONING_MODE_SPEC.md` for details.
+
+---
+
+### ✅ ALREADY FIXED (no longer open)
+
+- **Model-Statistics Info Text to Reflect YaRN**: Already fixed (shows `ctx 393,216 (YaRN)`)
+- **Deferred Specs (tool-call heal)**: Already implemented (`LocalToolCallHealing.cs` exists and is used)
+- **Release Doc Follow-Up 0.2.2-Beta**: Already up to date (README shows 0.3.3 beta with all features)
+- **Issue A — Graph axes auto-extend**: FIXED (auto-extend logic in `TelemetryGraphViewModel.cs`)
+- **Issue B — Context-clear retry + bogus port error**: FIXED (simple single-shot POST, no retry loop)
+- **Issue C — Auto-load last-launched**: FIXED and deployed
+- **YaRN hang: don''t park on first-byte**: FIXED (explicitly skips parking for long-load/YaRN)
+- **YaRN hang: misleading label**: FIXED (uses proper long-load context)
+- **YaRN hang: auto-wait-longer**: FIXED (restores long stall deadline for long-load profiles)
+- **BRIEFING item 1 — YaRN context limit → gateway `local_context`**: **NOT A REAL PROBLEM** (the profile config already has the correct `OverrideContext` value: 393K for YaRN profiles, 262K for non-YaRN profiles)
+
+---
+
+### 📊 RECOMMENDED PRIORITY ORDER
+
+| Priority | Task | User Benefit | Effort |
+|----------|------|--------------|--------|
+| **HIGH** | Test YaRN RAM-Spill End-to-End | High — verifies critical feature works | Low (manual test) |
+| **HIGH** | Cross-Platform Phase 2 | High — enables Linux/macOS port | High |
+| **MEDIUM** | Flexible Model-Profile Migration | Medium — workflow improvement | High |
+| **MEDIUM** | Cline Context Display in UI | Medium — improves Cline user experience | Medium |
+| **LOW** | Stress Test Issues | Low — diagnostic tool only | Medium |
+| **LOW** | YaRN Context in Terminal | Low — diagnostic improvement | Low |
+| **LOW** | Port-Rules Terminology | Low — clarity issue | Low |
+| **NONE** | God-File Split | None — code maintenance | High |
+| **NONE** | Quick Commissioning Mode | Low — deferred feature | High |
+
+**Recommendation:** 
+1. **Test YaRN RAM-Spill** (high benefit, low effort) — verify critical feature works
+2. **Cross-Platform Phase 2** (high benefit, high effort) — enable Linux/macOS port
+3. **Flexible Model-Profile Migration** (medium benefit, high effort) — if users are switching profiles mid-chat
+
+---
+## ✅ DONE: Remove misleading "several minutes" launch warning — countdown tells the story (11/1)## ✅ DONE: Remove misleading "several minutes" launch warning — countdown tells the story (11/1)
 
 **Symptom (user report):** The launch message said "the first (cold) load can take several minutes while the model weights are read from disk into GPU+RAM," but the actual model load takes ~20-30 seconds on the user's hardware (confirmed by launch telemetry: `ready total=20226 ms` and `ready total=26686 ms`). The "several minutes" wording was inaccurate and redundant (the countdown monitor already shows live elapsed time + estimate).
 
@@ -1221,3 +1408,8 @@ Two files are fully Windows-only (`[SupportedOSPlatform("windows")]`):
 **State:** COMPILED & TESTED — 0 build errors, 1728/1728 tests pass.
 
 **Deploy:** Close the running app → `build-fluxmux.bat clean` → restart.
+
+
+
+
+
