@@ -31,9 +31,7 @@ This means:
 - `Services/FluxMuxRuntimeService.cs` — added `ThinkingStartedNotice` event; wired `ReportThinkingStarted` to it.
 - `ViewModels/MainViewModel.cs` — added `ThinkingStartedNotice` handler that switches "Prefilling…" → "Thinking…".
 
-**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
-
-**Verify (manual):** Trigger a turn on a thinking model (Qwen YaRN). The display should show "Prefilling…" → "Thinking…" (when the first thinking token arrives) → "Generating…" (when the first visible content token arrives).
+**Build:** 0 errors. **Deploy:** ✅ DEPLOYED & VERIFIED 11/6 5:19:38am (DLL rebuilt after 4:59am source edits; all symbols present in running DLL: `ReportThinkingStarted`, `ThinkingStartedNotice`, `onFirstReasoningToken`, `onFirstContentToken`).
 
 ## ✅ DONE: Prefill bar rewind + hang dialog never appearing for slow-but-healthy prefills (11/6)
 
@@ -56,7 +54,7 @@ This means:
 - `Services/FluxMuxGatewayHost.cs` — `onFirstContentToken` now calls `hangClock?.NoteContentToken()`; the watchdog's prefill-window check now runs before the `ShouldAbort` gate and applies until the first content token (not just until the first byte).
 - `ViewModels/MainViewModel.cs` — added `_prefillMaxProgress` running-max clamp so the prefill bar never visibly rewinds; reset at prefill start.
 
-**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+**Build:** 0 errors. **Deploy:** ✅ DEPLOYED & VERIFIED 11/6 5:19:38am (DLL rebuilt after 4:59am source edits; all symbols present in running DLL: `GotContentToken`, `NoteContentToken`, `_prefillMaxProgress`).
 
 **Verify (manual):**
 - Bar: trigger a prefill that outlasts its estimate → the bar should creep toward 100% without snapping backwards.
