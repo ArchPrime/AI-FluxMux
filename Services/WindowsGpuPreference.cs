@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.Versioning;
 using System.Text;
@@ -275,30 +276,325 @@ public static class WindowsGpuPreference
             return false;
         }
 
-        using var key = Registry.CurrentUser.CreateSubKey(RegistrySubKey, writable: true)
-            ?? throw new InvalidOperationException("Could not open the GPU preference registry key.");
-
-        // Check if the app exists in the registry.
-        var currentValue = key.GetValue(appName) as string;
-        if (string.IsNullOrEmpty(currentValue))
-        {
-            return false;
-        }
-
         // Don't allow changing the affinity for pinned apps (e.g., llama-server).
         if (IsPinnedName(appName))
         {
             return false;
         }
 
-        var target = FormatPreference(preference);
-        if (!string.Equals(currentValue, target, StringComparison.Ordinal))
+        // The registry key is the full executable path (e.g. "C:\Program Files\...\Archicad.exe"),
+        // not just the process name. If we're given a bare process name, resolve the full path
+        // from the running process.
+        var registryKey = ResolveRegistryKey(appName);
+        if (string.IsNullOrWhiteSpace(registryKey))
         {
-            key.SetValue(appName, target, RegistryValueKind.String);
+            return false;
+        }
+
+        using var key = Registry.CurrentUser.CreateSubKey(RegistrySubKey, writable: true)
+            ?? throw new InvalidOperationException("Could not open the GPU preference registry key.");
+
+        var target = FormatPreference(preference);
+        var currentValue = key.GetValue(registryKey) as string;
+
+        // If the value is already the target, the app is already on the desired GPU.
+        // Treat this as success (no change needed) so the UI shows the correct state
+        // and offers the restart (to apply the affinity to the running process).
+        if (string.Equals(currentValue, target, StringComparison.Ordinal))
+        {
             return true;
         }
 
-        return false;
+        key.SetValue(registryKey, target, RegistryValueKind.String);
+        return true;
+    }
+
+    /// <summary>
+    /// Resolves the registry key name for an app. Windows stores GPU affinity under the
+    /// full executable path (e.g. "C:\Program Files\Graphisoft\Archicad 29\Archicad.exe"),
+    /// not the bare process name. If <paramref name="appName"/> is already a full path,
+    /// return it as-is. Otherwise, look up the running process with that name and return
+    /// its MainModule file name. Returns null if no match is found.
+    /// </summary>
+    private static string? ResolveRegistryKey(string appName)
+    {
+        // If it already looks like a full path (contains a directory separator and ends with .exe),
+        // use it directly.
+        if (appName.Contains('\\') && appName.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return appName;
+        }
+
+        // Otherwise, try to find a running process with this name and get its full path.
+        try
+        {
+            var processes = Process.GetProcessesByName(appName);
+            foreach (var proc in processes)
+            {
+                try
+                {
+                    var path = proc.MainModule?.FileName;
+                    if (!string.IsNullOrWhiteSpace(path))
+                    {
+                        return path;
+                    }
+                }
+                catch
+                {
+                    // Access to MainModule can fail for elevated/system processes; skip.
+                }
+                finally
+                {
+                    proc.Dispose();
+                }
+            }
+        }
+        catch
+        {
+            // GetProcessesByName can throw if the process name is invalid; ignore.
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Restarts a running app by process name so a GPU-affinity change takes effect immediately.
+    /// Finds all running instances with the given (bare) process name, records the first one's
+    /// executable path and working directory, kills them all, then relaunches a single instance.
+    /// Returns true if the app was successfully restarted, false otherwise (e.g. no running
+    /// instance found, or the relaunch failed).
+    /// </summary>
+    public static bool RestartAppByName(string appName)
+    {
+        if (string.IsNullOrWhiteSpace(appName))
+        {
+            System.Diagnostics.Debug.WriteLine($"[RestartApp] No app name provided");
+            return false;
+        }
+
+        System.Diagnostics.Debug.WriteLine($"[RestartApp] Restarting '{appName}'...");
+
+        Process? template = null;
+        string? exePath = null;
+        string? workingDir = null;
+        var toKill = new List<Process>();
+
+        try
+        {
+            var processes = Process.GetProcessesByName(appName);
+            foreach (var proc in processes)
+            {
+                try
+                {
+                    if (template is null)
+                    {
+                        template = proc;
+                        exePath = proc.MainModule?.FileName;
+                        workingDir = exePath is null ? null : Path.GetDirectoryName(exePath);
+                    }
+                    toKill.Add(proc);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[RestartApp] MainModule access failed for {appName}: {ex.Message}");
+                    toKill.Add(proc);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RestartApp] GetProcessesByName failed for '{appName}': {ex.Message}");
+            return false;
+        }
+
+        System.Diagnostics.Debug.WriteLine($"[RestartApp] Found {toKill.Count} instance(s) of '{appName}', exePath={exePath}");
+
+        if (toKill.Count == 0 || string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
+        {
+            System.Diagnostics.Debug.WriteLine($"[RestartApp] Cannot restart: no instances or exe not found (exePath={exePath})");
+            foreach (var p in toKill)
+            {
+                try { p.Dispose(); } catch { }
+            }
+            return false;
+        }
+
+        // Kill all running instances. Heavy apps (e.g. ArchiCAD) can take longer than a few
+        // seconds to shut down, so use a generous timeout and verify the process actually
+        // exited before relaunching.
+        var allExited = true;
+        foreach (var proc in toKill)
+        {
+            try
+            {
+                if (!proc.HasExited)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[RestartApp] Killing PID {proc.Id} ({proc.ProcessName})...");
+                    proc.Kill(entireProcessTree: true);
+                    // Wait up to 15 seconds for the process to exit.
+                    var exited = proc.WaitForExit(15000);
+                    System.Diagnostics.Debug.WriteLine($"[RestartApp] PID {proc.Id} exited={exited}");
+                    if (!exited)
+                    {
+                        allExited = false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RestartApp] Kill failed for PID {proc.Id}: {ex.Message}");
+                allExited = false;
+            }
+            finally
+            {
+                try { proc.Dispose(); } catch { }
+            }
+        }
+
+        // If the process didn't fully exit, don't relaunch (would create a duplicate).
+        if (!allExited)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RestartApp] Not all processes exited; skipping relaunch");
+            return false;
+        }
+
+        // Relaunch a single instance.
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = exePath,
+                WorkingDirectory = string.IsNullOrWhiteSpace(workingDir) ? Path.GetDirectoryName(exePath) ?? string.Empty : workingDir,
+                UseShellExecute = true,
+            };
+            System.Diagnostics.Debug.WriteLine($"[RestartApp] Relaunching {exePath}...");
+            Process.Start(startInfo);
+            System.Diagnostics.Debug.WriteLine($"[RestartApp] Relaunch succeeded");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RestartApp] Relaunch failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Restarts a specific running app by its full executable path (e.g.
+    /// "C:\Program Files\Graphisoft\Archicad 30\node.exe"). Unlike
+    /// <see cref="RestartAppByName"/>, which restarts ALL processes with the given name,
+    /// this method only restarts the process(es) whose executable path matches exactly.
+    /// This is important for apps like the ArchiCAD MCP server, which runs as node.exe —
+    /// restarting by name would kill every node.exe on the system, not just the ArchiCAD one.
+    /// Returns true if the app was successfully restarted, false otherwise.
+    /// </summary>
+    public static bool RestartAppByPath(string fullPath)
+    {
+        if (string.IsNullOrWhiteSpace(fullPath))
+        {
+            System.Diagnostics.Debug.WriteLine("[RestartAppByPath] No full path provided");
+            return false;
+        }
+
+        System.Diagnostics.Debug.WriteLine($"[RestartAppByPath] Restarting '{fullPath}'...");
+
+        string? exePath = null;
+        string? workingDir = null;
+        var toKill = new List<Process>();
+
+        try
+        {
+            foreach (var proc in Process.GetProcesses())
+            {
+                try
+                {
+                    var path = proc.MainModule?.FileName;
+                    if (string.Equals(path, fullPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (exePath is null)
+                        {
+                            exePath = path;
+                            workingDir = Path.GetDirectoryName(path);
+                        }
+                        toKill.Add(proc);
+                    }
+                }
+                catch
+                {
+                    // Access to MainModule can fail for elevated/system processes; skip.
+                }
+                finally
+                {
+                    // Don't dispose here — we need the process objects to kill them.
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RestartAppByPath] GetProcesses failed: {ex.Message}");
+            return false;
+        }
+
+        if (toKill.Count == 0)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RestartAppByPath] No running process found for '{fullPath}'");
+            return false;
+        }
+
+        // Kill all matching processes.
+        var allExited = true;
+        foreach (var proc in toKill)
+        {
+            try
+            {
+                if (!proc.HasExited)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[RestartAppByPath] Killing PID {proc.Id} ({proc.ProcessName})...");
+                    proc.Kill(entireProcessTree: true);
+                    var exited = proc.WaitForExit(15000);
+                    System.Diagnostics.Debug.WriteLine($"[RestartAppByPath] PID {proc.Id} exited={exited}");
+                    if (!exited)
+                    {
+                        allExited = false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RestartAppByPath] Kill failed for PID {proc.Id}: {ex.Message}");
+                allExited = false;
+            }
+            finally
+            {
+                try { proc.Dispose(); } catch { }
+            }
+        }
+
+        if (!allExited)
+        {
+            System.Diagnostics.Debug.WriteLine("[RestartAppByPath] Not all processes exited; skipping relaunch");
+            return false;
+        }
+
+        // Relaunch a single instance.
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = exePath,
+                WorkingDirectory = string.IsNullOrWhiteSpace(workingDir) ? Path.GetDirectoryName(exePath) ?? string.Empty : workingDir,
+                UseShellExecute = true,
+            };
+            System.Diagnostics.Debug.WriteLine($"[RestartAppByPath] Relaunching {exePath}...");
+            Process.Start(startInfo);
+            System.Diagnostics.Debug.WriteLine("[RestartAppByPath] Relaunch succeeded");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RestartAppByPath] Relaunch failed: {ex.Message}");
+            return false;
+        }
     }
 
     /// <summary>

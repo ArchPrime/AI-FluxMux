@@ -181,7 +181,16 @@ public sealed class GenerationSpeedTracker
 
         if (TryReadDouble(timings["predicted_per_second"], out var predictedPerSecond) && predictedPerSecond > 0)
         {
-            tokensPerSecond = predictedPerSecond;
+            // The predicted rate is calculated by llama-server over a small window (often just
+            // the last few tokens), so it can spike to 2000+ tok/s when a burst of tokens
+            // arrives quickly. The live rate (completionTokens / elapsed) is a cumulative
+            // average and is more stable. Only use the predicted rate if the live rate is
+            // not yet available (i.e., still 0). Once the live rate is established, it takes
+            // precedence over the predicted rate to avoid mid-stream spikes.
+            if (tokensPerSecond <= 0)
+            {
+                tokensPerSecond = predictedPerSecond;
+            }
             applied = true;
         }
 

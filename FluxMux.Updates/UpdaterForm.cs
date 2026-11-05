@@ -23,6 +23,12 @@ public sealed class UpdaterForm : Form
     private Action? _actionCallback;
     private bool _finished;
 
+    // Throttle progress UI updates to reduce flicker during fast downloads.
+    private readonly System.Windows.Forms.Timer _progressTimer;
+    private long _pendingBytesDone;
+    private long _pendingTotalBytes;
+    private bool _progressDirty;
+
     /// <summary>True once <see cref="Finish"/> has been called (the form is no longer in progress).</summary>
     public bool IsFinished => _finished;
 
@@ -36,6 +42,8 @@ public sealed class UpdaterForm : Form
         MinimizeBox = false;
         ShowInTaskbar = true;
         Text = "AI-FluxMux Updater";
+        // Double-buffer the form to reduce flicker during frequent progress updates.
+        DoubleBuffered = true;
 
         _titleLabel = new Label
         {
@@ -97,6 +105,15 @@ public sealed class UpdaterForm : Form
         };
         _actionButton.Click += OnActionButtonClick;
 
+        // Throttle progress UI updates to ~10 fps to reduce flicker during fast downloads.
+        _progressTimer = new System.Windows.Forms.Timer { Interval = 100 };
+        _progressTimer.Tick += (_, _) =>
+        {
+            if (!_progressDirty) return;
+            _progressDirty = false;
+            ApplyProgress(_pendingBytesDone, _pendingTotalBytes);
+        };
+
         // DPI-aware content width: derive it from the title font so the progress bar
         // and detail label scale with the system DPI/font instead of using a static
         // pixel value. ~28 typical characters at the title size gives a comfortable
@@ -128,46 +145,73 @@ public sealed class UpdaterForm : Form
         _detailLabel.MaximumSize = new Size(contentWidth, 0);
         _detailLabel.Anchor = AnchorStyles.None;
 
-        // Stack content top-to-bottom. A FlowLayoutPanel (TopDown) sizes itself to
-        // its widest child and stacks the rest, which avoids the width-collapse
-        // problems a Dock=Fill TableLayoutPanel has inside a GrowAndShrink form.
-        // Dock it to Top so it stops above the button panel (Dock.Bottom) and never
-        // overlaps the detail text with the action button.
-        // Use GrowOnly so the panel never shrinks below its initial measured width
-        // (which is driven by the progress bar). GrowAndShrink would collapse the
-        // panel to the narrowest child ("Starting...") on the first layout pass,
-        // making the whole dialog ~half the intended width.
-        var content = new FlowLayoutPanel
+        // Stack content top-to-bottom in a TableLayoutPanel with a single column.
+        // Each control is Dock=Fill with HorizontalAlignment=Center, so the layout
+        // engine centers them without manual Left assignment (which conflicted with
+        // the FlowLayoutPanel's own layout and caused off-centre rendering).
+        //
+        // The TableLayoutPanel is wrapped in a Panel (Dock=Top, AutoSize=GrowOnly) so the
+        // TableLayoutPanel can be centered horizontally within the form. A Dock=Top
+        // TableLayoutPanel spans the full form width, but its single AutoSize column sizes to
+        // the content width and is left-aligned within the panel, leaving extra space on the
+        // right. That made the progress bar (and other controls) appear shifted left, with the
+        // right end closer to the dialog edge than the left end. Wrapping the TableLayoutPanel
+        // in a Panel and centering the TableLayoutPanel within the Panel fixes this: the
+        // TableLayoutPanel's width is its AutoSize width (column + padding), and it sits in
+        // the middle of the Panel with equal margins on both sides.
+        var contentWrapper = new Panel
         {
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowOnly,
             Dock = DockStyle.Top,
-            Padding = new Padding(sidePad, topPad, sidePad, gap)
         };
-        content.Controls.Add(_titleLabel);
-        content.Controls.Add(_statusLabel);
-        content.Controls.Add(_progressBar);
-        content.Controls.Add(_progressLabel);
-        content.Controls.Add(_detailLabel);
-        
-        // Center the content controls horizontally within the panel.
-        content.Layout += (s, e) =>
+        var content = new TableLayoutPanel
         {
-            var panelWidth = content.ClientSize.Width;
-            foreach (Control control in content.Controls)
+            ColumnCount = 1,
+            RowCount = 5,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowOnly,
+            Dock = DockStyle.None,
+            Anchor = AnchorStyles.Top,
+            Padding = new Padding(sidePad, topPad, sidePad, gap),
+            // Let the column size to the widest control (the progress bar).
+            ColumnStyles = { new ColumnStyle(SizeType.AutoSize) },
+            // Each row sizes to its content.
+            RowStyles =
             {
-                if (control is Label label)
-                {
-                    label.Left = Math.Max(0, (panelWidth - label.Width) / 2);
-                }
-                else if (control is ProgressBar progressBar)
-                {
-                    progressBar.Left = Math.Max(0, (panelWidth - progressBar.Width) / 2);
-                }
+                new RowStyle(SizeType.AutoSize),
+                new RowStyle(SizeType.AutoSize),
+                new RowStyle(SizeType.AutoSize),
+                new RowStyle(SizeType.AutoSize),
+                new RowStyle(SizeType.AutoSize),
             }
         };
+        // Center the TableLayoutPanel within the wrapper Panel. The wrapper spans the full
+        // form width (Dock=Top), and the TableLayoutPanel is centered within it.
+        contentWrapper.Layout += (_, _) =>
+        {
+            if (content.Width > 0)
+            {
+                content.Left = Math.Max(0, (contentWrapper.ClientSize.Width - content.Width) / 2);
+            }
+        };
+
+        void AddCentered(Control c, int row)
+        {
+            c.Dock = DockStyle.Fill;
+            // For labels, center the text within the filled cell.
+            if (c is Label lbl)
+            {
+                lbl.TextAlign = ContentAlignment.MiddleCenter;
+            }
+            content.Controls.Add(c, 0, row);
+        }
+
+        AddCentered(_titleLabel, 0);
+        AddCentered(_statusLabel, 1);
+        AddCentered(_progressBar, 2);
+        AddCentered(_progressLabel, 3);
+        AddCentered(_detailLabel, 4);
 
         // Center the action button horizontally in the button panel instead of
         // right-aligning it. The button is repositioned on layout so it stays
@@ -190,7 +234,8 @@ public sealed class UpdaterForm : Form
         };
 
         Controls.Add(buttonPanel);
-        Controls.Add(content);
+        contentWrapper.Controls.Add(content);
+        Controls.Add(contentWrapper);
 
         // Let the form size to its content once the controls have measured.
         // Use GrowOnly so the form never shrinks below the width established by
@@ -227,6 +272,18 @@ public sealed class UpdaterForm : Form
         if (IsDisposed) return;
         if (InvokeRequired) { BeginInvoke(() => SetProgress(bytesDone, totalBytes)); return; }
 
+        // Store the latest values and let the timer apply them at ~10 fps to reduce flicker.
+        _pendingBytesDone = bytesDone;
+        _pendingTotalBytes = totalBytes;
+        _progressDirty = true;
+        if (!_progressTimer.Enabled)
+        {
+            _progressTimer.Start();
+        }
+    }
+
+    private void ApplyProgress(long bytesDone, long totalBytes)
+    {
         if (totalBytes > 0)
         {
             _progressBar.Style = ProgressBarStyle.Continuous;
@@ -260,6 +317,9 @@ public sealed class UpdaterForm : Form
         if (InvokeRequired) { BeginInvoke(() => Finish(succeeded, summary, detail)); return; }
         if (_finished) return;
         _finished = true;
+
+        // Stop the progress throttle timer; we're done updating progress.
+        _progressTimer.Stop();
 
         _progressBar.Style = ProgressBarStyle.Continuous;
         _progressBar.Value = 100;

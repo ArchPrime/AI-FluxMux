@@ -278,7 +278,8 @@ public static class ClineContextSync
                 options.ContextWindow,
                 options.ImagesOn,
                 options.DisplayName,
-                options.MaxTokens);
+                options.MaxTokens,
+                options.CompactMode);
             // Only turn off Cline's auto-compact when FluxMux is managing compacting.
             // When the profile's compact mode is "none" (endpoint managed), Cline should
             // keep its own auto-compact on — FluxMux is not doing the compacting.
@@ -667,7 +668,8 @@ public static class ClineContextSync
         int contextWindow,
         bool imagesOn,
         string displayName,
-        int maxTokens)
+        int maxTokens,
+        string compactMode)
     {
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
@@ -679,7 +681,13 @@ public static class ClineContextSync
             return false;
         }
 
-        var changed = ApplyAutoCondenseOff(root)
+        // Only turn off Cline's auto-condense (useAutoCondense) when FluxMux is managing
+        // compacting. When the profile's compact mode is "none" (endpoint managed), Cline
+        // should keep its own auto-compact on — FluxMux is not doing the compacting. This
+        // mirrors the gate on PatchGlobalSettingsAutoCompactOff (autoCompactEnabled in
+        // global-settings.json), which was already correctly gated but this one was not.
+        var turnOffAutoCondense = !string.Equals(compactMode, "none", StringComparison.OrdinalIgnoreCase);
+        var changed = (turnOffAutoCondense ? ApplyAutoCondenseOff(root) : false)
             | ApplyOpenAiModelInfo(root, contextWindow, imagesOn, displayName, maxTokens);
         if (!changed)
         {

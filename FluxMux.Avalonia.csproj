@@ -52,6 +52,7 @@
     <PackageReference Include="HtmlAgilityPack" Version="1.12.4" />
     <PackageReference Include="SkiaSharp" Version="3.119.4" />
     <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.0" />
+    <PackageReference Include="System.Management" Version="10.0.0" />
   </ItemGroup>
 
   <!-- Copy the standalone updater (FluxMux.Updates.exe + deps) into the app's output so the

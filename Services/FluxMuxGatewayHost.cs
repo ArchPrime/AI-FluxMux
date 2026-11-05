@@ -188,6 +188,23 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// </summary>
     public Action<long>? ReportPrefillFirstByte { get; set; }
 
+    /// <summary>
+    /// Raised when the first REASONING (thinking) token of a local turn's reply arrives.
+    /// This is the signal that the model has finished prefilling and started thinking.
+    /// The UI switches from "Prefilling context…" to "Thinking…" when this fires.
+    /// The argument is the elapsed milliseconds since prefill started.
+    /// </summary>
+    public Action<long>? ReportThinkingStarted { get; set; }
+
+    /// <summary>
+    /// The estimated prefill duration in seconds for the current turn, set by the UI
+    /// when prefill starts. The hang detection uses this estimate to decide when to
+    /// show the "wait longer" dialog: the dialog only appears if the elapsed time
+    /// exceeds BOTH the FirstByteDeadline AND this estimate. This prevents the dialog
+    /// from appearing before the model has had a reasonable chance to finish prefilling.
+    /// </summary>
+    public int CurrentPrefillEstimateSeconds { get; set; }
+
     public GenerationSpeedTracker? GenerationSpeed
     {
         get => _generationSpeed;
@@ -557,7 +574,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
         var isProbeRequest = context.Request.Headers[CloudEndpointValidationProbe.ProbeRequestHeader]?.Any() ?? false;
         var requestId = Guid.NewGuid().ToString("N")[..8];
         string? overlayVariant = null;
-        var artifacts = LocalSessionArtifactPolicy.Apply(payload);
+        // If the user's client reinflates the context (forwards the full chat each turn, e.g. Cline),
+        // skip session artifact stripping entirely. The client will resend the full history on the next
+        // turn anyway, so stripping tool results here would modify the prompt and prevent KV cache reuse.
+        var artifacts = GetUserClientReinflatesContext?.Invoke() == true
+            ? default
+            : LocalSessionArtifactPolicy.Apply(payload);
         var sessionArtifacts = LocalSessionArtifactPolicy.Inspect(payload["messages"] as JsonArray);
         if (artifacts.Omitted > 0)
         {
@@ -1502,7 +1524,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 var pruneBit = (forwardPruneSummary is not null && GetUserClientReinflatesContext?.Invoke() != true) 
                     ? " · " + forwardPruneSummary 
                     : string.Empty;
-                Log("[turn " + (SharedTurnCounter - 1) + "] " + routeKind + " · " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms" + pruneBit);
+                Log("[turn " + SharedTurnCounter + "] " + routeKind + " · " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms" + pruneBit);
             }
             HttpResponseMessage? response = null;
             var loadingRetries = 0;
@@ -1790,8 +1812,17 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     }
                 }
 
+                // The hang watchdog runs for ALL local routes, regardless of HangEnabled.
+                // HangEnabled only controls the aggressive port-rule behaviors (telemetry
+                // tallying, auto-abort) — it must NOT disable the basic "llama-server is
+                // stuck, let me out" safety. When port rules are off, a stuck prefill
+                // (llama-server accepted the request but never streams a content token, e.g.
+                // RAM-spill thrash or a stalled stream) would otherwise sit forever with the
+                // progress bar looping at ~80% and no way to intervene. The watchdog's
+                // telemetry tallying is already gated on HangEnabled inside
+                // WatchLocalStreamHangAsync; the first-byte/stall detection and the
+                // "wait longer / end / switch" dialog are the safety net that must always run.
                 var hangWatch = routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
-                    && portRules.HangEnabled
                     ? WatchLocalStreamHangAsync(
                         () => gotUpstreamBytes,
                         hangClock,
@@ -1858,13 +1889,27 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         replyBudget,
                         onFirstContentToken: () =>
                         {
-                            // This fires when the gateway first sends a REAL content token
-                            // (content / reasoning / tool_calls) to the client. This is the true
-                            // end of prefill: the model has finished processing the prompt and
-                            // started generating. Tell the UI to switch to the generation phase
-                            // NOW (not at the first byte, which arrives immediately).
+                            // This fires when the gateway first sends a VISIBLE content token
+                            // (content / text / tool_calls, NOT reasoning) to the client. This is
+                            // the true end of the prefill/thinking window: the model has finished
+                            // thinking and started generating the actual reply. Tell the UI to
+                            // switch to the generation phase NOW.
                             Log("ttfb: first content token after " + ttfbStopwatch.ElapsedMilliseconds + " ms (model=" + model + ")");
+                            // Signal the hang watchdog that the first content token has arrived.
+                            // Until this point the stream is in the "prefill / first token" window
+                            // (even if header bytes already arrived), so the watchdog keeps the
+                            // capped prefill-estimate deadline in effect. After this, the normal
+                            // post-first-byte stall deadline governs.
+                            hangClock?.NoteContentToken();
                             ReportPrefillFirstByte?.Invoke(ttfbStopwatch.ElapsedMilliseconds);
+                        },
+                        onFirstReasoningToken: () =>
+                        {
+                            // This fires when the gateway first sees a REASONING (thinking) token.
+                            // The model has finished prefilling and started thinking. Tell the UI
+                            // to switch from "Prefilling context…" to "Thinking…".
+                            Log("ttfb: first reasoning token after " + ttfbStopwatch.ElapsedMilliseconds + " ms (model=" + model + ")");
+                            ReportThinkingStarted?.Invoke(ttfbStopwatch.ElapsedMilliseconds);
                         }).ConfigureAwait(false);
                     if (firstByteLogged)
                     {
@@ -2906,7 +2951,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
         // The show threshold is higher than the hide threshold, so the dialog doesn't flicker
         // when the prompt hovers around a single value.
         int overflow = Math.Max(0, promptTokens - vramContext);
-        int showHeadroomThreshold = (int)(vramContext * 0.90); // show at 90% VRAM
+        // The warning should fire when the prompt ACTUALLY exceeds the VRAM-resident context
+        // (i.e. it is spilling into RAM), not when it is merely approaching it. The old 90%
+        // threshold fired too early — at 91% context fill the prompt was still entirely in
+        // VRAM, so the "about to spill" warning was premature and misleading. Use 100% as the
+        // show threshold: the dialog appears only when the prompt has actually spilled into
+        // RAM (overflow > 0). The hide threshold stays at 80% so the dialog doesn't flicker
+        // when the prompt hovers around the VRAM boundary.
+        int showHeadroomThreshold = vramContext; // show at 100% VRAM (prompt actually exceeds VRAM)
         int hideHeadroomThreshold = (int)(vramContext * 0.80); // hide below 80% VRAM
         int showOverflowThreshold = (int)(vramContext * 0.30); // show at overflow > 30% VRAM
         int hideOverflowThreshold = (int)(vramContext * 0.20); // hide below overflow < 20% VRAM
@@ -3375,7 +3427,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         var reasoningMode = LocalReasoningLaunchPolicy.NormalizeMode(Str(state, "local_reasoning", "Off"));
 
-        if (LocalReasoningPayloadPolicy.ApplyToPayload(payload, reasoningMode))
+        if (LocalReasoningPayloadPolicy.ApplyToPayload(payload, reasoningMode, GetUserClientReinflatesContext))
         {
             Log("local chat: stripped thinking from history forwarded to llama-server (Client app still shows it)");
         }
@@ -4288,13 +4340,48 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     });
                 }
 
-                if (!LocalStreamHangPolicy.ShouldAbort(
+                // Prefill / first-token window: until the first REAL content token arrives, the
+                // stream is still "prefilling" even if header bytes have already arrived. For a
+                // thinking model the first byte arrives quickly but the first content token can be
+                // minutes away. During this window we use the (capped) prefill estimate to decide
+                // when to show the "wait longer" dialog, instead of the long post-first-byte stall
+                // deadline (which would never fire for a slow-but-healthy prefill). This check runs
+                // BEFORE the ShouldAbort gate, because once header bytes have arrived ShouldAbort
+                // only fires on the (very long) stall deadline — it would not surface a slow
+                // prefill that is still within the capped estimate.
+                //
+                // SAFETY CAP: Even if the estimate is large (e.g. inflated by a corrupted learned
+                // model), the dialog must appear after 120s. This prevents the user from being
+                // stuck with no options for an unbounded time.
+                const int PrefillEstimateHardCapSeconds = 120;
+                int effectiveEstimate = Math.Min(CurrentPrefillEstimateSeconds, PrefillEstimateHardCapSeconds);
+                string reason;
+                if (!clock.GotContentToken && effectiveEstimate > 0)
+                {
+                    var elapsedSinceCopyStart = (now - clock.CopyStartUtc).TotalSeconds;
+                    if (elapsedSinceCopyStart < effectiveEstimate)
+                    {
+                        // Still within the prefill / first-token window. Log once and keep waiting.
+                        if (clock.WaitLongerCount == 0)
+                        {
+                            Log("local stream hang: still within prefill/first-token window ("
+                                + (int)elapsedSinceCopyStart + "s / "
+                                + effectiveEstimate + "s, raw estimate " + CurrentPrefillEstimateSeconds + "s, bytes="
+                                + (gotUpstreamBytes() ? "yes" : "no") + ") — waiting without dialog");
+                        }
+                        continue;
+                    }
+                    // Past the capped prefill window with no content token: fall through to the
+                    // dialog below (reason = first-byte, since no content token has arrived).
+                    reason = LocalStreamHangPolicy.FirstByteReason;
+                }
+                else if (!LocalStreamHangPolicy.ShouldAbort(
                     gotUpstreamBytes(),
                     now - clock.CopyStartUtc,
                     now - clock.LastByteUtc,
                     clock.FirstByteDeadline,
                     clock.StallDeadline,
-                    out var reason))
+                    out reason))
                 {
                     continue;
                 }

@@ -5,6 +5,8 @@ using Avalonia.Input;
 using Avalonia.Markup.Xaml;
 using Avalonia.Media;
 using Avalonia.Styling;
+using Avalonia.Threading;
+using System;
 using System.Windows.Input;
 
 namespace FluxMux.Avalonia.Controls;
@@ -29,12 +31,21 @@ public partial class GpuPillToggle : UserControl
     public static readonly StyledProperty<ICommand> ToggleCommandProperty =
         AvaloniaProperty.Register<GpuPillToggle, ICommand>(nameof(ToggleCommand));
 
+    /// <summary>
+    /// True when a GPU change is pending (registry set but app not yet restarted).
+    /// Shows a pulsing border and a "pending" indicator so the user knows the app
+    /// will switch GPUs after restart.
+    /// </summary>
+    public static readonly StyledProperty<bool> HasPendingChangeProperty =
+        AvaloniaProperty.Register<GpuPillToggle, bool>(nameof(HasPendingChange));
+
     public GpuPillToggle()
     {
         InitializeComponent();
         PropertyChanged += (_, e) =>
         {
-            if (e.Property == IsOnMotherboardProperty || e.Property == IsSwitchableProperty)
+            if (e.Property == IsOnMotherboardProperty || e.Property == IsSwitchableProperty ||
+                e.Property == HasPendingChangeProperty)
             {
                 ApplyState();
             }
@@ -60,6 +71,12 @@ public partial class GpuPillToggle : UserControl
         set => SetValue(ToggleCommandProperty, value);
     }
 
+    public bool HasPendingChange
+    {
+        get => GetValue(HasPendingChangeProperty);
+        set => SetValue(HasPendingChangeProperty, value);
+    }
+
     private void ApplyState()
     {
         // Look up the named controls by name rather than relying on the x:Name-generated
@@ -77,6 +94,7 @@ public partial class GpuPillToggle : UserControl
 
         var switchable = IsSwitchable;
         var onMotherboard = IsOnMotherboard;
+        var pending = HasPendingChange;
 
         // Resolve brushes from the active theme.
         var variant = Application.Current?.ActualThemeVariant ?? ThemeVariant.Light;
@@ -115,7 +133,63 @@ public partial class GpuPillToggle : UserControl
         // Grey the whole pill when not switchable (static badge).
         rootBorder.Opacity = switchable ? 1.0 : 0.5;
         rootBorder.IsHitTestVisible = switchable;
+
+        // Pending change indicator: the active segment's background pulses to draw attention.
+        // No border is added — the toggle itself pulses.
+        if (pending && switchable)
+        {
+            // Keep the normal border (no special pending border).
+            rootBorder.BorderBrush = Resolve("FluxMutedBorder") ?? Brushes.Gray;
+            rootBorder.BorderThickness = new Thickness(1);
+            // Start pulsing the active segment's background.
+            StartPulseAnimation(onMotherboard ? motherboardSeg : discreteSeg);
+        }
+        else
+        {
+            rootBorder.BorderBrush = Resolve("FluxMutedBorder") ?? Brushes.Gray;
+            rootBorder.BorderThickness = new Thickness(1);
+            StopPulseAnimation();
+        }
     }
+
+    private void StartPulseAnimation(Border activeSeg)
+    {
+        if (_pulseTimer is not null) return; // already pulsing
+        _pulseActiveSeg = activeSeg;
+
+        _pulseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _pulseTimer.Tick += (_, _) =>
+        {
+            _pulsePhase = !_pulsePhase;
+            // Pulse the active segment's background opacity (not the whole pill).
+            if (_pulseActiveSeg is not null)
+            {
+                _pulseActiveSeg.Opacity = _pulsePhase ? 1.0 : 0.5;
+            }
+        };
+        _pulseTimer.Start();
+    }
+
+    private void StopPulseAnimation()
+    {
+        if (_pulseTimer is not null)
+        {
+            _pulseTimer.Stop();
+            _pulseTimer.Tick -= null;
+            _pulseTimer = null;
+        }
+        // Reset the active segment's opacity.
+        if (_pulseActiveSeg is not null)
+        {
+            _pulseActiveSeg.Opacity = 1.0;
+        }
+        _pulseActiveSeg = null;
+        _pulsePhase = false;
+    }
+
+    private DispatcherTimer? _pulseTimer;
+    private bool _pulsePhase;
+    private Border? _pulseActiveSeg;
 
     protected override void OnPointerPressed(PointerPressedEventArgs e)
     {

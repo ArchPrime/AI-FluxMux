@@ -233,7 +233,15 @@ public sealed class FluxMuxRuntimeService
 		Timeout = TimeSpan.FromSeconds(2L)
 	};
 
-	public const int PublicEndpointReadyProbeTimeoutMs = 5000;
+	// The public endpoint probe sends a trivial "Reply with ready" chat completion through the
+	// gateway. On a cold start (first request after launch), the model pays a fixed overhead
+	// (weight load into GPU, KV-cache init) that is NOT proportional to the tiny prompt size.
+	// Measured first-byte times for even small prompts on cold start are 7s+, and the probe is
+	// non-streaming (no bytes until the full reply completes), so a 5s timeout false-positives
+	// on healthy large-context models (YaRN/VRAM) whose daemon port already reports ready.
+	// 30s comfortably exceeds the cold-start cost while still catching genuinely broken models
+	// (a truly stuck model will not produce a reply in 30s).
+	public const int PublicEndpointReadyProbeTimeoutMs = 30000;
 
 	private const int PublicEndpointReadyProbeAttempts = 3;
 
@@ -409,6 +417,41 @@ public sealed class FluxMuxRuntimeService
 	/// "Prefilling context…" indicator when this fires.
 	/// </summary>
 	public event Action<long>? PrefillFirstByteNotice;
+
+	/// <summary>
+	/// Raised when the first REASONING (thinking) token of a local turn's reply arrives.
+	/// The model has finished prefilling and started thinking. The UI switches from
+	/// "Prefilling context…" to "Thinking…" when this fires. The argument is the elapsed
+	/// milliseconds since prefill started.
+	/// </summary>
+	public event Action<long>? ThinkingStartedNotice;
+
+	/// <summary>
+	/// Sets the estimated prefill duration on the gateway host so the hang detection
+	/// can use it to decide when to show the "wait longer" dialog. The dialog only
+	/// appears if the elapsed time exceeds BOTH the FirstByteDeadline AND this estimate.
+	/// </summary>
+	public void SetPrefillEstimate(int seconds)
+	{
+		if (_gatewayHost is not null)
+		{
+			_gatewayHost.CurrentPrefillEstimateSeconds = seconds;
+		}
+	}
+
+	/// <summary>
+	/// Clears the prefill estimate so the hang detection uses the default FirstByteDeadline.
+	/// Call this when prefill completes, when the model launch fails, or when the user
+	/// aborts the model. Without this, a stale estimate from a previous attempt can
+	/// suppress the "wait longer" dialog on the next attempt.
+	/// </summary>
+	public void ClearPrefillEstimate()
+	{
+		if (_gatewayHost is not null)
+		{
+			_gatewayHost.CurrentPrefillEstimateSeconds = 0;
+		}
+	}
 
 	/// <summary>
 	/// When armed, the next local forward applies the Hail Mary REAR-context prune to the
@@ -681,7 +724,13 @@ public sealed class FluxMuxRuntimeService
 		// signals to the UI so it can show "Prefilling context… elapsed Xs" with an ETA based
 		// on the prompt size.
 		host.ReportPrefillStarted = promptTokens => PrefillStartedNotice?.Invoke(promptTokens);
-		host.ReportPrefillFirstByte = elapsedMs => PrefillFirstByteNotice?.Invoke(elapsedMs);
+		host.ReportPrefillFirstByte = elapsedMs =>
+		{
+			// Prefill is complete — clear the estimate so the next attempt doesn't inherit it.
+			ClearPrefillEstimate();
+			PrefillFirstByteNotice?.Invoke(elapsedMs);
+		};
+		host.ReportThinkingStarted = elapsedMs => ThinkingStartedNotice?.Invoke(elapsedMs);
 		host.PortRules = _portForwardingRules;
 		TryCaptureAndRedactExistingRuntimeState();
 		return host;
@@ -2995,7 +3044,7 @@ public sealed class FluxMuxRuntimeService
 		return await TimeShortReadyReplyAsync(probePort, model, "Short reply completed", "The short reply test did not complete.", cancellationToken, 90000);
 	}
 
-	public async Task<LocalGenerationTimingResult> TimeShortLocalReplyThroughPublicEndpointAsync(int publicGatewayPort, string model, CancellationToken cancellationToken = default(CancellationToken), int requestTimeoutMs = 5000)
+	public async Task<LocalGenerationTimingResult> TimeShortLocalReplyThroughPublicEndpointAsync(int publicGatewayPort, string model, CancellationToken cancellationToken = default(CancellationToken), int requestTimeoutMs = 30000)
 	{
 		return await TimeShortReadyReplyAsync(publicGatewayPort, model, "Public endpoint reply completed", "The public endpoint test did not complete.", cancellationToken, requestTimeoutMs, FluxMuxGatewayRouting.Local);
 	}
@@ -3514,6 +3563,25 @@ public sealed class FluxMuxRuntimeService
 				Status = "Local launch failed",
 				Details = $"Port {port} cannot reserve its daemon port (private listen port for llama-server, usually Port+1)."
 			};
+		}
+
+		// Create the llama-server output log file at the start of the launch, so we can capture
+		// stderr/stdout even if the launch fails early (e.g., during the launch prep phase).
+		// The file is overwritten on each launch (new launch = new diagnosis).
+		string llamaOutputLogPath = Path.Combine(_logDirectory, "llama_server_output.log");
+		try
+		{
+			File.WriteAllText(llamaOutputLogPath,
+				"=== llama-server launch log ===" + Environment.NewLine +
+				"Model: " + selectedLocalModel + Environment.NewLine +
+				"Variant: " + selectedVariant + Environment.NewLine +
+				"Port: " + localBackendPort + Environment.NewLine +
+				"Started: " + DateTime.Now.ToString("o") + Environment.NewLine +
+				"================================" + Environment.NewLine);
+		}
+		catch
+		{
+			// Best-effort; never block the launch on log setup.
 		}
 
 		// Clear the stale local_context from the previous profile before this launch proceeds.
@@ -4086,6 +4154,10 @@ public sealed class FluxMuxRuntimeService
 
 	public async Task<RuntimeActionResult> RestartLocalAsync(string selectedLocalModel, string selectedVariant, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, CancellationToken cancellationToken = default(CancellationToken), Action<string>? progressReporter = null)
 	{
+		// Clear any stale prefill estimate from a previous attempt so the hang detection
+		// uses the default FirstByteDeadline for this new launch. The estimate will be
+		// set again when prefill starts.
+		ClearPrefillEstimate();
 		int previousPid = ManagedLocalServerPid;
 		int backendPort = port + 1;
 		progressReporter?.Invoke("AI-FluxMux is stopping llama-server");
@@ -5293,11 +5365,34 @@ public sealed class FluxMuxRuntimeService
 			},
 			EnableRaisingEvents = true
 		};
+		// Append the server path and args to the existing log file (created at the start of
+		// LaunchLocalAsync). This way, the log file captures the launch context even if the
+		// process fails to start.
+		string llamaOutputLogPath = Path.Combine(_logDirectory, "llama_server_output.log");
+		try
+		{
+			File.AppendAllText(llamaOutputLogPath,
+				"Server: " + serverPath + Environment.NewLine +
+				"Args: " + argString + Environment.NewLine +
+				"Process start: " + DateTime.Now.ToString("o") + Environment.NewLine);
+		}
+		catch
+		{
+			// Best-effort; never block the launch on log writes.
+		}
 		process.ErrorDataReceived += delegate(object _, DataReceivedEventArgs e)
 		{
 			if (!string.IsNullOrWhiteSpace(e.Data))
 			{
 				_lastLocalStderrTail = TruncateTail((_lastLocalStderrTail + Environment.NewLine + e.Data).Trim(), 1200);
+				try
+				{
+					File.AppendAllText(llamaOutputLogPath, "[stderr] " + e.Data + Environment.NewLine);
+				}
+				catch
+				{
+					// Best-effort; never block the launch on log writes.
+				}
 			}
 		};
 		process.OutputDataReceived += delegate(object _, DataReceivedEventArgs e)
@@ -5305,6 +5400,14 @@ public sealed class FluxMuxRuntimeService
 			if (!string.IsNullOrWhiteSpace(e.Data))
 			{
 				_lastLocalStderrTail = TruncateTail((_lastLocalStderrTail + Environment.NewLine + e.Data).Trim(), 1200);
+				try
+				{
+					File.AppendAllText(llamaOutputLogPath, "[stdout] " + e.Data + Environment.NewLine);
+				}
+				catch
+				{
+					// Best-effort; never block the launch on log writes.
+				}
 			}
 		};
 		try
@@ -5661,6 +5764,19 @@ public sealed class FluxMuxRuntimeService
 			list.Add("none");
 		}
 
+		// Reasoning preserve: control whether the reasoning trace is preserved in the full
+		// history or just the last assistant message. "Auto" uses the template default.
+		// "Disabled" passes --no-reasoning-preserve to reduce context size.
+		string reasoningPreserve = GetString(profile, "LocalReasoningPreserve");
+		if (reasoningPreserve.Equals("Disabled", StringComparison.OrdinalIgnoreCase) && SupportsArg(helpText, "--no-reasoning-preserve"))
+		{
+			list.Add("--no-reasoning-preserve");
+		}
+		else if (reasoningPreserve.Equals("Enabled", StringComparison.OrdinalIgnoreCase) && SupportsArg(helpText, "--reasoning-preserve"))
+		{
+			list.Add("--reasoning-preserve");
+		}
+
 		_ = localReasoning;
 		string gpuLayers = GetString(profile, "GpuLayers");
 		string resolvedGpuLayers = ResolveGpuLayers(offloadMode, gpuLayers);
@@ -5911,12 +6027,16 @@ public sealed class FluxMuxRuntimeService
 			// fraction of total physical RAM so the server can still use plenty of RAM for the
 			// overflow context, but can never consume the whole machine. The cap is the larger of
 			// 16 GB (a sensible floor for small-RAM machines) and 60% of total RAM.
+			//
+			// IMPORTANT: --cache-ram expects MiB, not GB. The value is computed in GB for
+			// readability, then converted to MiB by multiplying by 1024.
 			double totalRamGb = localHardwareLaunchAdvice.TotalRamGb;
 			int cappedRamGb = (int)Math.Max(16.0, totalRamGb * 0.60);
+			int cappedRamMib = cappedRamGb * 1024;
 			if (SupportsArg(helpText, "--cache-ram"))
 			{
 				list.Add("--cache-ram");
-				list.Add(cappedRamGb.ToString(CultureInfo.InvariantCulture));
+				list.Add(cappedRamMib.ToString(CultureInfo.InvariantCulture));
 			}
 		}
 		else
@@ -9301,7 +9421,8 @@ public sealed class FluxMuxRuntimeService
 					g.Sum(x => x.Megabytes),
 					g.Count(),
 					g.Any(x => x.Megabytes <= 0),
-					RawName: g.Select(x => x.RawName).FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? string.Empty))
+					RawName: g.Select(x => x.RawName).FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? string.Empty,
+					FullPath: g.Select(x => x.FullPath).FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? string.Empty))
 				.OrderByDescending(x => x.Megabytes)
 				.ThenBy(x => x.FriendlyName, StringComparer.OrdinalIgnoreCase)
 				.ToList();
@@ -9381,6 +9502,7 @@ public sealed class FluxMuxRuntimeService
 			MemoryLabel = group.Megabytes > 0 ? $"{group.Megabytes} MB" : "—",
 			NameLabel = group.FriendlyName,
 			RawName = group.RawName,
+			FullPath = group.FullPath,
 			CountLabel = FormatGpuProcessCountNote(group),
 			IsCaution = caution,
 			GpuKind = group.GpuKind,
@@ -9402,25 +9524,80 @@ public sealed class FluxMuxRuntimeService
 		return $"({group.InstanceCount} {countWord})";
 	}
 
-	private sealed record GpuProcessUse(string FriendlyName, int Megabytes, int InstanceCount = 1, bool MissingAmount = false, int Pid = 0, GpuKind GpuKind = GpuKind.Unknown, string RawName = "");
+	private sealed record GpuProcessUse(string FriendlyName, int Megabytes, int InstanceCount = 1, bool MissingAmount = false, int Pid = 0, GpuKind GpuKind = GpuKind.Unknown, string RawName = "", string FullPath = "");
 
-	private List<GpuProcessUse> CollectGpuProcessUses()
+	/// <summary>
+	/// Resolves the full executable path for a running process. Uses WMI (Win32_Process.ExecutablePath)
+	/// as the primary source because it works regardless of the calling process's elevation level.
+	/// Process.MainModule.FileName throws (and returns null) when the calling process is elevated
+	/// and the target process is not, which silently breaks GPU-affinity lookups. WMI is slower but
+	/// reliable; MainModule is kept as a fast fallback for the common same-elevation case.
+	/// </summary>
+	[System.Runtime.Versioning.SupportedOSPlatform("windows")]
+	private static string ResolveProcessFullPath(int pid)
+	{
+		if (pid <= 0)
+		{
+			return string.Empty;
+		}
+
+		// Primary: WMI. Works cross-elevation. Returns the exact on-disk path, which is what the
+		// GPU-affinity registry keys use.
+		try
+		{
+			using var searcher = new System.Management.ManagementObjectSearcher(
+				"SELECT ExecutablePath FROM Win32_Process WHERE ProcessId = " + pid);
+			using var results = searcher.Get();
+			foreach (System.Management.ManagementObject mo in results)
+			{
+				var path = mo["ExecutablePath"]?.ToString();
+				if (!string.IsNullOrWhiteSpace(path))
+				{
+					return path;
+				}
+			}
+		}
+		catch
+		{
+			// WMI failed; fall through to MainModule.
+		}
+
+		// Fallback: MainModule. Fast, but fails cross-elevation.
+		try
+		{
+			using var proc = Process.GetProcessById(pid);
+			return proc.MainModule?.FileName ?? string.Empty;
+		}
+		catch
+		{
+			return string.Empty;
+		}
+	}
+private List<GpuProcessUse> CollectGpuProcessUses()
 	{
 		var windows = CollectWindowsGpuLocalUsage()
-			.Select(use => (use.Pid, use.FriendlyName, use.Megabytes, use.RawName));
-		var compute = new List<(int Pid, string Name, int Megabytes, string RawName)>();
+			.Select(use => (use.Pid, use.FriendlyName, use.Megabytes, use.RawName, use.FullPath));
+		var compute = new List<(int Pid, string Name, int Megabytes, string RawName, string FullPath)>();
 		foreach (var row in ParseNvidiaComputeApps())
 		{
-			if (row.Mb <= 0)
-			{
-				continue;
-			}
+			// nvidia-smi sometimes reports a process but with [N/A] for memory (Mb = 0).
+			// This happens on some systems where the driver doesn't expose per-process memory.
+			// We still want to list these processes (so the user can toggle their GPU affinity),
+			// so we treat them as having the minimum 8 MB (the threshold used by the Windows
+			// counter path) rather than skipping them.
+			int mb = row.Mb > 0 ? row.Mb : 8;
 
-			compute.Add((row.Pid, FriendlyGpuProcessName(row.Name, row.Pid), row.Mb, row.Name));
+			// nvidia-smi only reports the process name, not the full path. Resolve the full
+			// path from the running process so the GPU toggle can write the registry for the
+			// correct executable (e.g. "C:\Program Files\Graphisoft\Archicad 30\node.exe"
+			// instead of just "node"). Use WMI (elevation-proof) with MainModule fallback.
+			string fullPath = ResolveProcessFullPath(row.Pid);
+
+			compute.Add((row.Pid, FriendlyGpuProcessName(row.Name, row.Pid), mb, row.Name, fullPath));
 		}
 
 		return GpuProcessMemoryAggregator.UnionPreferringLargerMegabytes(windows, compute)
-			.Select(entry => new GpuProcessUse(entry.Value.Name, entry.Value.Megabytes, Pid: entry.Key, GpuKind: GpuKind.DiscreteVram, RawName: entry.Value.RawName))
+			.Select(entry => new GpuProcessUse(entry.Value.Name, entry.Value.Megabytes, Pid: entry.Key, GpuKind: GpuKind.DiscreteVram, RawName: entry.Value.RawName, FullPath: entry.Value.FullPath))
 			.ToList();
 	}
 
@@ -9448,6 +9625,11 @@ public sealed class FluxMuxRuntimeService
 
 			PerformanceCounterCategory category = new PerformanceCounterCategory("GPU Process Memory");
 			string[] instances = category.GetInstanceNames();
+			// Read BOTH "Local Usage" (shared memory) and "Dedicated Usage" (dedicated VRAM)
+			// per process and sum them. Using only "Local Usage" misses apps that use a small
+			// amount of dedicated VRAM (e.g. ArchiCAD using 0.6 GiB of dedicated VRAM but only
+			// 0.02 GiB of shared memory on the dGPU). The "Dedicated Usage" counter reports the
+			// actual dedicated VRAM per process, which is what the user cares about.
 			Dictionary<string, Dictionary<int, long>> bytesByGpuThenPid = new Dictionary<string, Dictionary<int, long>>(StringComparer.OrdinalIgnoreCase);
 			foreach (string instance in instances)
 			{
@@ -9456,17 +9638,31 @@ public sealed class FluxMuxRuntimeService
 					continue;
 				}
 
-				long bytes;
+				long bytes = 0;
+				// Read "Local Usage" (shared memory).
 				try
 				{
 					using PerformanceCounter counter = new PerformanceCounter("GPU Process Memory", "Local Usage", instance, readOnly: true);
 					// Warm up the counter: the first read initializes it and returns 0.
 					_ = counter.NextValue();
-					bytes = counter.RawValue;
+					bytes += counter.RawValue;
 				}
 				catch
 				{
-					continue;
+					// Counter unavailable; fall through to Dedicated Usage.
+				}
+
+				// Read "Dedicated Usage" (dedicated VRAM).
+				try
+				{
+					using PerformanceCounter dedicatedCounter = new PerformanceCounter("GPU Process Memory", "Dedicated Usage", instance, readOnly: true);
+					// Warm up the counter: the first read initializes it and returns 0.
+					_ = dedicatedCounter.NextValue();
+					bytes += dedicatedCounter.RawValue;
+				}
+				catch
+				{
+					// Counter unavailable; use whatever Local Usage gave us.
 				}
 
 				if (bytes < 1)
@@ -9501,15 +9697,21 @@ public sealed class FluxMuxRuntimeService
 				}
 
 				string processName = string.Empty;
+				string fullPath = string.Empty;
 				try
 				{
-					processName = Process.GetProcessById(entry.Key).ProcessName;
+					using var proc = Process.GetProcessById(entry.Key);
+					processName = proc.ProcessName;
 				}
 				catch
 				{
 				}
 
-				result.Add(new GpuProcessUse(FriendlyGpuProcessName(processName, entry.Key), mb, Pid: entry.Key, GpuKind: GpuKind.DiscreteVram, RawName: processName));
+				// Resolve the full path via WMI (elevation-proof) with MainModule fallback.
+				// MainModule alone fails when the app is elevated and the target is not.
+				fullPath = ResolveProcessFullPath(entry.Key);
+
+				result.Add(new GpuProcessUse(FriendlyGpuProcessName(processName, entry.Key), mb, Pid: entry.Key, GpuKind: GpuKind.DiscreteVram, RawName: processName, FullPath: fullPath));
 			}
 		}
 		catch

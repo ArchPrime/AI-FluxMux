@@ -367,7 +367,14 @@ public partial class MainViewModel : ViewModelBase
     private DispatcherTimer? _prefillTimer;
     private DateTime _prefillStartUtc;
     private int _prefillEstimatedSeconds;
+    // The maximum prefill progress shown so far this turn. The prefill bar must never visibly
+    // rewind: when the estimate is extended (because the real prefill is outlasting it), the
+    // raw ratio (elapsed/estimate) drops, which would make the bar snap backwards. Clamping to
+    // the running max keeps the bar monotonically non-decreasing — it creeps toward 100% and
+    // only resets to 0 when the prefill phase actually ends (first content token).
+    private double _prefillMaxProgress;
     private int _prefillPromptTokens;
+    private bool _prefillIsCold;
     private DispatcherTimer? _generationTimer;
     private DateTime _generationStartUtc;
 
@@ -474,6 +481,7 @@ public partial class MainViewModel : ViewModelBase
                 BottomBarPhase = 1; // Prefill
                 PrefillInProgress = true;
                 PrefillProgress = 0.0;
+                _prefillMaxProgress = 0.0;
 
                 // Detect RAM-spill prefill: the prompt exceeds the VRAM-resident context on a
                 // YaRN profile, so the overflow is running in ordinary RAM (much slower than VRAM).
@@ -492,6 +500,7 @@ public partial class MainViewModel : ViewModelBase
                 _prefillPromptTokens = promptTokens;
                 _prefillStartUtc = DateTime.UtcNow;
                 var isColdStart = _runtimeService.IsLocalModelCold;
+                _prefillIsCold = isColdStart;
                 var prefillModel = GetOrCreatePrefillModel();
 
                 if (isRamSpill)
@@ -511,17 +520,18 @@ public partial class MainViewModel : ViewModelBase
                     // case, but without the conservative multiplier (because the learned speed
                     // already reflects the real hardware, including any RAM-spill slowdown).
                     //
-                    // Use the most recent full-prefill sample's speed (LastMeasuredSpeedTokensPerSec)
-                    // instead of the fitted speed (CurrentSpeedTokensPerSec), because the fitted
-                    // speed (least-squares over similar points) can be noisy and lower than the
-                    // actual speed. The most recent sample is the most representative of the
-                    // current hardware state.
-                    double speed = prefillModel.LastMeasuredSpeedTokensPerSec > 0
-                        ? prefillModel.LastMeasuredSpeedTokensPerSec
-                        : prefillModel.CurrentSpeedTokensPerSec;
-                    int baseEstimate = isColdStart
-                        ? 60
-                        : (int)Math.Ceiling((double)promptTokens / Math.Max(1.0, speed));
+                    // The learned estimate is fitted to the prompt size, so it's more accurate
+                    // than the most recent sample's speed (which is a single data point and may
+                    // not be representative of the current prompt size).
+                    //
+                    // The learned model is fitted on FULL prefills (cold starts), so it's the
+                    // right model to use for cold-start estimates. Only fall back to the hardcoded
+                    // 60s when no data exists yet.
+                    int baseEstimate = prefillModel.EstimateSeconds(promptTokens, isColdStart);
+                    if (baseEstimate <= 0)
+                    {
+                        baseEstimate = 60; // Fallback when no data exists yet
+                    }
                     _prefillEstimatedSeconds = baseEstimate;
                     // Floor at 60s (RAM-spill prefill is never instant), cap at 1800s (30 min)
                     // to avoid absurd estimates for very large prompts.
@@ -529,28 +539,52 @@ public partial class MainViewModel : ViewModelBase
                 }
                 else
                 {
-                    // VRAM prefill (or cold start). Use the learned estimate, but apply a
-                    // conservative multiplier for large prompts: prefill speed can drop as the
-                    // context grows (KV cache pressure, attention over a long sequence), so the
-                    // linear estimate from smaller samples can be optimistic. For prompts over
-                    // 32K tokens, apply a 1.5x multiplier; over 64K, 2x. This keeps the estimate
-                    // honest without being absurdly pessimistic.
-                    int baseEstimate = isColdStart
-                        ? 60
-                        : prefillModel.EstimateSeconds(promptTokens);
-                    double multiplier = 1.0;
-                    if (promptTokens > 65536) multiplier = 2.0;
-                    else if (promptTokens > 32768) multiplier = 1.5;
-                    _prefillEstimatedSeconds = (int)Math.Ceiling(baseEstimate * multiplier);
-                    // Floor at 30s for large prompts (even a fast VRAM prefill of 50K+ tokens
-                    // takes at least ~30s), cap at 1800s.
-                    if (promptTokens > 32768)
+                    // VRAM prefill (or cold start). Use the learned estimate.
+                    //
+                    // The learned model is fitted on FULL prefills (cold starts), so it's the
+                    // right model to use for cold-start estimates. Only fall back to the hardcoded
+                    // 60s when no data exists yet.
+                    int baseEstimate = prefillModel.EstimateSeconds(promptTokens, isColdStart);
+                    bool hasLearnedData = baseEstimate > 0;
+                    if (baseEstimate <= 0)
                     {
-                        _prefillEstimatedSeconds = Math.Max(_prefillEstimatedSeconds, 30);
+                        baseEstimate = 60; // Fallback when no data exists yet
                     }
+
+                    // Conservative multiplier for large prompts: prefill speed can drop as the
+                    // context grows (KV cache pressure, attention over a long sequence), so the
+                    // linear estimate from smaller samples can be optimistic. Apply it ONLY when
+                    // the learned model has no data yet — when it does, the learned speed already
+                    // reflects the real hardware at this prompt size, and multiplying it would
+                    // make the estimate (and the hang-detection wait) far too pessimistic. This
+                    // was the "excessive wait": a warm 22K-token prefill that finishes in ~8s was
+                    // floored at 60s and, for >32K prompts, multiplied by 1.5x, so the UI showed
+                    // "up to ~1-2 minutes" and the hang dialog waited that long.
+                    double multiplier = 1.0;
+                    if (!hasLearnedData)
+                    {
+                        if (promptTokens > 65536) multiplier = 2.0;
+                        else if (promptTokens > 32768) multiplier = 1.5;
+                    }
+                    _prefillEstimatedSeconds = (int)Math.Ceiling(baseEstimate * multiplier);
+
+                    // Floor: when the learned model has data, trust it down to a small floor
+                    // (15s) — a warm VRAM prefill can genuinely finish in seconds, and flooring
+                    // it at 60s is what made the UI over-promise. When there is no learned data,
+                    // keep the conservative 30s floor for large prompts (even a fast VRAM prefill
+                    // of 50K+ tokens takes at least ~30s). Cap at 1800s.
+                    int floor = hasLearnedData ? 15 : (promptTokens > 32768 ? 30 : 0);
+                    _prefillEstimatedSeconds = Math.Max(_prefillEstimatedSeconds, floor);
                     _prefillEstimatedSeconds = Math.Clamp(_prefillEstimatedSeconds, 0, 1800);
                 }
                 StartPrefillTimer();
+
+                // Pass the prefill estimate to the gateway host so the hang detection
+                // can use it to decide when to show the "wait longer" dialog. The dialog
+                // only appears if the elapsed time exceeds BOTH the FirstByteDeadline AND
+                // this estimate. This prevents the dialog from appearing before the model
+                // has had a reasonable chance to finish prefilling.
+                _runtimeService.SetPrefillEstimate(_prefillEstimatedSeconds);
 
                 // Only emit the warming-up terminal line once per session.
                 if (!prefillWarmupShown && promptTokens > 0)
@@ -583,6 +617,20 @@ public partial class MainViewModel : ViewModelBase
                 }
             });
         };
+        _runtimeService.ThinkingStartedNotice += elapsedMs =>
+        {
+            SafeUiInvoke(() =>
+            {
+                // The model has finished prefilling and started thinking. Switch the display
+                // from "Prefilling context…" to "Thinking…" so the user knows the model is
+                // working (not stuck). The prefill bar keeps running — the model is still in
+                // the prefill/thinking window until the first visible content token arrives.
+                if (PrefillInProgress)
+                {
+                    PrefillStatusText = "Thinking…";
+                }
+            });
+        };
         _runtimeService.PrefillFirstByteNotice += elapsedMs =>
         {
             SafeUiInvoke(() =>
@@ -590,7 +638,7 @@ public partial class MainViewModel : ViewModelBase
                 // Record the real sample so the performance model refits and persists.
                 if (_prefillPromptTokens > 0)
                 {
-                    GetOrCreatePrefillModel().RecordSample(_prefillPromptTokens, elapsedMs);
+                    GetOrCreatePrefillModel().RecordSample(_prefillPromptTokens, elapsedMs, _prefillIsCold);
                 }
 
                 // Complete the prefill bar, then reset it to 0 so the generation phase can
@@ -2129,7 +2177,10 @@ public partial class MainViewModel : ViewModelBase
             SelectedEndpointApp.Equals("DeepSeek Harness", StringComparison.OrdinalIgnoreCase)
                 || HarnessWebIsInPlay,
             ResolveRunningProfileExtendContextIntoRam() ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : 0,
-            LocalAutoCompactMode);
+            // When the user client reinflates the context (e.g. Cline), Cline manages its own
+            // auto-compact. FluxMux must NOT turn off Cline's auto-compact, so pass "none" as
+            // the compact mode to prevent ClineContextSync from patching globalState.json.
+            UserClientReinflatesContext ? "none" : LocalAutoCompactMode);
 
     /// <summary>
     /// Reads the YaRN "Extend context into RAM" flag directly from the running profile's
@@ -3055,7 +3106,8 @@ public partial class MainViewModel : ViewModelBase
     internal void DismissPendingIntervention()
     {
         var hadCloud = CloudRecommendVisible || _runtimeService.ReadCloudRecommend() is not null;
-        var hadLocal = LocalReloadRecommendVisible || _runtimeService.ReadLocalReloadRecommend() is not null;
+        var localReload = _runtimeService.ReadLocalReloadRecommend();
+        var hadLocal = LocalReloadRecommendVisible || localReload is not null;
         if (hadCloud)
         {
             ResumeCurrentModelRecovery();
@@ -3063,7 +3115,14 @@ public partial class MainViewModel : ViewModelBase
 
         if (hadLocal)
         {
-            DeclineLocalReloadRecommend();
+            // Spill-compact warnings are about context management (VRAM overflow), not model
+            // routing. They should NOT be auto-declined when the user launches/restarts a model —
+            // the user may not have seen them yet, and the context is still spilling. Only
+            // auto-decline non-spill reload suggestions (e.g. "try a different model").
+            if (localReload is null || !localReload.SpillCompact)
+            {
+                DeclineLocalReloadRecommend();
+            }
         }
     }
 
@@ -4363,18 +4422,26 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Applies the eased prefill progress curve: linear 0–95%, then an exponential approach
-    /// to 100% so the bar visibly decelerates near the end and only hits 100% on first byte.
+    /// Applies the eased prefill progress curve: linear up to 90%, then a gentle exponential
+    /// approach to 100% so the bar visibly decelerates near the end but keeps moving, and only
+    /// hits 100% on first byte. The ease starts at 90% (not 95%) and uses a small k so the bar
+    /// does NOT visually freeze in the last stretch — a too-aggressive tail (k=6, start at 95%)
+    /// made the bar appear to "stop" at ~99% while prefill was still running, because the
+    /// estimate is a fixed number and real prefill time varies (KV-cache pressure, attention
+    /// over a long sequence, RAM spill). When the real prefill outlasts the estimate, the bar
+    /// would otherwise sit pinned at the asymptote and look frozen.
     /// </summary>
     private static double EasePrefillProgress(double raw)
     {
         raw = Math.Clamp(raw, 0.0, 1.0);
-        if (raw < 0.95)
+        const double easeStart = 0.90;
+        if (raw < easeStart)
         {
             return raw;
         }
-        const double k = 6.0;
-        return 0.95 + 0.05 * (1.0 - Math.Exp(-k * (raw - 0.95)));
+
+        const double k = 3.0;
+        return easeStart + (1.0 - easeStart) * (1.0 - Math.Exp(-k * (raw - easeStart)));
     }
 
     /// <summary>
@@ -4387,8 +4454,31 @@ public partial class MainViewModel : ViewModelBase
         _prefillTimer.Tick += (_, _) =>
         {
             var elapsedSeconds = (DateTime.UtcNow - _prefillStartUtc).TotalSeconds;
+
+            // If prefill is outlasting the estimate (elapsed > estimate but no first byte yet),
+            // extend the estimate so raw stays < 1 and the bar keeps moving. The estimate is a
+            // fixed number, but real prefill time varies (KV-cache pressure, attention over a
+            // long sequence, RAM spill). Without this, once elapsed reaches the estimate the bar
+            // pins at the easing asymptote (~99%) and looks frozen while the model is still
+            // working. Extend by 50% of the original estimate each time we outlast it, capped so
+            // we don't grow unboundedly. This only affects the DISPLAY (the bar + ETA text); the
+            // hang-detection uses its own separate estimate (CurrentPrefillEstimateSeconds).
+            if (_prefillEstimatedSeconds > 0 && elapsedSeconds > _prefillEstimatedSeconds)
+            {
+                const int MaxPrefillEstimateSeconds = 1800;
+                _prefillEstimatedSeconds = Math.Min(
+                    MaxPrefillEstimateSeconds,
+                    (int)(_prefillEstimatedSeconds * 1.5));
+            }
+
             var raw = _prefillEstimatedSeconds > 0 ? elapsedSeconds / _prefillEstimatedSeconds : 0.0;
-            PrefillProgress = EasePrefillProgress(raw);
+            var eased = EasePrefillProgress(raw);
+            // Never let the bar visibly rewind: when the estimate is extended above (because the
+            // real prefill is outlasting it), `raw` drops and `eased` would snap backwards. Clamp
+            // to the running max so the bar is monotonically non-decreasing — it creeps toward
+            // 100% and only resets to 0 when the prefill phase actually ends.
+            _prefillMaxProgress = Math.Max(_prefillMaxProgress, eased);
+            PrefillProgress = _prefillMaxProgress;
 
             var remaining = Math.Max(0, _prefillEstimatedSeconds - (int)elapsedSeconds);
             var speed = Services.PrefillPerformanceModel.FormatSpeed(GetOrCreatePrefillModel().CurrentSpeedTokensPerSec);
@@ -4451,8 +4541,21 @@ public partial class MainViewModel : ViewModelBase
             // the perception that the app is frozen. Once tokens start arriving, show the
             // active telemetry instead.
             GenerationPhaseText = tokens > 0 ? "Generating…" : "Generating… (this may take a while)";
+
+            // The tracker's cumulative rate (tokens / elapsed-since-first-token) reads near 0
+            // during the early generation phase — before the first countable content delta
+            // arrives, or while the model is still reasoning (its reasoning_content is stripped
+            // by the gateway and not counted). Showing that raw value as "0 tok/s" is misleading
+            // — the model is working, it just hasn't produced countable content deltas yet.
+            // Only surface a rate once it is a believable generation speed (>= 5 tok/s); below
+            // that, say "waiting for tokens…" (the same wording the tracker's own snapshot uses).
+            // Note: this is the GENERATION phase. Prefill is a separate phase/label
+            // ("Prefilling context…") driven by StartPrefillTimer, so it never shows this text.
+            const double MinDisplayRate = 5.0;
+            var showRate = speed >= MinDisplayRate;
             GenerationDetailText = elapsedSeconds + "s" + (tokens > 0 ? " · " + tokens + " tokens" : "") +
-                (speed > 0 ? " · " + speed.ToString("0", CultureInfo.InvariantCulture) + " tok/s" : "");
+                (showRate ? " · " + speed.ToString("0", CultureInfo.InvariantCulture) + " tok/s"
+                          : " · waiting for tokens…");
 
             // Estimate the ETA based on the learned typical response length (rolling median of
             // this model/variant's past turns) and the current speed. Falls back to the
@@ -4480,15 +4583,27 @@ public partial class MainViewModel : ViewModelBase
             // 80% while the response continues.
             PrefillProgress = Math.Clamp(Math.Max(tokenProgress, timeProgress), 0.0, 0.8);
 
-            // ETA text: only show when we have a speed estimate (tokens are arriving).
-            if (speed > 0)
+            // ETA text: only show when we have a believable speed estimate (tokens are arriving
+            // at a real generation rate). Dividing the remaining tokens by a near-zero live rate
+            // (the thinking/stripped phase) produced the "0 tok/s / ~987s remaining" artifact —
+            // the ETA exploded and grew with time. Gate on the same floor as the display, and
+            // clamp the result so a stale/low sample can never produce an absurd ETA.
+            if (showRate)
             {
                 var remainingTokens = Math.Max(0, estimatedTotalTokens - tokens);
                 var etaSeconds = (int)(remainingTokens / speed);
-                GenerationEtaText = etaSeconds > 0 ? "~" + etaSeconds + "s remaining" : "finishing…";
+                // Cap the ETA at 5 minutes. A real generation on this hardware finishes in
+                // seconds-to-a-few-minutes; anything larger means the rate sample is not yet
+                // trustworthy, so we show "finishing…" rather than a misleading huge number.
+                const int MaxEtaSeconds = 300;
+                GenerationEtaText = etaSeconds > MaxEtaSeconds
+                    ? "finishing…"
+                    : (etaSeconds > 0 ? "~" + etaSeconds + "s remaining" : "finishing…");
             }
             else
             {
+                // No believable rate yet (still thinking / first tokens not counted). Don't show
+                // a number — it would be the exploding-ETA artifact.
                 GenerationEtaText = string.Empty;
             }
 
@@ -4873,6 +4988,13 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        // Use SharedTurnCounter directly to match the terminal's [turn N] log line. The terminal
+        // logs [turn N] where N = SharedTurnCounter (see FluxMuxGatewayHost.cs line 1519).
+        // This ensures the graph turn numbers match the terminal turn numbers.
+        //
+        // Note: If a turn is aborted (by the safety check, user cancellation, or error), the
+        // SharedTurnCounter advances but no point is plotted, creating a gap in the graph.
+        // This is intentional — the gap indicates that a turn was aborted.
         var x = FluxMuxGatewayHost.SharedTurnCounter;
 
         // Re-title the axes for the turn view the first time it is used in this session, so the
@@ -5063,6 +5185,14 @@ public partial class MainViewModel : ViewModelBase
 
     [ObservableProperty]
     public partial ObservableCollection<GpuAppListItem> SystemGpuAppRows { get; set; } = new();
+
+    /// <summary>
+    /// In-memory set of apps that have a GPU-affinity change pending a restart. Keyed by the
+    /// app's full executable path (falling back to the process name). Populated when the user
+    /// toggles an app's GPU, cleared when the app is restarted (change applied) or the toggle
+    /// is flipped back. Drives the pulsing indicator on the toggle.
+    /// </summary>
+    private readonly HashSet<string> _pendingGpuChanges = new(StringComparer.OrdinalIgnoreCase);
 
     [ObservableProperty]
     public partial string SystemGpuAppSummary { get; set; } = string.Empty;
@@ -5297,16 +5427,19 @@ public partial class MainViewModel : ViewModelBase
 
         try
         {
-            // Build a lookup of registry GPU affinity by raw process name (case-insensitive)
-            // so we can show which GPU each currently-running app is on.
-            var affinityByRawName = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            // Build a lookup of registry GPU affinity by FULL EXECUTABLE PATH (the registry key
+            // itself, case-insensitive). The registry key is the full path (e.g.
+            // "C:\Program Files (x86)\Epic Games\Launcher\Portal\Binaries\Win64\EpicGamesLauncher.exe"),
+            // NOT the process name. Using the full path avoids the "first match wins" problem
+            // where multiple executables share the same process name (e.g. multiple
+            // EpicGamesLauncher.exe or node.exe entries).
+            var affinityByFullPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             var entries = WindowsGpuPreference.GetAllAppAffinities();
             foreach (var entry in entries)
             {
-                var rawName = Path.GetFileNameWithoutExtension(entry.AppName);
-                if (!string.IsNullOrWhiteSpace(rawName) && !affinityByRawName.ContainsKey(rawName))
+                if (!string.IsNullOrWhiteSpace(entry.AppName) && !affinityByFullPath.ContainsKey(entry.AppName))
                 {
-                    affinityByRawName[rawName] = entry.Preference;
+                    affinityByFullPath[entry.AppName] = entry.Preference;
                 }
             }
 
@@ -5320,14 +5453,55 @@ public partial class MainViewModel : ViewModelBase
             {
                 var rawName = row.RawName;
                 var displayName = row.NameLabel;
+                var fullPath = row.FullPath;
 
-                // Determine which GPU this app is on (from registry, or default to Discrete).
+                // Determine which GPU this app is on, from the registry (the source of truth).
+                // Look up by the running process's FULL PATH first (the registry key).
+                // PowerSaving = Motherboard GPU (iGPU), HighPerformance = Discrete GPU (dGPU).
+                // Default to Discrete when there's no registry entry.
+                //
+                // IMPORTANT: Do NOT fall back to process-name matching when the full path is
+                // available but not in the registry. Multiple executables can share the same
+                // process name (e.g. "Archicad" and a companion app "bimx" that ships with
+                // ArchiCAD, or multiple node.exe / EpicGamesLauncher.exe entries). A name-based
+                // match would pick the first registry entry with that name, which may be a
+                // DIFFERENT app than the one actually running. If the full path isn't in the
+                // registry, the app simply has no explicit GPU affinity set — default to dGPU
+                // (the Windows default). The name-based fallback is only used when the full
+                // path is unavailable (MainModule.FileName failed, e.g. elevated process).
                 var isOnMotherboard = false;
-                if (affinityByRawName.TryGetValue(rawName, out var pref) ||
-                    affinityByRawName.TryGetValue(displayName, out pref))
+                if (!string.IsNullOrWhiteSpace(fullPath))
                 {
-                    isOnMotherboard = pref == WindowsGpuPreference.PowerSaving;
+                    if (affinityByFullPath.TryGetValue(fullPath, out var pref))
+                    {
+                        isOnMotherboard = pref == WindowsGpuPreference.PowerSaving;
+                    }
+                    // Full path available but not in registry: no explicit affinity set.
+                    // Default to dGPU (Windows default). Do NOT fall back to name matching.
                 }
+                else
+                {
+                    // Full path unavailable (MainModule.FileName failed). Fall back to
+                    // process-name matching as a last resort. This is less precise but
+                    // better than nothing.
+                    var rawNameKey = rawName;
+                    foreach (var kvp in affinityByFullPath)
+                    {
+                        if (string.Equals(Path.GetFileNameWithoutExtension(kvp.Key), rawNameKey, StringComparison.OrdinalIgnoreCase))
+                        {
+                            isOnMotherboard = kvp.Value == WindowsGpuPreference.PowerSaving;
+                            break;
+                        }
+                    }
+                }
+
+                // A "pending" change is one the user just made (toggled) that has not yet been
+                // applied to the running process (needs a restart). We track these in-memory by
+                // the app's full path (falling back to the process name) so the pulse only shows
+                // on apps that actually have a pending restart, and it stops as soon as the
+                // change is applied (restart) or flipped back.
+                var pendingKey = !string.IsNullOrWhiteSpace(fullPath) ? fullPath : rawName;
+                var hasPendingChange = _pendingGpuChanges.Contains(pendingKey);
 
                 var isPinned = WindowsGpuPreference.IsPinnedName(rawName);
                 var isSystem = IsSystemBackgroundGpuApp(rawName);
@@ -5336,12 +5510,16 @@ public partial class MainViewModel : ViewModelBase
                 var item = new GpuAppListItem
                 {
                     AppName = rawName,
+                    FullPath = fullPath,
                     DisplayName = displayName,
                     StatusLabel = isOnMotherboard
                         ? WindowsGpuPreference.MotherboardGraphicsLabel
                         : WindowsGpuPreference.MainGraphicsCardLabel,
                     MemoryLabel = row.MemoryLabel,
                     IsOnMotherboardGpu = isOnMotherboard,
+                    HasPendingGpuChange = hasPendingChange,
+                    TargetIsMotherboardGpu = isOnMotherboard,
+                    CurrentIsMotherboardGpu = isOnMotherboard,
                     CanToggle = canToggle
                 };
 
@@ -5365,6 +5543,140 @@ public partial class MainViewModel : ViewModelBase
                 {
                     // Headless / no-VRAM processes that are neither pinned nor system — exclude
                     // from the user-facing lists (they need no dedicated VRAM to be visible).
+                    continue;
+                }
+
+                if (isOnMotherboard)
+                {
+                    igpuCount++;
+                    IgpuGpuAppRows.Add(item);
+                }
+                else
+                {
+                    vramCount++;
+                    VramGpuAppRows.Add(item);
+                }
+            }
+
+            // Add running processes that have a registry entry but weren't picked up by the GPU
+            // process collector (e.g. ArchiCAD running on the iGPU, which nvidia-smi doesn't
+            // report and the performance counter may not expose). This ensures the user can
+            // toggle the GPU affinity for these apps even if they're not using measurable VRAM.
+            //
+            // PERFORMANCE: enumerate all running processes ONCE into a path->name map, then do
+            // fast dictionary lookups per registry entry. Calling GetProcessesByName +
+            // MainModule.FileName per entry (hundreds of them) on the UI thread froze the
+            // Settings tab.
+            var listedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var listedProcessNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var row in VramProcessRows)
+            {
+                if (!string.IsNullOrWhiteSpace(row.FullPath))
+                {
+                    listedPaths.Add(row.FullPath);
+                }
+                if (!string.IsNullOrWhiteSpace(row.RawName))
+                {
+                    listedProcessNames.Add(row.RawName);
+                }
+            }
+
+            // Build a map of running process full path -> process name (enumerated once).
+            var runningByPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (var proc in Process.GetProcesses())
+                {
+                    try
+                    {
+                        var path = proc.MainModule?.FileName;
+                        if (!string.IsNullOrWhiteSpace(path) && !runningByPath.ContainsKey(path))
+                        {
+                            runningByPath[path] = proc.ProcessName;
+                        }
+                    }
+                    catch
+                    {
+                        // Access to MainModule can fail for elevated/system processes; skip.
+                    }
+                    finally
+                    {
+                        proc.Dispose();
+                    }
+                }
+            }
+            catch
+            {
+                // Enumerating processes failed; skip the fallback entirely.
+            }
+
+            foreach (var entry in entries)
+            {
+                if (string.IsNullOrWhiteSpace(entry.AppName))
+                {
+                    continue;
+                }
+
+                // Skip if already listed by full path.
+                if (listedPaths.Contains(entry.AppName))
+                {
+                    continue;
+                }
+
+                // Only include if the process is currently running (fast dictionary lookup).
+                if (!runningByPath.TryGetValue(entry.AppName, out var processName))
+                {
+                    continue;
+                }
+
+                // Skip if a process with this name is already listed (prevents duplicates
+                // when multiple registry entries share the same process name, e.g. two
+                // llama-server.exe entries at different paths).
+                if (listedProcessNames.Contains(processName))
+                {
+                    continue;
+                }
+
+                var isOnMotherboard = entry.Preference == WindowsGpuPreference.PowerSaving;
+                var isPinned = WindowsGpuPreference.IsPinnedName(processName);
+                var isSystem = IsSystemBackgroundGpuApp(processName);
+                var canToggle = !isPinned && !isSystem;
+
+                var pendingKey = entry.AppName;
+                var hasPendingChange = _pendingGpuChanges.Contains(pendingKey);
+
+                var item = new GpuAppListItem
+                {
+                    AppName = processName,
+                    FullPath = entry.AppName,
+                    DisplayName = processName,
+                    StatusLabel = isOnMotherboard
+                        ? WindowsGpuPreference.MotherboardGraphicsLabel
+                        : WindowsGpuPreference.MainGraphicsCardLabel,
+                    MemoryLabel = "—",
+                    IsOnMotherboardGpu = isOnMotherboard,
+                    HasPendingGpuChange = hasPendingChange,
+                    TargetIsMotherboardGpu = isOnMotherboard,
+                    CurrentIsMotherboardGpu = isOnMotherboard,
+                    CanToggle = canToggle
+                };
+
+                if (isSystem)
+                {
+                    systemCount++;
+                    SystemGpuAppRows.Add(item);
+                    continue;
+                }
+
+                if (isPinned)
+                {
+                    protectedCount++;
+                    ProtectedGpuAppRows.Add(item);
+                    continue;
+                }
+
+                if (!canToggle)
+                {
                     continue;
                 }
 
@@ -5449,7 +5761,9 @@ public partial class MainViewModel : ViewModelBase
 
     /// <summary>
     /// Toggles the GPU affinity of a single user-facing app. The pill's DataContext is the
-    /// <see cref="GpuAppListItem"/>; clicking flips it to the opposite GPU.
+    /// <see cref="GpuAppListItem"/>; clicking flips it to the opposite GPU. After the registry
+    /// change succeeds, offers to restart the app now so the new GPU affinity takes effect
+    /// immediately (otherwise it applies on next launch / reboot).
     /// </summary>
     [RelayCommand]
     private async Task ToggleGpuAppAsync(GpuAppListItem? item)
@@ -5464,21 +5778,93 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        // The toggle flips the registry value. The displayed side is the current registry value
+        // (item.IsOnMotherboardGpu), so the target is the opposite. This makes the toggle behave
+        // like a real switch: clicking it always moves the highlighted side to the other half.
         var target = item.IsOnMotherboardGpu
             ? WindowsGpuPreference.HighPerformance
             : WindowsGpuPreference.PowerSaving;
 
+        // The pending key matches what RefreshGpuAppRows uses (full path, else process name).
+        var pendingKey = !string.IsNullOrWhiteSpace(item.FullPath) ? item.FullPath : item.AppName;
+
         string statusMsg;
+        bool success;
         try
         {
-            var success = await Task.Run(() => WindowsGpuPreference.ApplyForApp(item.AppName, target)).ConfigureAwait(true);
+            // Use the full executable path when available so the registry is written for the
+            // correct executable (e.g. "C:\Program Files\Graphisoft\Archicad 30\node.exe"
+            // instead of just "node", which could match multiple node.exe instances).
+            var registryKey = pendingKey;
+            success = await Task.Run(() => WindowsGpuPreference.ApplyForApp(registryKey, target)).ConfigureAwait(true);
             statusMsg = success
                 ? $"{item.DisplayName} moved to {WindowsGpuPreference.LabelFor(target)}."
                 : $"Could not change GPU affinity for {item.DisplayName}.";
         }
         catch (Exception ex)
         {
+            success = false;
             statusMsg = $"Could not change GPU affinity for {item.DisplayName}. {ex.Message}";
+        }
+
+        if (success)
+        {
+            // Track the pending state. The app was pending before this click if it's in the set.
+            // After flipping the registry:
+            //  - If it was pending and we just flipped it back to the original value, the change
+            //    is undone -> clear pending (the pulse stops).
+            //  - Otherwise the registry now differs from the running process -> mark pending
+            //    (the pulse starts / continues).
+            var wasPending = _pendingGpuChanges.Contains(pendingKey);
+            // We can't perfectly know the "original" value, but the practical rule the user
+            // expects is: a pending toggle, when clicked again, cancels the pending change.
+            // So if it was pending, clicking it cancels (clears) the pending state. If it was
+            // not pending, clicking it creates a new pending change.
+            if (wasPending)
+            {
+                _pendingGpuChanges.Remove(pendingKey);
+                statusMsg = $"{item.DisplayName} GPU change cancelled — back to {WindowsGpuPreference.LabelFor(target)}.";
+            }
+            else
+            {
+                _pendingGpuChanges.Add(pendingKey);
+            }
+
+            // The registry change only takes effect when the app next starts. Offer to restart
+            // it now so the user doesn't have to reboot or manually relaunch.
+            var gpuLabel = WindowsGpuPreference.LabelFor(target);
+            System.Diagnostics.Debug.WriteLine($"[ToggleGpuApp] Registry updated for {item.AppName} -> {gpuLabel}. Showing restart dialog...");
+            var restart = Views.ThemedDialog.Confirm(
+                "Restart " + item.DisplayName + "?",
+                "GPU affinity for " + ControlLabelMarkup.Mark(item.DisplayName)
+                    + " is now set to " + ControlLabelMarkup.Mark(gpuLabel)
+                    + ".\n\nThis takes effect when the app next starts. Restart "
+                    + item.DisplayName + " now to apply it immediately?\n\n"
+                    + "(If it has unsaved work, choose Cancel and restart it yourself.)",
+                confirmLabel: "Restart now",
+                cancelLabel: "Not now");
+            System.Diagnostics.Debug.WriteLine($"[ToggleGpuApp] Restart dialog result: {restart}");
+
+            if (restart)
+            {
+                // Use the full executable path when available so only the specific process is
+                // restarted (e.g. the ArchiCAD node.exe, not every node.exe on the system).
+                var restartResult = !string.IsNullOrWhiteSpace(item.FullPath)
+                    ? await Task.Run(() => WindowsGpuPreference.RestartAppByPath(item.FullPath)).ConfigureAwait(true)
+                    : await Task.Run(() => WindowsGpuPreference.RestartAppByName(item.AppName)).ConfigureAwait(true);
+                System.Diagnostics.Debug.WriteLine($"[ToggleGpuApp] Restart result: {restartResult}");
+                if (restartResult)
+                {
+                    // The app was restarted, so the pending change is now applied. Clear pending.
+                    _pendingGpuChanges.Remove(pendingKey);
+                    statusMsg = item.DisplayName + " restarted on " + gpuLabel + ".";
+                }
+                else
+                {
+                    statusMsg = item.DisplayName + " set to " + gpuLabel
+                        + ", but it could not be restarted automatically. Restart it manually to apply.";
+                }
+            }
         }
 
         StatusMessage = statusMsg;
@@ -23105,10 +23491,10 @@ public partial class MainViewModel : ViewModelBase
     }
 
     private static string DefaultLocalThreadCount() =>
-        ResolveNearestOption(Math.Clamp(Environment.ProcessorCount / 2, 4, 32), [4, 6, 8, 10, 12, 16, 20, 24, 32]).ToString();
+        ResolveNearestOption(Math.Clamp((int)(Environment.ProcessorCount * 0.75), 4, 32), [4, 6, 8, 10, 12, 16, 20, 24, 32]).ToString();
 
     private static string DefaultLocalBatchThreadCount() =>
-        ResolveNearestOption(Math.Max(1, Math.Clamp(Environment.ProcessorCount / 2, 4, 32) / 2), [1, 2, 4, 8, 12, 16, 24, 32]).ToString();
+        ResolveNearestOption(Math.Max(1, Math.Clamp((int)(Environment.ProcessorCount * 0.25), 4, 32)), [1, 2, 4, 8, 12, 16, 24, 32]).ToString();
 
     private static string CoerceOnOff(string? value, string fallback)
     {

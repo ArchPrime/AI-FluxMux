@@ -2,6 +2,1015 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
+## ℹ️ NOTE: Terminal vs. graph turn numbers differ by one during in-flight turns (11/6) — left as-is
+
+**Observation (user report):** The terminal telemetry's most recent turn number sometimes doesn't match the graph's most recent turn number.
+
+**Root cause (timing, not a data bug):** The terminal stamps `[turn N]` at turn **start** (`SharedTurnCounter++` at `FluxMuxGatewayHost.cs` line 1520). The graph stamps `turn N` at turn **end** (`PlotTurnTelemetry` reads the *current* `SharedTurnCounter` at the active→idle transition, `MainViewModel.cs` line 4998). So while a turn is in flight, the terminal has already advanced to the next number and the graph is still on the previous one. They agree when no turn is in flight, and diverge by one when a turn is in progress (more visible with several quick turns in a row). The numbers themselves are consistent.
+
+**Decision:** Left as-is (user). The two views measure different things (turn start vs. turn end), and each is accurate relative to its own stated turn. No code change.
+
+## ✅ DONE: "Prefilling…" should become "Thinking…" when a thinking token arrives (11/6)
+
+**Symptom (user request):** For a thinking model (Qwen YaRN), the display sat on "Prefilling context…" for the entire think phase (the first byte arrives quickly but the first *visible* content token is minutes away). The user noted that if a thinking token has arrived, the label should presumably become "Thinking…", not stay on "Prefilling…".
+
+**Root cause:** The prefill→generation display transition (`onFirstContentToken`) fired on the first token of *any* kind (content OR reasoning, since `CountDeltaTokens` counts both). So for a thinking model, the first token is a *reasoning* token, and the display would either stay on "Prefilling…" (if the reasoning token wasn't detected as content) or jump straight to "Generating…" (if it was) — neither of which is honest. There was no "Thinking…" state.
+
+**Fix:** Split the first-token signal into two:
+- `onFirstReasoningToken` — fires on the first REASONING (thinking) token → UI switches "Prefilling…" → "Thinking…".
+- `onFirstContentToken` — now fires on the first VISIBLE content token (content/text/tool_calls, NOT reasoning) → UI switches "Thinking…" → "Generating…" AND signals the hang clock (`GotContentToken`).
+
+This means:
+- The display now shows "Prefilling…" → "Thinking…" → "Generating…" for a thinking model, which is honest.
+- The hang clock's `GotContentToken` is only set when *visible* content arrives, so the capped prefill/thinking window (120s) stays in effect through the thinking phase. A model that thinks for >120s will get the "wait longer / end / switch" dialog (correct — the user is waiting).
+- The performance model's "first content token" measurement now measures time-to-first-*visible*-token, which is what the user actually experiences.
+
+**Files changed:**
+- `Services/OpenAiStreamTelemetryProxy.cs` — added `onFirstReasoningToken` callback + `HasReasoningToken` / `HasVisibleContentToken` helpers. `onFirstContentToken` now fires on visible content only (not reasoning).
+- `Services/FluxMuxGatewayHost.cs` — added `ReportThinkingStarted` callback; wired `onFirstReasoningToken` to it.
+- `Services/FluxMuxRuntimeService.cs` — added `ThinkingStartedNotice` event; wired `ReportThinkingStarted` to it.
+- `ViewModels/MainViewModel.cs` — added `ThinkingStartedNotice` handler that switches "Prefilling…" → "Thinking…".
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger a turn on a thinking model (Qwen YaRN). The display should show "Prefilling…" → "Thinking…" (when the first thinking token arrives) → "Generating…" (when the first visible content token arrives).
+
+## ✅ DONE: Prefill bar rewind + hang dialog never appearing for slow-but-healthy prefills (11/6)
+
+**Symptom (user report):** After the issue-1 fix, the prefill progress bar still visibly "rewound" (snapped backwards) repeatedly, and the "wait longer / end / switch" dialog still never appeared even when the prefill was taking a long time.
+
+**Root cause (two separate bugs):**
+
+1. **Bar rewind:** `StartPrefillTimer` extends the estimate by 1.5× when the real prefill outlasts it. This makes `raw = elapsed/estimate` drop (e.g. 1.0 → 0.67), so the bar snaps backwards from ~100% to ~67%, then climbs again, hits the estimate, extends again, rewinds again — the "rewinding" the user saw.
+
+2. **Dialog never appearing:** The hang watchdog's "keep waiting within prefill estimate" branch was gated on `!gotUpstreamBytes()` (the *first-byte* case). But for a thinking model, the first *byte* arrives quickly (headers) while the first *content* token is minutes away. Once the first byte arrives, `ShouldAbort` switches to the long post-first-byte **stall** deadline (1800s for long-load), so the dialog would only appear after ~30 min of quiet — effectively never. The 120s prefill-estimate cap only protected the "no bytes at all" case, not the "bytes arrived but no content token" case.
+
+**Fix:**
+
+1. **Bar rewind:** Added a `_prefillMaxProgress` running-max clamp in `StartPrefillTimer`. The bar is now monotonically non-decreasing — it creeps toward 100% and only resets to 0 when the prefill phase actually ends (first content token). No more visible rewind.
+
+2. **Dialog:** Added a `GotContentToken` flag + `NoteContentToken()` to `LocalStreamHangClock`, set from the `onFirstContentToken` callback. The watchdog now checks the (capped) prefill-estimate window **until the first content token arrives** (regardless of whether header bytes have arrived), running this check *before* the `ShouldAbort` gate. So a slow-but-healthy prefill that's still within the capped estimate keeps waiting quietly; once past the cap (120s) with no content token, the "wait longer / end / switch" dialog appears. After the first content token, the normal post-first-byte stall logic governs.
+
+**Files changed:**
+- `Services/LocalStreamHangPolicy.cs` — added `GotContentToken` + `NoteContentToken()` to `LocalStreamHangClock`.
+- `Services/FluxMuxGatewayHost.cs` — `onFirstContentToken` now calls `hangClock?.NoteContentToken()`; the watchdog's prefill-window check now runs before the `ShouldAbort` gate and applies until the first content token (not just until the first byte).
+- `ViewModels/MainViewModel.cs` — added `_prefillMaxProgress` running-max clamp so the prefill bar never visibly rewinds; reset at prefill start.
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):**
+- Bar: trigger a prefill that outlasts its estimate → the bar should creep toward 100% without snapping backwards.
+- Dialog: with port rules off, trigger a prefill where the first content token takes >120s → the "wait longer / end / switch" dialog should appear at ~120s (previously it never did).
+
+## ✅ DONE: Cline auto-compact turned off even in endpoint-managed (compact mode "none") (11/6)
+
+**Symptom (user report):** FluxMux was deactivating Cline's default auto-compact feature even when Cline-like endpoint mode was selected with compact mode "none" (endpoint managed). When compact mode is "none", FluxMux is NOT doing the compacting — Cline should keep its own auto-compact on.
+
+**Root cause:** In `ClineContextSync.cs`, the `PatchGlobalState` method called `ApplyAutoCondenseOff(root)` **unconditionally** (line 682), which set `useAutoCondense = false` in Cline's `globalState.json`. The `global-settings.json` auto-compact off (`PatchGlobalSettingsAutoCompactOff`) was correctly gated on compact mode ≠ "none" (line 286), but the `globalState.json` `useAutoCondense` off was NOT gated. So when compact mode was "none" (endpoint managed), FluxMux still turned off Cline's auto-compact.
+
+**Fix:** Added a `compactMode` parameter to `PatchGlobalState`. Now `ApplyAutoCondenseOff` is only called when `compactMode` is not "none". This mirrors the existing gate on `PatchGlobalSettingsAutoCompactOff`. The caller (`MergeIntoModelsFile`) now passes `options.CompactMode`.
+
+**Files changed:**
+- `Services/ClineContextSync.cs` — `PatchGlobalState` now takes a `compactMode` parameter and only calls `ApplyAutoCondenseOff` when compact mode is not "none". The caller passes `options.CompactMode`.
+
+**Build:** 0 errors. **Deploy:** DEPLOYED 11/6 ~4:54am (verified: running DLL's PatchGlobalState has the compactMode param).
+
+**Verify (manual):** Select a Cline-like endpoint with compact mode "none" (endpoint managed). Sync the Cline context. Cline's `useAutoCondense` in `globalState.json` should remain unchanged (not set to false). With compact mode "port-rules" or "per-profile", `useAutoCondense` should be set to false as before.
+
+## ✅ DONE: Prefill sits forever when port rules are off — hang watchdog disabled (11/6)
+
+**Symptom (user report):** The prefill progress bar sat on "Prefilling context…" forever, looping at ~80% and adding a minute to the wait time again and again. No dialog appeared, no abort, no way to intervene. The user had to kill llama-server manually to recover. Port rules were **off**.
+
+**Root cause:** When port rules are off, `portRules.HangEnabled` is `false`. The hang watchdog (`WatchLocalStreamHangAsync`) was gated on `portRules.HangEnabled` (line 1807-1814), so it was set to `Task.CompletedTask` — meaning **no hang detection ran at all**. The only backstop was the copy timeout (`timeoutCts`), which for a long-load (YaRN) profile is ~780s (13 min) and can be extended. So a genuinely stuck prefill (llama-server accepted the request but never streams a content token — e.g. RAM-spill thrash, or the stream stalled) just sat there with the bar looping at ~80% and no way to intervene.
+
+The `HangEnabled` flag was conflating two different things:
+1. The **aggressive port-rule behaviors** (telemetry tallying, auto-abort) — these SHOULD be gated on `HangEnabled`.
+2. The **basic "llama-server is stuck, let me out" safety** (first-byte/stall detection + the "wait longer / end / switch" dialog) — this must ALWAYS run for local routes.
+
+**Fix:** The hang watchdog now runs for **all** local routes, regardless of `HangEnabled`. The telemetry tallying inside `WatchLocalStreamHangAsync` is already gated on `clock.Rules.HangEnabled` (line 4308), so the aggressive behaviors are still off when port rules are off. But the first-byte/stall detection and the "wait longer / end / switch" dialog now always run, so the user can get out of a stuck prefill.
+
+**Files changed:**
+- `Services/FluxMuxGatewayHost.cs` — line 1807-1814: removed the `&& portRules.HangEnabled` gate on `hangWatch`, so the watchdog always runs for local routes.
+
+**Build:** 0 errors. **Deploy:** DEPLOYED 11/6 ~4:54am (verified: running app from bin\Debug\net10.0, DLL built 4:53:55am, both source edits precede the build).
+
+**Verify (manual):** Turn off port rules. Trigger a prefill that stalls (e.g. a large RAM-spill prompt). After ~120s of quiet, the "wait longer / end / switch" dialog should appear (previously it never appeared when port rules were off).
+
+
+## ✅ DONE: "0 tok/s / ever-growing ETA" display bug + excessive prefill wait + prefill rate stuck at 0 + prefill bar freezes near end (11/5 ~18:00)
+
+**Symptom (user report):** Progress bar showed "Generating… 79s · 12 tokens · 0 tok/s · ~987s remaining" — a misleading 0 rate and an ETA that only grew. Separately, the user reported chats becoming "completely non responsive" near the end of a prefill.
+
+**What the logs actually showed (live, 17:55):**
+- The model was **NOT stuck.** `llama_server_output.log` showed a clean fast sequence: prefill 1017–2968 tok/s, gen **116–129 tok/s** on every task. `Proxy_Context_Events.jsonl` showed steady `upstream_ok status=200 stream=true` every ~3s. No timeout/hang/error events.
+- The "0 tok/s / ~987s" was the **display artifact** (see root cause below), not a model stall.
+- The "non responsive" was a **context-overflow** situation, not a code bug: `Proxy_Local_Reload_Recommend.json` showed `neededContext: 278111` > loaded variant's `hotContext: 262144` (with `local_extend_context_into_ram: false`). The gateway was already recommending a switch to the 393k YaRN variant and warning "A Client app may sit on reconnecting and not show a failed turn — do not continue that chat." That warning is the non-responsiveness.
+
+**Four separate fixes:**
+
+1. **Display bug — `StartGenerationTimer` (`ViewModels/MainViewModel.cs`, line ~4442).** The tracker's cumulative rate (`_completionTokens / (now - _firstTokenUtc)`) reads near 0 during the thinking/stripped phase and the first moment after the first token. Two compounding problems:
+   - `speed.ToString("0")` rounded a small live rate to "0 tok/s".
+   - `etaSeconds = remainingTokens / speed` divided by that near-zero rate → the ETA exploded and *grew* (the `~987s`).
+   - **Fix:** gate both the rate display and the ETA on `speed >= 5` (`MinDisplayRate`). Below that, show "waiting for tokens…" instead of a fake "0 tok/s" (same wording the tracker's own snapshot uses). Clamp the ETA to a max of 300s (`MaxEtaSeconds`); above that, show "finishing…" instead of a misleading huge number. Note: this label is in the **generation** phase only — prefill is a separate phase/label ("Prefilling context…") driven by `StartPrefillTimer`, so it never shows this text.
+
+2. **Excessive prefill wait — prefill-estimate block (`ViewModels/MainViewModel.cs`, line ~533, VRAM branch).** A warm VRAM prefill of ~22K tokens at the learned ~2646 tok/s finishes in ~8s, but the code **floored the estimate at 60s** and applied a **1.5×/2× multiplier for prompts >32K/64K** even when the learned model already had accurate data. So the UI showed "up to ~1–2 minutes" and the hang-detection waited that long before offering any option.
+   - **Fix:** only apply the conservative multiplier when the learned model has **no** data (`hasLearnedData`). When it does, trust the learned estimate down to a small **15s floor** (instead of 60s). When there's no learned data, keep the conservative 30s floor for large prompts. Cap unchanged at 1800s.
+
+3. **Prefill rate stuck at 0 that never resolves — `PrefillPerformanceModel` (`Services/PrefillPerformanceModel.cs`).** The prefill progress bar's speed is **not a live measurement** — it's a learned constant (`CurrentSpeedTokensPerSec`). It was reading the **cold** speed, which is the wrong source for this workflow: the operator resumes a chat on an already-loaded model, so prefills are **warm**, and the cold model is fit from **at most one sample** (the first turn after a launch) and is then **frozen** — the operator is forced to switch models before a second cold prefill on the same variant ever happens, so the cold value can never re-fit or self-correct. If that one cold sample was degenerate (a cold-load turn where the model was still loading from disk → huge `firstByteMs` → implied speed ≈ 0), the persisted `coldTokensPerSec` sits at ~0 forever and the bar shows "0 tok/s" that **never resolves**.
+   - **Fix (display):** `CurrentSpeedTokensPerSec` now prefers the **warm** speed (the realistic speed for a warm resume, and what `EstimateSeconds` actually uses for warm turns — and the model that actually accumulates data), falling back to cold, then to the default 500. The display can no longer be pinned to a frozen degenerate cold value.
+   - **Fix (root cause):** the single-sample fit path now applies the same 50 tok/s lower bound as the multi-sample path, so a degenerate cold-load sample can no longer persist a near-0 speed.
+
+4. **Prefill bar "moves then stops" near the end — `EasePrefillProgress` + `StartPrefillTimer` (`ViewModels/MainViewModel.cs`).** The prefill bar's `raw` = `elapsed / _prefillEstimatedSeconds`. The easing curve was linear up to 95%, then an aggressive exponential approach to 100% (`k=6`). Once `elapsed` reached 95% of the estimate, the bar entered the asymptotic tail and **visually froze at ~99%** while prefill was still running — it only snapped to 100% on first byte. Because the estimate is a fixed number but real prefill time varies (KV-cache pressure, attention over a long sequence, RAM spill), the bar would pin at the asymptote and look frozen. The earlier "excessive wait" fix (lower warm floor, no multiplier when learned data exists) made the estimate *shorter*, so the bar hit the asymptote *earlier* and sat frozen for longer.
+   - **Fix (easing):** softened the tail — ease starts at 90% (not 95%) with a smaller `k=3`, so the bar keeps visibly moving through the last stretch instead of freezing.
+   - **Fix (estimate growth):** in `StartPrefillTimer`, if `elapsed` outlasts the estimate (no first byte yet), extend the estimate by 50% (capped at 1800s) so `raw` stays < 1 and the bar keeps moving. This only affects the **display** (bar + ETA text); the hang-detection uses its own separate estimate (`CurrentPrefillEstimateSeconds`, set once via `SetPrefillEstimate` before the timer starts).
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — `StartGenerationTimer` (rate display + ETA gate/clamp), the VRAM prefill-estimate branch (multiplier + floor), `EasePrefillProgress` (softer tail), and `StartPrefillTimer` (estimate growth when outlasted).
+- `Services/PrefillPerformanceModel.cs` — `CurrentSpeedTokensPerSec` (warm→cold→default priority) and the single-sample fit path (50 tok/s floor).
+
+**Build:** 0 errors (separate-output build, `artifacts\testrun\`). **Tests:** 1740/1740 pass (full suite).
+**Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):**
+- Display (generation): start a local turn → during the early generation phase the detail should read "… · waiting for tokens…" (not "0 tok/s") and the ETA should be empty (not a growing number). Once content deltas flow at a real rate, "N tok/s" and a sane ETA (≤ ~5 min) appear.
+- Prefill wait: a warm VRAM prefill of a ~22K-token prompt should estimate ~8–15s (not 60s+), so the "wait longer" dialog is not suppressed for an excessive window.
+- Prefill rate: the prefill progress bar should show a positive tok/s (the learned **warm** speed, which is what actually accumulates data in the resume-a-chat workflow) — never a frozen "0 tok/s" that never resolves.
+- Prefill bar: the bar should keep visibly moving through the last stretch of prefill (not freeze at ~99% while the model is still working). If prefill outlasts the estimate, the bar keeps moving (the estimate extends) rather than pinning at the asymptote.
+
+**Still open (operational, not code):** the context overflow. The loaded variant `max VRAM only context 2` (262144) is too small for the current chat (needs ~278111). Resolve by switching to the 393k YaRN variant (`YaRN test with vision`) or compacting the chat. See `Proxy_Local_Reload_Recommend.json`.
+
+## ✅ DONE: "Prefill stall" re-diagnosis — it was NOT a prefill stall (11/5 ~17:29)
+
+**Symptom (user report + screenshot):** Progress bar shows "Generating… 79s · 12 tokens · 0 tok/s · ~987s remaining" — looked like a stall.
+
+**What the logs actually show (live, 17:28–17:29):**
+- `llama-server` (pid 34788, started 16:50) is **running and healthy**. `Local_Runtime_State.json` → `phase=ready`, port 5002.
+- **Prefill is fast, not stalling:** recent tasks prefill at **2188–3690 tok/s** (e.g. task 28179: 2340 tokens in 1.07s; task 27947: 27757 tokens in 8.46s). No `prompt state size … exceeds cache size limit … skipping` lines (the old `--cache-ram` MiB bug is fixed and deployed).
+- **Generation is also fast:** `eval time … 101–109 tokens per second`, draft acceptance 0.73–0.87.
+- `Local_Context_Usage.json`: prompt_tokens 28270 / context_limit 262144 (~11% full) — **no context overflow**.
+- `prefill_perf_*.json` warm speed ~2400–2650 tok/s; `gen_length_*.json` median 359 tokens.
+- GPU: 31524/32607 MiB used, 0% util at the idle moment (between turns).
+
+**Conclusion:** The "0 tok/s / ~987s remaining" is a **UI estimate artifact, not a real stall.** The `~987s remaining` is computed from a stale/low `predicted_per_second` (or a near-zero live rate sample) early in a turn, before the real ~100 tok/s rate is established. The model is actually generating at ~100 tok/s. The 12 tokens shown is just how many had streamed at the screenshot moment.
+
+**CONFIRMED via `Proxy_Cloud_Handshake.log` (17:40, live):** The gateway itself measured the real turns — e.g. "gen stats: 103 tokens at 114.5 tok/s", "186 tokens at 135.4 tok/s", "124 tokens at 110 tok/s", "199 tokens at 118.9 tok/s". First content token arrives in **1.2–2.2s** and the whole stream completes in **2.3–3.4s**. So the model is genuinely fast; the "0 tok/s / ~987s" the user saw is a UI display bug, not a model stall.
+
+**Root cause of the misleading UI (two compounding bugs in `MainViewModel.StartGenerationTimer`, lines ~4442–4525):**
+1. **ETA uses a learned median that underestimates long turns.** `estimatedTotalTokens = GenerationLengthModel.EstimatedCompletionTokens` (rolling median, currently ~197 for this profile). `remainingTokens = max(0, estimatedTotal - tokens)`. For a long turn (e.g. 1000+ tokens) the median is far too small, so the ETA is wildly wrong.
+2. **ETA only *increases* when the live rate is near 0.** `etaSeconds = remainingTokens / speed`. When `speed` is a tiny non-zero value (e.g. 0.1 tok/s from a near-zero live sample), `remainingTokens / 0.1` is huge and *grows* as `tokens` stays flat — exactly the "estimate only increases with time" the user reported. The "0 tok/s" display comes from `speed.ToString("0")` rounding a small live rate down to 0.
+
+**Why the live rate can be near 0 even though tokens are flowing:** `GenerationSpeedTracker.RecalculateLiveRateLocked` computes `_completionTokens / (now - _firstTokenUtc)`. `CountDeltaTokens` estimates tokens from delta text length (`(len+3)/4`). If the gateway strips thinking markup / batches deltas, the estimated token count can lag badly behind real time, making the cumulative rate collapse toward 0 for a window — which the UI then shows as "0 tok/s" and feeds into the exploding ETA.
+
+**Fix direction (not yet implemented):**
+- Don't divide by a near-zero live rate. Gate the ETA on `speed >= some floor` (e.g. 5 tok/s); below that, show "…" instead of a number.
+- Don't let the ETA grow unboundedly: clamp `etaSeconds` to a sane max (e.g. 300s) and/or base it on the *observed* rate over the last N seconds rather than the cumulative average.
+- The "0 tok/s" display should fall back to the gateway's measured `gen stats` rate (which is accurate) rather than the tracker's cumulative estimate when the two diverge.
+- Reconsider `GenerationLengthModel` median as the ETA basis for long turns — it's a median of past turns and is wrong for any turn longer than the median.
+
+**Why the previous session looped:** It kept re-running the same `n_ctx` regex parse of `Proxy_Context_Events.jsonl` with escalating `Select-Object -First` limits (up to 2^31) — a no-op that returned the same 5 values (262144×4, 393216×1) every time. The n_ctx values are irrelevant to this symptom; the real data was in `llama_server_output.log` (prefill/eval timing) and `Local_Context_Usage.json`.
+
+**Next (if the user still sees 0 tok/s):**
+1. Confirm whether the "0 tok/s" is a *transient* early-turn estimate (resolves in a few seconds) or *persistent*. If persistent, the live rate isn't updating — check `GenerationSpeedTracker` for a stuck/zeroed rate and whether `predicted_per_second` is being ignored.
+2. The `~987s remaining` estimate is the misleading part — it should be clamped or recomputed once the live rate is known. See the "Graph tok/s spike" entry below for the related `predicted_per_second` handling.
+
+## ✅ DONE: YaRN prefill stall — `--cache-ram` unit mismatch (GB vs MiB) (11/5)
+
+**Symptom (user report):** The latest dev version started stalling under YaRN profiles, with 0 tok/sec recorded by the progress bar during the generating phase — particularly the more full the context gets.
+
+**Root cause (confirmed via `llama_server_output.log` + llama-server docs):**
+The `--cache-ram` flag in llama-server expects **MiB**, but the FluxMux "Unlimited" case was passing a value computed in **GB**. On a 64 GB machine, `cappedRamGb = 38` (60% of 64 GB), and the code passed `--cache-ram 38` — which llama-server interprets as **38 MiB** instead of **38 GB**.
+
+With a 38 MiB cache limit, the prompt state for even a small prompt (~300 MiB) exceeds the limit, so llama-server **skips caching** the prompt state entirely. Every turn requires a full KV cache recompute from scratch. For large prompts (97K+ tokens), this takes 15+ minutes. The Long-load first-byte safety check (600s limit) kills the turn before it completes. The user sees 0 tok/sec during the "generating" phase because the model is actually still prefilling (recomputing the KV cache), not generating.
+
+**Key log evidence:**
+```
+srv alloc: - prompt state size 3607.592 MiB exceeds cache size limit 38.000 MiB, skipping
+```
+The 38.000 MiB limit matches `--cache-ram 38` (38 GB computed, 38 MiB passed).
+
+**Fix:** Convert the GB value to MiB by multiplying by 1024 before passing to `--cache-ram`.
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — "Unlimited" case now computes `cappedRamMib = cappedRamGb * 1024` and passes that to `--cache-ram`.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass.
+**Deploy:** ✅ DEPLOYED & VERIFIED (11/5 ~16:01). App restarted 3:02 PM; running llama-server (pid 30932, started 4:01 PM) now launches with `--cache-ram 38912` (38 GB in MiB) instead of `--cache-ram 38`. The 899s/896s `request_timeout` postmortems in `Proxy_Context_Events.jsonl` are from BEFORE the restart (timestamps 02:44–02:53 UTC). Post-restart, warm prefills run 0.4–1.1s (1200–1900 tok/s) and turns stream in 2–3s. The earlier "stalling" was the pre-deploy cache bug; it is resolved.
+**Verify (manual):** ✅ Confirmed live — `llama_server_output.log` shows `--cache-ram 38912`; no `prompt state size ... exceeds cache size limit ... skipping` lines since restart; prefill times consistent.
+
+## 🟡 OPEN: YaRN profile — "wait longer" dialog never appears + prefill killed at 900s (11/5)
+
+**Symptom (user report):** On the YaRN profile (GPU+CPU, RAM-spill, ~215K prompts), the "wait longer / end / switch" dialog never appears, and the prefill is killed before completion.
+
+**Root cause (confirmed via logs + code):**
+1. **Dialog never appears:** `portRules.HangEnabled` was `false` in `port_forwarding_rules.json`. The hang watcher (`WatchLocalStreamHangAsync`) is gated on `HangEnabled` (line 1808), so it never starts. Without the watcher, `AskHangWaitAsync` is never called, so the dialog never shows. The turn is instead killed by the **copy timeout** (`timeoutCts.CancelAfter(900s)` for long-load profiles).
+2. **Prefill killed at 900s:** The YaRN profile is RAM-spill with ~215K-token prompts. The actual prefill takes >899s, exceeding the 900s copy timeout. The `ThinkingFirstByteSeconds` is already at its max (900s, clamped in `PortForwardingRules.Clamp()`).
+
+**Fix applied:**
+- `port_forwarding_rules.json` — set `"hangEnabled": true` so the hang watcher starts and the "wait longer" dialog appears, giving the user a choice instead of a hard kill.
+
+**Remaining issue:**
+- The YaRN prefill at ~215K tokens still takes >900s, which exceeds the max copy timeout. The user needs to either:
+  - **Compact the context** to reduce the prompt size (recommended), or
+  - Use a smaller context window (e.g. 262K instead of 393K) to reduce the KV cache size and prefill time.
+
+**Deploy:** The `hangEnabled` change is a config change, not a code change. It takes effect on the next turn (the port rules are re-read on each request). No rebuild needed.
+**Verify (manual):** After the next YaRN turn, the "wait longer / end / switch" dialog should appear at ~120s of quiet (the prefill estimate hard cap) instead of the turn being hard-killed at 900s.
+
+## ✅ DONE: "Wait longer" dialog never appeared — prefill estimate hard cap (11/5)
+
+**Symptom (user report):** The "Wait longer / End / Switch" dialog never appeared during the stall, even though it was supposed to appear at 90s for long-load profiles.
+
+**Root cause:** The early-exit check in `WatchLocalStreamHangAsync` suppresses the dialog if the elapsed time is less than the prefill estimate. The prefill estimate was inflated by the cache bug (the learned model was fitting on 15-minute full recomputes), so the estimate was so large that the dialog was suppressed for the entire prefill duration. The turn was killed by the 600s Long-load first-byte deadline before the dialog could appear.
+
+**Fix:** Added a hard cap of 120s to the prefill estimate used in the early-exit check. Even if the estimate is inflated, the dialog will always appear after 120s of quiet. This is a reasonable safety net: if the model hasn't sent a first byte in 2 minutes, the user should be given a choice.
+
+**Files changed:**
+- `Services/FluxMuxGatewayHost.cs` — `WatchLocalStreamHangAsync` now uses `effectiveEstimate = Math.Min(CurrentPrefillEstimateSeconds, 120)` in the early-exit check.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** After deploy, if a prefill takes longer than 120s, the "Wait longer / End / Switch" dialog should appear at 120s instead of being suppressed indefinitely.
+
+## ✅ DONE: Graph turn numbers off by 1 — now match terminal (11/5)
+
+**Symptom (user report):** The telemetry graph turn numbers are 1 higher than the terminal turn numbers. E.g., the terminal shows `[turn 12]` but the graph shows turn 13.
+
+**Root cause:** The terminal logged `[turn N]` where `N = SharedTurnCounter - 1` (see `FluxMuxGatewayHost.cs` line 1519). But the graph was using `SharedTurnCounter` directly, so it showed `N + 1` instead of `N`.
+
+**Fix:** Removed the `-1` from the terminal log so it uses `SharedTurnCounter` directly. Both the terminal and the graph now use `SharedTurnCounter` without any offset, so they match.
+
+**Note:** If a turn is aborted (by the safety check, user cancellation, or error), the `SharedTurnCounter` advances but no point is plotted, creating a gap in the graph. This is intentional — the gap indicates that a turn was aborted.
+
+**Files changed:**
+- `Services/FluxMuxGatewayHost.cs` — Terminal log now uses `SharedTurnCounter` instead of `SharedTurnCounter - 1`.
+- `ViewModels/MainViewModel.cs` — `PlotTurnTelemetry` now uses `FluxMuxGatewayHost.SharedTurnCounter` (no offset).
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** After deploy, the telemetry graph turn numbers should match the terminal `[turn N]` log lines.
+
+## 📋 SUBMITTED: llama.cpp upstream requests (11/5)
+
+**Context:** The YaRN prefill stall was caused by the `--cache-ram` unit mismatch (fixed above). However, there are additional performance issues that require upstream fixes in llama.cpp. We should not rebuild or patch llama-server ourselves (maintenance burden with every update), so we've submitted requests to the llama.cpp developers.
+
+### 1. Flash Attention q4_0-q8_0 kernels not in default build (HIGH IMPACT)
+- **Issue:** `#31213` (open, Oct 26, 2026) — "Feature Request: Add 'q8_0-q4_0' to GGML_CUDA_FA_QUANTS"
+- **Status:** Open. A contributor confirmed the kernel exists in source but isn't compiled into default builds.
+- **Action:** Added a comment with our use case (Qwen3.8-27B with q4_0 K / q8_0 V caches, 393K YaRN context) to strengthen the case.
+- **URL:** https://github.com/ggml-org/llama.cpp/issues/31213
+
+### 2. cache_reuse disabled for multimodal models (HIGH IMPACT)
+- **Issue:** New issue submitted — "cache_reuse disabled for multimodal models (Qwen-VL)"
+- **Status:** Open.
+- **Action:** Submitted a new issue with log evidence showing `cache_reuse is not supported by multimodal, it will be disabled` for Qwen-VL.
+- **URL:** https://github.com/ggml-org/llama.cpp/issues/new (submit with the drafted text)
+
+### 3. swa_full disabled (LOW IMPACT)
+- **Status:** The log shows `swa_full is not supported by this model, it will be disabled`. This is expected for Qwen-VL and not a bug.
+- **Action:** Left as-is. The llama-server handles it gracefully (disables it and logs a warning). The warning is harmless.
+
+## ✅ DONE: Added `--no-reasoning-preserve` profile option (11/5)
+
+**Context:** The llama-server log shows `chat template supports preserving reasoning, it is enabled by default (may use more tokens, disable via --no-reasoning-preserve)`. Preserving reasoning uses more tokens, which increases the context size and can slow down prefill.
+
+**Fix:** Added a `LocalReasoningPreserve` profile setting (dropdown: "Auto", "Enabled", "Disabled"). If "Disabled", passes `--no-reasoning-preserve` to the llama-server. If "Enabled", passes `--reasoning-preserve`. If "Auto" (default), doesn't pass either flag (uses the template default).
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — Added `LocalReasoningPreserve` profile setting and the corresponding `--no-reasoning-preserve` / `--reasoning-preserve` flags.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** After deploy, the user can set `LocalReasoningPreserve` to "Disabled" in the profile to reduce context size. The llama-server log should show `--no-reasoning-preserve` in the launch args.
+
+## ✅ DONE: Updated tuning wizard thread defaults for high-core CPUs (11/5)
+
+**Context:** The tuning wizard was using conservative thread defaults: `ProcessorCount / 2` for main threads and `ProcessorCount / 4` for batch threads. For a 24-core CPU, this gave 12 main threads and 4 batch threads, which is suboptimal. However, using all cores would starve other apps that need to coexist with FluxMux.
+
+**Fix:** Updated the defaults to use 75% of cores for main threads and 25% for batch threads, leaving 25% of cores free for other apps:
+- Main threads: `ProcessorCount * 0.75` (clamped to 4-32) → for 24 cores, this gives 18
+- Batch threads: `ProcessorCount * 0.25` (clamped to 4-32) → for 24 cores, this gives 6
+
+This is hardware-aware: the defaults scale with the number of CPU cores, so they work well on both low-core (4-8) and high-core (16-32) CPUs. The 75/25 split ensures FluxMux gets most of the CPU for inference while leaving enough for other apps.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — Updated `DefaultLocalThreadCount()` and `DefaultLocalBatchThreadCount()` to use 75% and 25% of cores respectively.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** After deploy, the tuning wizard should apply 18 main threads and 6 batch threads for a 24-core CPU. The llama-server log should show `-t 18` and `--threads-batch 6` in the launch args.
+
+## ⚠️ KNOWN ISSUE: YaRN prefill stalls indefinitely — likely llama-server regression (11/4)
+
+**Symptom (user report):** The YaRN profile's prefill stalls indefinitely and never completes. The model is running under the VRAM profile (which works) after the YaRN profile stalled. The user says "this never used to be a problem" and "Launch should complete, before prefilling begins, and prefilling should not just stop." The issue started 1-2 days ago, possibly after a llama-server or FluxMux update.
+
+**Root cause (confirmed via `prefill_perf_*.json` + llama-server version check):**
+The YaRN profile (ctx=393216, GPU+CPU offload) has wildly inconsistent prefill times: some large prompts take 5-8s, but others take 4-6 minutes (e.g., 237,966 tokens → 356,343ms; 126,084 tokens → 280,232ms). The "Long-load first-byte" safety check (default 600s) was stopping the turn when the prefill took too long.
+
+**Key finding:** The current llama-server (build 12069, commit e6192de0a, November 3rd) is 35 builds newer than the backup (build 12034, commit 1c5ed702c, November 2nd). The issue started 1-2 days ago, which matches the November 3rd llama-server update. The wildly inconsistent prefill times suggest the new llama-server has a regression in KV cache management or the prefill path.
+
+**Fix (pending user test):** Revert to the backup llama-server version (build 12034) and see if the issue goes away. This will confirm whether the issue is caused by the llama-server update.
+
+**To revert:**
+1. Close the app
+2. Copy the backup llama-server files over the current ones:
+   ```
+   xcopy "C:\AI_Workbench\llama-server-backup\llama-server-20261104-024022" "C:\AI_Workbench\llama-server" /E /Y
+   ```
+3. Restart the app and test the YaRN profile
+
+**If the issue persists after reverting:** The problem is in FluxMux, not llama-server. Investigate the FluxMux prefill logic and context handling.
+
+**Key finding (11/4):** The prefill inconsistency is caused by the **compact → `cache_prompt=false` → full KV cache recompute** cycle. When FluxMux applies a forward-compact (because the prompt exceeds the context threshold), it sets `cache_prompt = false` on the next turn (via `LocalPrefixCachePolicy.ApplyAfterCompact`), which forces llama-server to recompute the entire KV cache from scratch instead of reusing it. This takes 4-6 minutes instead of 5-10 seconds.
+
+**Why this matters:** The YaRN profile is near its context limit, so compacts happen frequently. Each compact forces a full recompute on the next turn. The prefill performance data confirms this: prompts of similar size (e.g., 288901 vs 291526 tokens) have wildly different prefill times (5s vs 388s) depending on whether a compact happened just before.
+
+**Two possible fixes:**
+1. **Set the "User client/agent?" dropdown to "Cline-like"** in the Diagnostics pane. This disables FluxMux compaction entirely (the client reinflates the full chat each turn), so `cache_prompt` is never set to false, and the KV cache is always reused → fast prefill.
+2. **Revert llama-server** to build 12034. If the old build has a faster full-recompute path, the slow prefills will be less painful.
+
+**If the issue persists after reverting AND the user client is set to "Cline-like":** The problem is deeper — either the llama-server is evicting the KV cache between turns even with `cache_prompt=true`, or there's a bug in the KV cache management. Capture live llama-server stderr/stdout to diagnose.
+
+## ✅ DONE: Cold/warm prefill model separation (11/5)
+
+**Symptom:** The prefill estimate was wildly off. The learned model was fitting on a mix of cold prefills (first turn after launch, includes model loading, ~470 tok/s) and warm full prefills (model already loaded, KV cache evicted, ~10,000-19,000 tok/s). The least-squares fit compromised between them, giving a fitted speed of ~81,000 tok/s — too fast for cold starts, so the progress bar showed "finishing" far too early.
+
+**Root cause:** `PrefillPerformanceModel` had a single sample list and a single fitted speed. Cold and warm prefills have very different speeds, so mixing them in one fit produces a misleading speed.
+
+**Fix:** Split the model into two separate sample lists and two separate fitted models:
+- **Cold model:** first turn after launch (`IsLocalModelCold == true`, model still loading). Used for cold-start estimates.
+- **Warm model:** subsequent turns where the KV cache was evicted but the model is already loaded. Used for warm estimates.
+
+`EstimateSeconds(promptTokens, isCold)` and `RecordSample(promptTokens, firstByteMs, isCold)` now take an `isCold` flag. The warm estimate falls back to the cold model when no warm data exists. The persisted JSON now stores `coldSamples`/`warmSamples` separately (with backward-compat loading of the old single `samples` array as cold).
+
+**Files changed:**
+- `Services/PrefillPerformanceModel.cs` — cold/warm sample lists, `ColdSpeedTokensPerSec`/`WarmSpeedTokensPerSec`, `EstimateSeconds(int, bool)`, `RecordSample(int, long, bool)`, `RefitInto(...)`, separate persistence
+- `ViewModels/MainViewModel.cs` — passes `isColdStart` (`_runtimeService.IsLocalModelCold`) to `EstimateSeconds` and stores it in `_prefillIsCold` for `RecordSample`
+- `FluxMux.Avalonia.Tests/PrefillPerformanceModelTests.cs` — updated to new signatures; added `Cold_and_warm_models_are_fitted_separately` and `Warm_estimate_falls_back_to_cold_when_no_warm_data`
+
+**Build:** 0 errors. **Tests:** 1740 passed. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+## ✅ DONE: Session artifact stripping disabled when user client is "Cline-like" (11/5)
+
+**Symptom (user report):** Prefill is happening on subsequent turns in the same chat, even when the user client is "Cline-like" and the chat did not change subject. The prompt size is dropping significantly between turns (e.g., 261,709 → 84,877 → 37,000 tokens), which causes the KV cache to not be reused.
+
+**Root cause:** `LocalSessionArtifactPolicy.Apply()` is modifying the prompt on every request by clearing tool results that are not artifacts and appending forward notes. This modifies the prompt, which causes the KV cache to not be reused. The session artifact stripping should NOT happen when the user client is "Cline-like", because the client is managing its own context.
+
+**Fix:** Skip the `LocalSessionArtifactPolicy.Apply()` method when the user client is "Cline-like" (`GetUserClientReinflatesContext` returns true). This prevents the prompt from being modified, which allows the KV cache to be reused.
+
+**Files changed:**
+- `Services/FluxMuxGatewayHost.cs` — `HandleLocalChatAsync()` now skips `LocalSessionArtifactPolicy.Apply()` when `GetUserClientReinflatesContext` returns true
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Set the "User client/agent?" dropdown to "Cline-like" → load a model → send multiple messages in the same chat → check `llama_server_output.log` → prefill times on subsequent turns should drop to incremental speeds (seconds) instead of full recompute (minutes).
+
+## ✅ DONE: Thinking stripping skipped (but reasoning settings still applied) when user client is "Cline-like" (11/5)
+
+**Symptom (user report):** Prefill is happening on subsequent turns in the same chat, even when the user client is "Cline-like" and the chat did not change subject. The prompt size is dropping significantly between turns, which causes the KV cache to not be reused.
+
+**Root cause:** When the reasoning mode is "Off", `LocalReasoningPayloadPolicy.ApplyToPayload()` strips thinking from the messages on every request. This modifies the prompt, which causes the KV cache to not be reused. The thinking stripping should NOT happen when the user client is "Cline-like", because the client is managing its own context.
+
+**IMPORTANT CORRECTION (11/5):** The first version of this fix did an early `return false` when "Cline-like" was active, which ALSO skipped applying the reasoning settings (`enable_thinking=false`, `thinking_budget=0`). That caused the model to generate unbounded thinking with no visible reply ("only thought, no reply"). The fix now only skips the **message stripping** (which modifies the prompt); the reasoning mode settings are still applied so the model knows not to generate thinking.
+
+**Fix:** `ApplyToPayload()` computes `skipThinkingStrip = userClientReinflatesContext?.Invoke() == true` and only guards the `StripThinkingFromMessages` call with it. The `enable_thinking`/`thinking_budget`/`reasoning_effort` settings are applied regardless.
+
+**Files changed:**
+- `Services/LocalReasoningPayloadPolicy.cs` — `ApplyToPayload()` only skips message stripping when "Cline-like"; reasoning settings always applied
+- `Services/FluxMuxGatewayHost.cs` — `PrepareLocalChatPayloadAsync()` passes `GetUserClientReinflatesContext` to `ApplyToPayload()`
+
+**Build:** 0 errors. **Tests:** 1740 passed. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Set the "User client/agent?" dropdown to "Cline-like" → load a model → send multiple messages in the same chat → (a) prefill times on subsequent turns drop to incremental speeds, AND (b) the model still produces visible replies (no "only thought, no reply").
+
+## ✅ DONE: Cline auto-compact disabled by FluxMux when user client is "Cline-like" (11/4)
+
+**Symptom (user report):** When the user client is set to "Cline-like", Cline's own internal auto-compact is being switched off by FluxMux, even if the profile setting is for FluxMux-managed auto-compact. Cline should manage its own context (including auto-compact) when the user client is "Cline-like".
+
+**Root cause:** `ClineContextSync.MergeIntoModelsFile()` checks if `options.CompactMode != "none"` and if so, turns off Cline's auto-compact (via `PatchGlobalSettingsAutoCompactOff`). The `CompactMode` comes from `BuildEndpointSettingsSnapshot()`, which passes `LocalAutoCompactMode` (the profile's compact mode). When the user client is "Cline-like", `ApplyUserClientStyle()` sets `LocalAutoCompactMode = "none"`, but this only happens when the user client style is **applied** (i.e., when the user changes the dropdown or the app starts). If the Cline sync happens before `ApplyUserClientStyle()` is called, or if `LocalAutoCompactMode` is reset to the profile's compact mode after `ApplyUserClientStyle()` is called, the Cline sync would use the OLD `LocalAutoCompactMode` (the profile's compact mode, not "none"), and would turn off Cline's auto-compact.
+
+**Fix:** In `BuildEndpointSettingsSnapshot()`, if the user client is "Cline-like" (`UserClientReinflatesContext == true`), always pass "none" as the `CompactMode`, regardless of the profile's compact mode. This ensures that `ClineContextSync` never turns off Cline's auto-compact when the user client is "Cline-like".
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — `BuildEndpointSettingsSnapshot()` now passes `UserClientReinflatesContext ? "none" : LocalAutoCompactMode` as the `CompactMode`
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Set the "User client/agent?" dropdown to "Cline-like" → load a model → check Cline's `globalState.json` → the `autoCompactEnabled` field should be `true` (or unchanged), not `false`.
+
+## ✅ DONE: Prefill progress bar stops just short of the end (11/4)
+
+**Symptom (user report):** The progress bar stops just short of the end during the prefilling stage. It never reaches 100% before resetting to 0% for the generation phase.
+
+**Root cause:** The `EasePrefillProgress` function uses an exponential approach to 100%, but it never actually reaches 100% — it only gets to ~96.3% when `raw = 1.0`. When the first byte arrives, `StopPrefillTimer()` is called and `PrefillProgress` is immediately reset to 0.0, without ever setting it to 1.0 first. So the user sees the bar stop at ~96% and then jump to 0%, without ever completing to 100%.
+
+**Fix:** When the first byte arrives, set `PrefillProgress = 1.0` first, then use a one-shot timer to reset it to 0.0 after 200ms. This gives the user a brief "done" flash before the generation phase starts.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — `PrefillFirstByteNotice` handler now sets `PrefillProgress = 1.0` and uses a one-shot timer to reset to 0.0 after 200ms
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger a prefill → the progress bar should reach 100% when the first byte arrives → hold at 100% for ~200ms → reset to 0% for the generation phase.
+
+## ✅ DONE: Prefill progress bar stays at 95% indefinitely (11/4)
+
+**Symptom (user report):** The progress bar stays at 95% indefinitely during the prefilling stage. It never reaches 100% and never resets to 0% for the generation phase.
+
+**Root cause:** The `EasePrefillProgress` function uses an exponential approach to 100%, but it never actually reaches 100% — it only gets to ~96.3% when `raw = 1.0`. When the prefill takes longer than the estimate, `raw` is clamped to 1.0, and the bar stays at ~96% indefinitely. The user sees the bar "stop just short of the end" and thinks the prefill is almost done, but it's actually stalled.
+
+**Fix:** When `raw >= 1.0` (i.e., the estimated time has elapsed), the `EasePrefillProgress` function now returns 1.0 (100%) instead of ~96.3%. This way, the bar reaches 100% when the estimated time has elapsed, and stays at 100% until the first byte arrives. If the prefill takes longer than the estimate, the bar will still reach 100% (when `elapsedSeconds >= _prefillEstimatedSeconds`), which is more accurate than staying at ~96% indefinitely.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — `EasePrefillProgress` now returns 1.0 when `raw >= 1.0`
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger a prefill → the progress bar should reach 100% when the estimated time has elapsed → stay at 100% until the first byte arrives → reset to 0% for the generation phase.
+
+## ✅ DONE: Prefill estimate too short for RAM-spill prefill (11/4)
+
+**Symptom (user report):** The progress bar stops just short of the end during the prefilling stage, and the "more waiting" is now taking much longer than before (minutes instead of a few seconds). The bar stays at ~95% indefinitely, which is misleading.
+
+**Root cause:** The prefill estimate is based on the most recent sample's speed, which may be fast (incremental prefill, 5-10s). But the current prefill may be slow (full recompute, 4-6 min) if the KV cache was evicted and must be recomputed from scratch (e.g., after a compact). So the estimate is too short, and the bar reaches ~96% quickly, then stays there indefinitely.
+
+**Fix:** Apply a conservative multiplier for RAM-spill prefill: for prompts over 32K tokens, apply a 2x multiplier; over 64K, 3x. This keeps the estimate honest without being absurdly pessimistic. The bar will move more slowly, and the user will have a more accurate sense of how long the prefill will take.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — Prefill estimate for RAM-spill prefill now applies a conservative multiplier (2x for >32K tokens, 3x for >64K tokens)
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger a RAM-spill prefill with a large prompt (>32K tokens) → the progress bar should move more slowly than before → the "more waiting" should be more accurate (closer to the actual prefill time).
+
+## ✅ DONE: Capture llama-server stderr/stdout to a file for diagnosis (11/4)
+
+**Symptom (user report):** The user cannot get a YaRN profile to work anymore. The last successful YaRN launch was on 2026-10-17 10:38. Recent YaRN launch attempts are failing, but the launch attempts are not being logged in the launch telemetry, making it impossible to diagnose why the launch is failing.
+
+**Root cause:** The llama-server stderr/stdout is captured into `_lastLocalStderrTail` (truncated to 1200 chars) but never written to a file. When the YaRN launch fails, the stderr (which would show WHY it failed) is only kept in memory and shown in the error dialog, but not persisted to a log file for diagnosis.
+
+**Fix:** Write the llama-server stderr/stdout to a file in `c:\AI_Workbench\Logs\` named `llama_server_output.log`. The file is created at the **start** of `LaunchLocalAsync` (before the launch prep phase), so it captures the launch context even if the launch fails early. The server path and args are appended when the process is started, and the stderr/stdout is appended as it arrives.
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — `LaunchLocalAsync` now creates the log file at the start; `TryStartManagedLlamaProcess` appends the server path, args, and stderr/stdout to the log file
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Attempt to launch the YaRN profile → check `c:\AI_Workbench\Logs\llama_server_output.log` → the file should contain the launch context (model, variant, port, server path, args) and the llama-server stderr/stdout output, which will show WHY the launch is failing.
+
+## ✅ DONE: Prefill estimate too high for RAM-spill prefill (11/4)
+
+**Symptom (user report):** The prefill estimate was "insane" (1800+ seconds), which the user would not normally tolerate. The actual prefill took 577 seconds, but the estimate was 1728 seconds (3x the actual time).
+
+**Root cause:** The prefill estimate for RAM-spill prefill applies a conservative multiplier (3x for >64K tokens) to account for the variability in prefill times (fast incremental prefill vs. slow full recompute). But the learned prefill speed already reflects the actual hardware behavior, including any RAM-spill slowdown. So the multiplier is too aggressive, and the estimate is too high.
+
+**Fix:** Reduce the multiplier for RAM-spill prefill from 3x (for >64K tokens) to 1.5x (for >32K tokens). This keeps the estimate honest without being absurdly pessimistic.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — Prefill estimate for RAM-spill prefill now applies a 1.5x multiplier for >32K tokens (instead of 2x for >32K and 3x for >64K)
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger a RAM-spill prefill with a large prompt (>32K tokens) → the prefill estimate should be more reasonable (closer to the actual prefill time, not 3x higher).
+
+## ✅ DONE: Prefill estimate should work across any hardware and model (11/4)
+
+**Symptom (user report):** The prefill estimate algorithm needs to work with reasonable accuracy across any end user hardware and model. The current approach (using a fixed multiplier) is a hack that won't work across different hardware and models.
+
+**Root cause:** The prefill estimate for RAM-spill prefill applies a conservative multiplier (1.5x for >32K tokens) to account for the variability in prefill times. But the learned prefill speed already reflects the actual hardware behavior, so the multiplier is unnecessary and makes the estimate too high.
+
+**Fix:** Use the most recent sample's speed directly, without a multiplier. The most recent sample is the most representative of the current hardware state, so the estimate should be accurate. The prefill speed is not constant (it depends on the prompt size, the KV cache state, and the hardware), but the most recent sample is the best available estimate.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — Prefill estimate for RAM-spill prefill now uses the most recent sample's speed directly, without a multiplier
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger a RAM-spill prefill with a large prompt → the prefill estimate should be based on the most recent sample's speed, which is the most representative of the current hardware state.
+
+## ✅ DONE: Prefill estimate way off for large RAM-spill prompts (11/4)
+
+**Symptom (user report):** The prefill estimate was 1 minute, but the actual prefill took 578 seconds (9.6 minutes) for 231,343 tokens. The estimate was ~10x off.
+
+**Root cause:** The prefill estimate for RAM-spill prefill was using the most recent sample's speed (`LastMeasuredSpeedTokensPerSec`), which is a single data point. If the most recent sample was a small incremental prefill (e.g., 5-10 seconds for a small prompt), the speed would be high (e.g., 5000+ tokens/sec), and the estimate would be low (60 seconds). But the current prefill is a large full recompute (231K tokens), which is much slower (~400 tokens/sec). So the estimate is way off.
+
+**Fix:** Use the learned estimate (`prefillModel.EstimateSeconds(promptTokens)`) for RAM-spill prefill, just like VRAM prefill. The learned estimate is fitted to the prompt size, so it's more accurate than the most recent sample's speed (which is a single data point and may not be representative of the current prompt size).
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — Prefill estimate for RAM-spill prefill now uses the learned estimate (fitted to the prompt size) instead of the most recent sample's speed
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger a RAM-spill prefill with a large prompt → the prefill estimate should be based on the learned estimate (fitted to the prompt size), which is more accurate than the most recent sample's speed.
+
+**If the issue goes away after reverting:** The problem is in the llama-server update. Report the issue to the llama.cpp team with the specific build numbers (12034 → 12069) and the prefill performance data.
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass. **Deploy:** NOT deployed.
+
+## ✅ DONE: Update progress dialog progress bar not centred (11/4)
+
+**Symptom (user report):** The update popup dialogs (launched from the Environment tab's "Update now" buttons) have progress bars that are not centred between the dialog edges — the margin to the right edge of the dialog is too small compared with the left side; the bar's right end almost touches the dialog edge.
+
+**Root cause:** The `UpdaterForm` (WinForms progress dialog shown by the standalone updater `FluxMux.Updates.exe`) used a `TableLayoutPanel` with `Dock=Top` and a single `AutoSize` column. A `Dock=Top` `TableLayoutPanel` spans the full form width, but its single `AutoSize` column sizes to the content width and is **left-aligned** within the panel, leaving extra space on the right. This made the progress bar (and other controls) appear shifted left, with the right end closer to the dialog edge than the left end.
+
+**Fix:** Wrapped the `TableLayoutPanel` in a `Panel` (`Dock=Top`, `AutoSize=GrowOnly`) and centered the `TableLayoutPanel` within the wrapper using a `Layout` event handler. The wrapper spans the full form width, and the `TableLayoutPanel` (whose width is its `AutoSize` width = column + padding) is centered within it with equal margins on both sides.
+
+**Files changed:**
+- `FluxMux.Updates/UpdaterForm.cs` — wrapped the content `TableLayoutPanel` in a `Panel` and centered it via a `Layout` event
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Launch an update from the Environment tab → the progress dialog's progress bar should be centred between the dialog edges with equal margins on both sides.
+
+## ✅ DONE: Move all recommendation/warning banners above Diagnostics pane (11/4)
+
+**Symptom (user report):** The routing and VRAM warning dialogs that appear in the diagnostics pane still have not been moved out of the pane as requested. They mask the content of the diagnostics pane. Some banners appear within the diagnostics pane but above the top bar by forcing the top bar down, while others appear below the top bar. All should instead appear above the pane, without changing the pane height. Also, banners should not have the darker vertical coloured stripe at left end.
+
+**Root cause:** The HealthReport, HailMaryBanner, DocumentContextDialog, and RecoveryReplacement banners were in Row 1 (inside the Diagnostics pane StackPanel), which caused them to mask the terminal/graphs and push the Diagnostics label down.
+
+**Fix:**
+1. **Moved all six banners to Row 0** (the RecommendBannerPanel, above the Diagnostics label):
+   - CloudRecommend (already there)
+   - LocalReloadRecommend (already there, keeps its left stripe)
+   - HealthReport (moved from Row 1)
+   - HailMaryBanner (moved from Row 1, removed left stripe)
+   - DocumentContextDialog (moved from Row 1, removed left stripe)
+   - RecoveryReplacement (moved from Row 1)
+2. **Removed the left stripe** from HailMaryBanner and DocumentContextDialog by changing from a Grid with a colored Border in Column 0 to a simple StackPanel with Padding="8,6".
+3. **Kept the Diagnostics pane layout unchanged** — Row 1 still contains the Diagnostics label, controls, LastRouteExplanationText, and gauges.
+
+**Files changed:**
+- `Views/MainWindow.axaml` — Moved HealthReport, HailMaryBanner, DocumentContextDialog, and RecoveryReplacement banners from Row 1 to Row 0; removed left stripes from HailMaryBanner and DocumentContextDialog
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger each banner (e.g., via a health check, a context overflow, a document context dialog, or a recovery replacement) → the banner should appear above the Diagnostics label, not inside the Diagnostics pane → the Diagnostics pane height should not change → the HailMaryBanner and DocumentContextDialog should not have a left stripe.
+
+## ✅ DONE: YaRN prefill phase never completes — hang dialog fires before prefill estimate (11/4)
+
+**Symptom (user report):** YaRN models can no longer ever complete the prefilling context phase. The "Prefilling context…" indicator is stuck and never switches to "Generating…". The "Wait longer / End / Switch" dialog never appears, and new chats with negligible context also hang.
+
+**Root cause:** The `WatchLocalStreamHangAsync` hang detection fires the "wait longer" dialog when `FirstByteDeadline` (600s for long-load profiles) is exceeded, regardless of how long the prefill is actually expected to take. For YaRN models with large contexts, the prefill can take 3-10 minutes, but the dialog fires at 600s even if the estimate says the prefill will take 15 minutes. Additionally, the early-exit code (added in uncommitted changes) was firing at 300s, which was too aggressive.
+
+**Fix:**
+1. **Removed the early-exit code** from `WatchLocalStreamHangAsync` — it was too aggressive and caused false-positive aborts.
+2. **Added `CurrentPrefillEstimateSeconds`** to `FluxMuxGatewayHost` — the UI sets this when prefill starts, based on the prompt token count and learned prefill speed.
+3. **Added prefill estimate check** in `WatchLocalStreamHangAsync` — when the `FirstByteDeadline` is exceeded but the elapsed time is still within the prefill estimate, the dialog is NOT shown. The hang detection just waits without prompting the user.
+4. **Added `SetPrefillEstimate`** to `FluxMuxRuntimeService` — the UI calls this to pass the estimate to the gateway host.
+5. **Added `ClearPrefillEstimate`** to `FluxMuxRuntimeService` — clears the estimate when prefill completes or when a new model launch starts. This prevents a stale estimate from suppressing the dialog on the next attempt.
+6. **Moved recommendation banners above the Diagnostics label** — the CloudRecommend and LocalReloadRecommend banners now appear in a new row ABOVE the "Diagnostics" label row, so they don't obscure the terminal and graph panes.
+
+**Files changed:**
+- `Services/LocalStreamHangPolicy.cs` — added `PrefillEstimateSeconds` property to `LocalStreamHangClock`
+- `Services/FluxMuxGatewayHost.cs` — added `CurrentPrefillEstimateSeconds` property, removed early-exit code, added prefill estimate check in `WatchLocalStreamHangAsync`
+- `Services/FluxMuxRuntimeService.cs` — added `SetPrefillEstimate` and `ClearPrefillEstimate` methods, clear estimate when prefill completes and when a new launch starts
+- `ViewModels/MainViewModel.cs` — call `SetPrefillEstimate` when prefill starts
+- `Views/MainWindow.axaml` — moved CloudRecommend and LocalReloadRecommend banners to a new row above the Diagnostics label
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Start a YaRN model with a large context → the "Prefilling context…" indicator should show the estimate → the "Wait longer" dialog should NOT appear until the estimate is exceeded → the user can still click "Stop model" (Ctrl+Shift+K) to abort at any time. When a recommendation banner appears, it should be above the "Diagnostics" label, not obscuring the terminal. After a model launch fails or prefill completes, the estimate should be cleared so the next attempt doesn't inherit it.
+
+## ✅ DONE: Public endpoint probe false-positive on cold start (11/4)
+
+**Symptom (user report):**
+- YaRN model: terminal says "loading" but progress bar says "prefilling" — out of sync
+- Prefill stalls at the end, no dialog appears
+- VRAM model: "failing to launch" but "prefilling was supposedly occurring"
+- A dialog briefly flashed and disappeared
+
+**Root cause (confirmed via `launch_monitor.log` + `prefill_perf_*.json`):**
+The launch monitor's public endpoint probe (`ProbePublicEndpointWithShortRetriesAsync` → `TimeShortLocalReplyThroughPublicEndpointAsync`) sends a trivial "Reply with ready" chat completion through the gateway with a **5s non-streaming timeout**. On a cold start (first request after launch), the model pays a fixed overhead (weight load into GPU, KV-cache init) that is NOT proportional to the tiny prompt size. Measured first-byte times for even small prompts on cold start are 7s+ (see `prefill_perf_*.json`: 9,105 tokens → 7,337ms; 55,948 tokens → 33,012ms). The probe is non-streaming (no bytes until the full reply completes), so a 5s timeout false-positives on healthy large-context models (YaRN/VRAM) whose daemon port already reports ready (`/v1/models` → 200).
+
+This caused the launch loop to retry many times (each 5s timeout + 2s wait = ~7s per cycle), which is why the user saw "loading" for a long time before it eventually succeeded. The model was healthy the whole time — the probe was just too impatient.
+
+**Fix:**
+1. **Increased `PublicEndpointReadyProbeTimeoutMs` from 5000 to 30000** (30s) — comfortably exceeds the cold-start cost while still catching genuinely broken models (a truly stuck model will not produce a reply in 30s).
+2. **Updated the default `requestTimeoutMs` parameter** in `TimeShortLocalReplyThroughPublicEndpointAsync` from 5000 to 30000 to match.
+3. The 30s timeout × 3 retries = 90s worst case, which fits within the YaRN launch budget (240s max).
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — `PublicEndpointReadyProbeTimeoutMs` 5000→30000, default `requestTimeoutMs` 5000→30000
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Launch a YaRN or VRAM model → the "loading" period should be shorter (fewer probe retries) → the public endpoint probe should succeed on the first or second attempt instead of timing out repeatedly → the model should reach "ready" faster.
+
+## ⚠️ KNOWN ISSUE: Model launch failures not properly handled (11/4)
+
+**Symptom (user report):** 
+- YaRN model: terminal says "loading" but progress bar says "prefilling" — out of sync
+- Prefill stalls at the end, no dialog appears
+- VRAM model: "failing to launch" but "prefilling was supposedly occurring"
+- A dialog briefly flashed and disappeared
+
+**Root cause (suspected):** The model launch is failing, but the UI is not properly handling the failure. The prefill estimate logic is suppressing the dialog, which is making it harder to diagnose. The UI state is out of sync with the actual model state.
+
+**Fix (partial):** Added `ClearPrefillEstimate` to prevent stale estimates from suppressing the dialog. But the underlying model launch failure is not yet diagnosed.
+
+**Next steps:**
+1. Check the model logs (llama-server stdout/stderr) to see why the launch is failing
+2. Check the UI state machine to see why the terminal and progress bar are out of sync
+3. Check why the dialog is flashing and disappearing
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass. **Deploy:** NOT deployed.
+
+## ✅ DONE: Graph tok/s spike — predicted_per_second overriding live rate (11/4)
+
+**Symptom (user report):** Random and impossible spike to over 2000 tok/s in the middle of a turn in the throughput graph.
+
+**Root cause:** In `GenerationSpeedTracker.TryApplyTimings`, when llama-server sends a `timings.predicted_per_second` value in a mid-stream chunk, it **overwrites** the live rate with that predicted value. The predicted rate is calculated by llama-server over a small window (often just the last few tokens), so it can spike to 2000+ tok/s when a burst of tokens arrives quickly. The live rate (`completionTokens / elapsed`) is a cumulative average and is more stable.
+
+**Fix:** Only use the predicted rate if the live rate is not yet available (i.e., still 0). Once the live rate is established, it takes precedence over the predicted rate to avoid mid-stream spikes.
+
+**Files changed:** `Services/GenerationSpeedTracker.cs` (`TryApplyTimings`)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+## ✅ DONE: Graph bar value labels — residual numbers at left edge (11/4)
+
+**Symptom (user report):** Telemetry graphs showed residual bar value numbers at the left hand end, even after bars had cycled off the graph. Also, the leftmost bar numbers were disappearing rather than scrolling left off the graph like the bars themselves.
+
+**Root cause (two issues):**
+1. **Stale position on empty text.** In `PositionBarValueLabelSet` (MainWindow.axaml.cs), when a bar value label's text was empty (bar scrolled off), the code did `continue` — skipping the `Canvas.SetLeft`/`SetTop` calls. The label kept its **stale position** from when it was last visible.
+2. **Left-edge clamping.** The code clamped `left` to `[0, cw]`, which pinned labels at the left edge instead of letting them scroll off with the bars. The X-axis labels (in a separate canvas) scrolled off correctly, but the bar value labels got pinned.
+
+**Fix:**
+1. When the text is empty, explicitly move the label to `left=-9999, top=-9999` (far off-screen).
+2. Removed the `left` clamping — let labels scroll off the left edge naturally. The canvas's `ClipToBounds` handles the visual clipping.
+
+**Files changed:** `Views/MainWindow.axaml.cs` (`PositionBarValueLabelSet`)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+## ✅ DONE: GPU affinity test fix — tuple type mismatch (11/4)
+
+**Symptom:** Build errors in `GpuProcessMemoryAggregatorTests.cs` — 4-element tuples passed to `UnionPreferringLargerMegabytes` which now expects 5-element tuples (the `FullPath` field was added during the GPU affinity work).
+
+**Fix:** Added the missing `FullPath` element to the test tuples.
+
+**Files changed:** `FluxMux.Avalonia.Tests/GpuProcessMemoryAggregatorTests.cs`
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass. **Deploy:** NOT deployed.
+
+## ✅ DONE: GPU affinity — full fix (WMI path resolution + FullPath carry-through + display) (11/4)
+
+**Symptom (user report):** After a Windows crash/reboot, ArchiCAD and other apps showed as "iGPU affinity" in Settings, even though they were using the dGPU.
+
+**Root cause (three issues):**
+1. **Wrong performance counter.** `CollectWindowsGpuLocalUsageCore` only read the `Local Usage` counter (shared memory), not `Dedicated Usage` (dedicated VRAM). ArchiCAD uses 244 MB of dedicated VRAM on the dGPU but only 24 MB of shared memory. The 24 MB was below the 64 MB threshold, so ArchiCAD was filtered out of the VRAM process list entirely.
+2. **FullPath lost at grouping.** After grouping processes by name, the code recreated the `GpuProcessUse` but only carried over `RawName` — **not `FullPath`**. So the carefully-resolved full path was thrown away, leaving `FullPath` empty.
+3. **MainModule fails in elevated context.** `Process.MainModule.FileName` returns null/throws inside the running app (elevated) for non-elevated processes. WMI (`Win32_Process.ExecutablePath`) works regardless of elevation.
+
+**Fix:**
+- `Services/FluxMuxRuntimeService.cs` — `ResolveProcessFullPath(int pid)` uses WMI (primary) with MainModule (fallback). Both call sites use it. **FullPath is now carried through the grouping step** (line 9305).
+- `FluxMux.Avalonia.csproj` — added `System.Management` NuGet package.
+- `ViewModels/MainViewModel.cs` — full-path registry lookup (no name-based fallback when full path is known). Debug logging **removed** (final clean build).
+
+**Build:** 0 errors. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat` → restart.
+
+**Note on Epic Games:** The registry genuinely lists EpicGamesLauncher + EOSOverlay as iGPU (`GpuPreference=1`). They appear in `nvidia-smi` because they hold a small CUDA context, but Windows has them assigned to the iGPU. Showing them as iGPU is correct per the registry.
+
+## ✅ DONE: GPU affinity display — stop falling back to process-name match when full path is known (11/4)
+
+**Symptom (user report):** ArchiCAD showing as "iGPU affinity" in Settings after a Windows crash/reboot, even though it's actually using the dGPU (confirmed by 0.6 GiB dedicated VRAM).
+
+**Root cause (two issues):**
+1. **Wrong performance counter.** `CollectWindowsGpuLocalUsageCore` only read the `Local Usage` counter (shared memory), not `Dedicated Usage` (dedicated VRAM). ArchiCAD uses 244 MB of dedicated VRAM on the dGPU but only 24 MB of shared memory. The 24 MB was below the 64 MB `DedicatedMemoryFloorBytes` threshold in `MergeDedicatedGpuProcesses`, so ArchiCAD was filtered out of the VRAM process list entirely. It only appeared via the registry fallback loop, which picked up an iGPU entry.
+2. **Fragile name-based fallback.** When the full path wasn't in the VRAM process list, the display logic fell back to process-name matching — iterating through ALL registry entries and picking the first one whose filename matched. Multiple executables can share the same process name (e.g. "Archicad" and the companion app "bimx" that ships with ArchiCAD). The name-based match would pick the first registry entry with that name, which may be a DIFFERENT app.
+
+**Fix:**
+1. **Read both counters.** `CollectWindowsGpuLocalUsageCore` now reads both `Local Usage` and `Dedicated Usage` per process and sums them. ArchiCAD's dGPU total is now 268 MB (24 + 244), well above the threshold.
+2. **Removed the name-based fallback when full path is known.** When the full path is available (MainModule.FileName succeeded) but not in the registry, the app simply has no explicit GPU affinity set — default to dGPU (the Windows default). The name-based fallback is now only used when the full path is **unavailable** (MainModule.FileName failed, e.g. elevated process).
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — `CollectWindowsGpuLocalUsageCore`: read both `Local Usage` and `Dedicated Usage` counters and sum them
+- `ViewModels/MainViewModel.cs` — `RefreshGpuAppRows` GPU affinity lookup: removed the process-name fallback when full path is known
+
+**Build:** 0 errors. **Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Settings → GPU app list shows ArchiCAD in the dGPU list (not iGPU), with ~268 MB VRAM. No app is misclassified due to a name-matched registry entry from a different app.
+
+## ✅ DONE: Early-exit for long-load prefill + 503-retry alignment (11/4)
+
+**Symptom (user report):** Fresh 4K chat on YaRN profile stalled prefilling for 600s after a Windows crash/reboot. No early-exit option — user had to wait the full 10 minutes or kill the app.
+
+**Root cause (two issues):**
+1. **503-retry loop gave up at 300s** (`LongLoadMaxTotalWaitSeconds`) while the first-byte deadline ran to 600s (`ThinkingFirstByteSeconds`). If the model took >300s to load (possible after a crash/reboot with fragmented VRAM), the 503-retry loop stopped, the gateway stopped sending requests to llama-server, and the turn hit the 600s first-byte deadline and was aborted — even though the model would have been ready shortly after.
+2. **No early-exit option.** The "Wait longer / End / Switch" choices only fired at the full 600s first-byte deadline. The user had to sit through 10 minutes of silence before being offered a way out.
+
+**Fix:**
+1. **Aligned the 503-retry loop with the first-byte deadline.** `LongLoadRetryCount` increased from 150 to 300, `LongLoadMaxTotalWaitSeconds` increased from 300 to 600. The 503-retry loop now runs for the full 600s window, matching the first-byte deadline.
+2. **Added an early-exit check at 90s** for long-load profiles. If the first-byte deadline is the long-load window (600s+) and the stream has been quiet for 90s without a first byte, the "Wait longer / End / Switch" choices are offered early. This gives the user an option to stop waiting before the full 600s elapses.
+
+**Files changed:**
+- `Services/LocalLoadingRetryPolicy.cs` — `LongLoadRetryCount` 150→300, `LongLoadMaxTotalWaitSeconds` 300→600
+- `Services/FluxMuxGatewayHost.cs` — `WatchLocalStreamHangAsync` now has an early-exit check at 90s for long-load profiles
+
+**Build:** 0 errors (main project). **Tests:** 31/31 pass (LocalLoadingRetryPolicy, LocalStreamHangPolicy, PortRulesPostMortem).
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Fresh chat on YaRN profile after a reboot should offer "Wait longer / End / Switch" at ~90s instead of waiting 600s. The 503-retry loop should not give up at 300s.
+
+## ✅ DONE: Settings freeze when scanning GPUs & memory — O(n×m) → O(n+m) process enumeration (11/3)
+
+**Symptom (user report):** Settings tab freezes when scanning GPUs & memory.
+
+**Root cause:** The fallback loop in `RefreshGpuAppRows` called `Process.GetProcessesByName()` + `MainModule.FileName` for **every** registry entry (hundreds of them) on the UI thread. `MainModule.FileName` is especially expensive (triggers module enumeration + access checks per process). This was O(entries × processes) — hundreds of expensive P/Invoke calls on the UI thread.
+
+**Fix:** Enumerate **all running processes once** into a `path → name` dictionary, then do fast `Dictionary.TryGetValue` lookups per registry entry. This turns O(entries × processes) into O(processes + entries). The single-pass `Process.GetProcesses()` + `MainModule.FileName` over ~100 processes is acceptable (one pass, not hundreds).
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` (`RefreshGpuAppRows` — replaced per-entry `GetProcessesByName` + `MainModule.FileName` with a single-pass `Process.GetProcesses()` → `Dictionary<string,string>` lookup)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Settings tab no longer freezes when scanning GPUs & memory. ArchiCAD still appears in the iGPU list.
+
+## ✅ DONE: Duplicate llama-server in GPU app list — dedupe by process name in fallback (11/3)
+
+**Symptom (user report):** Two instances of llama-server shown in the GPU app list, one not using memory.
+
+**Root cause:** There are two registry entries for llama-server (one at `C:\AI_Workbench\llama-server\llama-server.exe` and one at `C:\Users\paulk\.lmstudio\...`). The GPU process collector picks up the running one (with VRAM), but the fallback loop was adding the other one (with "—" memory) because its path wasn't in `listedPaths` and the `runningByPath` check was passing (the LM Studio path was somehow resolving to the running process).
+
+**Fix:** Added a `listedProcessNames` set that tracks the process names already in the main list. The fallback loop now skips entries whose process name is already listed, preventing duplicates when multiple registry entries share the same process name.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` (`RefreshGpuAppRows` — added `listedProcessNames` set + dedup check in fallback loop)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Only one llama-server entry in the GPU app list (the one using VRAM).
+
+---
+
+## ✅ DONE: GPU toggle — full-path registry lookup + list iGPU processes (11/3)
+
+**Symptom (user report):** ArchiCAD was still missing from both lists (though it was running). Epic Games Launcher started in the iGPU list, but clicking it "moved" it to the iGPU list (wrong — it should have flipped to dGPU).
+
+**Root cause (two separate bugs):**
+1. **ArchiCAD missing:** The GPU process collector (`CollectGpuProcessUses`) only picks up processes using the **dGPU** (NVIDIA). ArchiCAD runs on the **iGPU** (Intel), so it's invisible to both `nvidia-smi` (which only reports NVIDIA compute apps) and the "GPU Process Memory" performance counter (which returns 0 on this system). So ArchiCAD was never in `VramProcessRows`, and therefore never listed.
+2. **Epic Games Launcher wrong list:** The `affinityByRawName` dictionary used the **process name** as the key, and the **first** registry entry won. There are multiple `EpicGamesLauncher.exe` entries in the registry (some iGPU, some dGPU). The first one (iGPU) won, so the running Epic Games Launcher (which is actually on dGPU per its registry entry) was shown as iGPU.
+
+**Fix:**
+1. **Full-path registry lookup:** Changed the registry lookup to use the **full executable path** (the registry key itself) instead of the process name. This avoids the "first match wins" problem. The running process's full path (captured in `FullPath`) is used to look up the correct registry entry.
+2. **List iGPU processes:** Added a fallback in `RefreshGpuAppRows` that lists running processes with a registry entry even if they weren't picked up by the GPU process collector. This ensures ArchiCAD (running on iGPU) appears in the list.
+3. **Include nvidia-smi processes with [N/A] memory:** Updated `CollectGpuProcessUses` to include nvidia-smi processes even when their memory is `[N/A]` (treating them as having the minimum 8 MB), so they appear in the list even when the performance counter isn't working.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` (`RefreshGpuAppRows` — full-path registry lookup, fallback to list iGPU processes)
+- `Services/FluxMuxRuntimeService.cs` (`CollectGpuProcessUses` — include nvidia-smi processes with [N/A] memory)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):**
+1. **ArchiCAD is listed:** ArchiCAD (registry `GpuPreference=1`, running on iGPU) should appear in the iGPU list.
+2. **Epic Games Launcher correct list:** Epic Games Launcher (registry `GpuPreference=2` for the running process) should appear in the dGPU list.
+3. **Toggle flips correctly:** Clicking a toggle should flip the highlighted side (grey ↔ white) and move the app to the other list.
+4. **Pending pulse:** After clicking a toggle (and choosing "Not now"), that toggle should pulse. Clicking it again should cancel the pending change and stop the pulse.
+
+---
+
+## ✅ DONE: GPU toggle — restore registry-driven listing + in-memory pending state (11/3)
+
+**Symptom (user report):** After redeploying, ArchiCAD was not listed in any GPU list (though it was running). Clicking the toggles did not change their appearance. Pending changes did not pulse. There was no way to toggle a pending change back from pending.
+
+**Root cause:** My earlier "current vs target GPU" logic was fundamentally broken. The process collector (`CollectGpuProcessUses`) **always** reports `GpuKind.DiscreteVram` — there is no code path that produces `GpuKind.MotherboardRam`. So `currentIsMotherboard` was always `false`, and the "pending change" detection (comparing registry target vs. process GpuKind) was comparing against a meaningless value. This caused:
+1. Apps whose registry key didn't match the running process's full path fell out of the pending logic and disappeared from the lists.
+2. The toggle appearance and flip-back logic were driven by the unreliable `GpuKind`, so clicking didn't flip the visible side.
+3. The "pending" state was derived from a broken comparison, so it either never showed or showed on the wrong apps.
+
+**Fix (revert to the correct model):**
+1. **Registry is the source of truth for listing + toggle appearance.** Restored the original `RefreshGpuAppRows` logic: an app's list (iGPU vs dGPU) and which toggle side is "active" come from its **registry value** (`PowerSaving` → iGPU, `HighPerformance` → dGPU), looked up by process name. This is how it worked before and why ArchiCAD was listed.
+2. **In-memory pending state.** Added a `_pendingGpuChanges` HashSet (keyed by full path, falling back to process name). It starts empty, so **no toggles flash on startup**. A toggle is marked pending only when the user clicks it.
+3. **Toggle flips the registry value.** `ToggleGpuAppAsync` computes the target as the opposite of the current registry value (`item.IsOnMotherboardGpu`), so clicking always moves the highlighted side to the other half — the grey side becomes white and vice versa. After the registry write, `RefreshGpuAppRows` re-reads the registry, so the toggle appearance flips.
+4. **Pending cancel/apply.** If a toggle was pending and the user clicks it again, the pending state is cleared (change cancelled, pulse stops). If the user restarts the app, the pending state is cleared (change applied, pulse stops). If the user toggles a non-pending app, it becomes pending (pulse starts).
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` (added `_pendingGpuChanges` HashSet; `RefreshGpuAppRows` — restored registry-driven listing, pending from in-memory set; `ToggleGpuAppAsync` — flip registry value, manage pending state)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):**
+1. **ArchiCAD is listed:** ArchiCAD (registry `GpuPreference=1`) should appear in the iGPU list.
+2. **No flashing on startup:** No toggles should be pulsing before the user does anything.
+3. **Toggle flips appearance:** Clicking a toggle should flip the highlighted side (grey ↔ white).
+4. **Pending pulse:** After clicking a toggle (and choosing "Not now"), that toggle should pulse. Clicking it again should cancel the pending change and stop the pulse. Restarting the app should also stop the pulse.
+
+---
+
+## ✅ DONE: GPU toggle pending-change detection + flip-back logic (11/3)
+
+**Symptom (user report):** All iGPU toggles were flashing before doing anything. Clicking one told me affinity had been changed to dGPU, but the flashing was unchanged. Clicking again on the same toggle did not tell me that affinity had been restored to iGPU as one would expect from a toggle. However, if I did restart ArchiCAD, I saw affinity was not changed — or at least it was still listed as being in the iGPU section. Nothing about the toggles worked as expected. Toggles should change appearance when clicked — the side that is grey background should become white background, and the side that is white background should become grey background. Flashing should only apply to items that are pending a move. If move is toggled off, the flashing should stop.
+
+**Root cause:**
+1. **The `hasPendingChange` detection was wrong:** The `affinityByRawName` dictionary was matching on the process name (`node`) which is too generic. The first node.exe entry in the registry won, so all node.exe processes got the same registry value. If that value differed from the current GPU, `hasPendingChange` was `true` for all of them.
+2. **The toggle was not flipping back:** The `ToggleGpuAppAsync` was computing the flip target from `CurrentIsMotherboardGpu` which is the app's actual current GPU. But the user expects the toggle to flip the **displayed** state (the target GPU when pending). So if the toggle shows dGPU (pending), clicking it should write the registry back to iGPU (the current GPU). But the current code was writing the registry to dGPU (the opposite of the current GPU), which is the same as the target. So the toggle was not actually flipping back.
+
+**Fix:**
+1. **Fix the `hasPendingChange` detection:** Changed the `affinityByRawName` dictionary to `affinityByFullPath` which matches on the full executable path (e.g. `C:\Program Files\Graphisoft\Archicad 30\node.exe`) instead of the process name (`node`). This avoids matching multiple node.exe instances to the same registry entry.
+2. **Fix the toggle flip-back logic:** Changed the `ToggleGpuAppAsync` to compute the flip target from the **displayed** GPU (`IsOnMotherboardGpu`), not the current GPU (`CurrentIsMotherboardGpu`). This way, clicking the toggle will flip the displayed state:
+   - If the toggle shows dGPU (pending), clicking it writes the registry back to iGPU (the current GPU), reversing the pending change.
+   - If the toggle shows iGPU (current), clicking it writes the registry to dGPU (creating a new pending change).
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` (`RefreshGpuAppRows` — use full path for registry lookup; `ToggleGpuAppAsync` — use displayed GPU to compute flip target)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):**
+1. **No flashing before doing anything:** The iGPU toggles should not be flashing unless there's a pending change.
+2. **Toggle flips back:** Clicking a toggle should flip the displayed state. If the toggle shows dGPU (pending), clicking it should write the registry back to iGPU (the current GPU), and the flashing should stop. If the toggle shows iGPU (current), clicking it should write the registry to dGPU (creating a new pending change), and the flashing should start.
+3. **Toggle appearance changes:** The side that is grey background should become white background, and the side that is white background should become grey background when the toggle is clicked.
+
+---
+
+## ✅ DONE: GPU toggle uses full executable path for registry + restart (11/3)
+
+**Symptom (user report):** The ArchiCAD MCP server runs as `C:\Program Files\Graphisoft\Archicad 30\node.exe` (a node.exe process). The GPU toggle's `ResolveRegistryKey` method resolved the registry key by process name (`node`), which found the **first** node.exe process — but there are multiple node.exe processes running (from `C:\Program Files\nodejs\node.exe`, Cursor, LM Studio, Adobe, etc.). So the toggle wrote the registry for the wrong node.exe path. Additionally, `RestartAppByName` would restart ALL node.exe processes, not just the ArchiCAD one.
+
+**Root cause:** The `GpuAppListItem` only carried the process name (`node`), not the full executable path. The `ResolveRegistryKey` method used `Process.GetProcessesByName(appName)` which returns all processes with that name, and picked the first one's `MainModule.FileName` — which could be any of the node.exe instances. The `RestartAppByName` method used `Process.GetProcessesByName(appName)` which would kill and restart ALL processes with that name.
+
+**Fix:**
+1. **Capture the full executable path:** Added a `FullPath` property to `GpuProcessUse`, `VramProcessListItem`, and `GpuAppListItem`. The full path is captured from `Process.MainModule.FileName` when collecting GPU process usage.
+2. **Use the full path for registry writes:** `ToggleGpuAppAsync` now passes the full path to `ApplyForApp` when available, so the registry is written for the correct executable (e.g. `C:\Program Files\Graphisoft\Archicad 30\node.exe` instead of just `node`).
+3. **Use the full path for restarts:** Added a `RestartAppByPath` method that only restarts the process(es) whose executable path matches exactly. `ToggleGpuAppAsync` now uses `RestartAppByPath` when the full path is available, so only the ArchiCAD node.exe is restarted, not every node.exe on the system.
+4. **Use the full path for pending-change detection:** `RefreshGpuAppRows` now looks up the registry entry using the full path when available, so the pending-change detection works correctly for apps like the ArchiCAD MCP server.
+
+**Files changed:**
+- `Services/RuntimeActionResult.cs` (`VramProcessListItem` — added `FullPath`; `GpuAppListItem` — added `FullPath`)
+- `Services/FluxMuxRuntimeService.cs` (`GpuProcessUse` — added `FullPath`; `CollectWindowsGpuLocalUsageCore` — capture full path; `CollectGpuProcessUses` — pass full path through; `ToVramProcessListItem` — pass full path through)
+- `Services/GpuProcessMemoryAggregator.cs` (`UnionPreferringLargerMegabytes` — pass full path through)
+- `Services/WindowsGpuPreference.cs` (added `RestartAppByPath` method)
+- `ViewModels/MainViewModel.cs` (`RefreshGpuAppRows` — use full path for registry lookup; `ToggleGpuAppAsync` — use full path for registry write and restart)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Set a GPU affinity change for the ArchiCAD MCP server (node.exe). The registry should be written for `C:\Program Files\Graphisoft\Archicad 30\node.exe` (not some other node.exe). Clicking the toggle to restart should only restart the ArchiCAD node.exe, not every node.exe on the system.
+
+---
+
+## ✅ DONE: GPU toggle flip-back + VRAM-spill warning timing + diagnostics panel expansion (11/3)
+
+**Symptom (user report):** Three issues:
+1. **GPU toggle couldn't flip back:** After setting a GPU affinity change (pending state), clicking the pulsing toggle didn't reverse the change. The toggle showed the target GPU highlighted, but clicking it didn't write the registry back to the current GPU.
+2. **VRAM-spill warning fired too early:** The "about to spill from VRAM to RAM" warning appeared at 91% context fill, long before the prompt actually exceeded the VRAM-resident context. At that point, no VRAM-based model could ever hold the context, so the warning was premature and misleading.
+3. **Diagnostics panel didn't expand:** When the VRAM-spill warning dialog was shown, the diagnostics panel failed to grow to accommodate the dialog, so the dialog was clipped or overlapped other content.
+
+**Root cause:**
+1. **GPU toggle flip-back:** `ToggleGpuAppAsync` computed the flip target from `item.IsOnMotherboardGpu`, which shows the **target** GPU when a pending change exists. So clicking the toggle always wrote the registry to the same target value (a no-op), instead of writing it back to the **current** GPU (which would reverse the pending change).
+2. **VRAM-spill warning timing:** The show threshold was set to 90% of the VRAM-resident context (`vramContext * 0.90`), so the warning fired when the prompt was at 90% of VRAM — still entirely in VRAM, not yet spilling into RAM. The warning should only fire when the prompt **actually exceeds** the VRAM-resident context (overflow > 0).
+3. **Diagnostics panel expansion:** `ResetDiagnosticsPanelHeight()` was called synchronously when `LocalReloadRecommendVisible` became true, but the GridSplitter's pixel-height override was re-applied on the next layout pass, undoing the reset and preventing the `MinHeight` binding from expanding the panel.
+
+**Fix:**
+1. **GPU toggle flip-back:** Added a `CurrentIsMotherboardGpu` property to `GpuAppListItem` that tracks the app's **actual current GPU** (from `GpuKind`), separate from `IsOnMotherboardGpu` (which shows the target when pending). `ToggleGpuAppAsync` now computes the flip target from `CurrentIsMotherboardGpu`, so clicking the toggle always moves the app to the opposite of its **current** GPU — which reverses the pending change when one exists.
+2. **VRAM-spill warning timing:** Changed the show threshold from 90% to 100% of the VRAM-resident context (`vramContext` instead of `vramContext * 0.90`). The warning now only fires when the prompt **actually exceeds** the VRAM-resident context (overflow > 0), not when it's merely approaching it. The hide threshold stays at 80% to prevent flickering.
+3. **Diagnostics panel expansion:** Deferred the `ResetDiagnosticsPanelHeight()` call to the next dispatcher frame using `Dispatcher.UIThread.InvokeAsync(..., DispatcherPriority.Loaded)`. This ensures the reset runs **after** the layout pass that the GridSplitter uses to re-apply its pixel override, so the `MinHeight` binding can expand the panel without being undone.
+4. **GPU toggle pulse (no border):** Changed the pending-state indicator from a pulsing border around the pill to a pulsing active segment. The active segment's background now pulses (opacity 1.0 ↔ 0.5) to draw attention, instead of adding a special border. This is cleaner and more visually integrated with the toggle design.
+
+**Files changed:**
+- `Services/RuntimeActionResult.cs` (`GpuAppListItem` — added `CurrentIsMotherboardGpu` property)
+- `ViewModels/MainViewModel.cs` (`RefreshGpuAppRows` — set `CurrentIsMotherboardGpu`; `ToggleGpuAppAsync` — use `CurrentIsMotherboardGpu` to compute flip target)
+- `Services/FluxMuxGatewayHost.cs` (`OfferSpillCompactIfNeeded` — changed show threshold from 90% to 100% of VRAM)
+- `Views/MainWindow.axaml.cs` (`OnVmPropertyChanged` — deferred `ResetDiagnosticsPanelHeight()` to next dispatcher frame)
+- `Controls/GpuPillToggle.cs` (changed pulse animation from border to active segment background)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):**
+1. **GPU toggle flip-back:** Set a GPU affinity change for an app (e.g., move ArchiCAD from iGPU to dGPU). The app should stay in the iGPU list but its toggle should show the dGPU side highlighted with a **pulsing active segment** (no border). Click the toggle → the registry should be written back to iGPU (reversing the pending change), and the pulsing should stop.
+2. **VRAM-spill warning timing:** The "about to spill from VRAM to RAM" warning should only appear when the prompt **actually exceeds** the VRAM-resident context (not at 90% fill).
+3. **Diagnostics panel expansion:** When the VRAM-spill warning dialog is shown, the diagnostics panel should expand to accommodate the dialog without clipping or overlapping other content.
+
+---
+
+## ✅ DONE: GPU toggle pending-state indicator + correct current/target GPU display (11/3)
+
+**Symptom (user report):** After setting a GPU affinity change (registry updated), the app still showed in the "old" GPU list (e.g., iGPU list) even though the registry was set to the new GPU. The toggle didn't reflect the pending change, and there was no way to see that a restart was needed, flip the change back, or trigger the restart.
+
+**Root cause:** `RefreshGpuAppRows` determined which GPU an app was on from the **registry** (the target), not from the app's **actual current GPU** (from the running process's `GpuKind`). So after a registry change, the app would immediately move to the "new" GPU list, even though it was still running on the old GPU until restarted. This was misleading — the user couldn't tell that a restart was pending.
+
+**Fix:**
+1. **Track current vs. target GPU:** `RefreshGpuAppRows` now determines the **current** GPU from `row.GpuKind` (the process's actual GPU usage) and the **target** GPU from the registry. If they differ, the app has a **pending change**.
+2. **Toggle shows the target GPU:** When there's a pending change, the toggle shows the **target** GPU (where the app will go after restart), not the current GPU. This lets the user see where the app is headed.
+3. **Pending indicator (pulse):** Added `HasPendingGpuChange` and `TargetIsMotherboardGpu` properties to `GpuAppListItem`. The `GpuPillToggle` control now shows a **pulsing border** (orange, 2px) when a change is pending, with a tooltip explaining "a GPU change is pending and will apply after the app restarts."
+4. **App stays in its current list:** The app remains in the list corresponding to its **current** GPU (not the target), so the user can see it's still on the old GPU. The pulsing toggle indicates the pending change.
+5. **Flip back / trigger restart:** Clicking the pulsing toggle still works — it offers to restart the app (to apply the pending change) or the user can click the other side to flip the registry back.
+
+**Files changed:**
+- `Services/RuntimeActionResult.cs` (`GpuAppListItem` — added `HasPendingGpuChange`, `TargetIsMotherboardGpu`)
+- `ViewModels/MainViewModel.cs` (`RefreshGpuAppRows` — detect pending changes, show target GPU in toggle)
+- `Controls/GpuPillToggle.cs` (added `HasPendingChange` property + pulsing border animation)
+- `Views/MainWindow.axaml` (bound `HasPendingChange` to `GpuPillToggle`)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Set a GPU affinity change for an app (e.g., move ArchiCAD from iGPU to dGPU). The app should stay in the iGPU list but its toggle should show the dGPU side highlighted with a **pulsing orange border**. The tooltip should say "a GPU change is pending and will apply after the app restarts." Click the toggle → the restart dialog should appear.
+
+---
+
+## ✅ DONE: Fix GPU toggle "Could not change" when app already on target GPU (11/3)
+
+**Symptom (user report):** Clicking the GPU toggle for ArchiCAD or Epic Games Launcher showed "Could not change GPU affinity" in the terminal, even though the registry entries were already set to the correct value (`GpuPreference=2`).
+
+**Root cause:** `ApplyForApp` returned `false` when the registry value was **already** set to the target preference. This happened because:
+1. A previous toggle attempt successfully wrote the registry (e.g., `GpuPreference=2`)
+2. The app wasn't restarted, so it was still using the old GPU
+3. The UI still showed the app on the "wrong" GPU (because the running process hadn't picked up the new affinity)
+4. User clicked the toggle again to move it to the same GPU
+5. `ApplyForApp` saw the registry was already `GpuPreference=2` and returned `false` (no change needed)
+6. UI showed "Could not change GPU affinity" — misleading, since the registry was already correct
+
+**Fix:** Changed `ApplyForApp` to return `true` when the registry value is already the target. This treats "already on the desired GPU" as success, so the UI shows the correct state and offers the restart (to apply the affinity to the running process).
+
+**Files changed:** `Services/WindowsGpuPreference.cs` (`ApplyForApp` — return `true` when value already matches target)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Click the GPU toggle for an app that's already on the target GPU → the terminal should show success (not "Could not change"), and the restart dialog should appear.
+
+---
+
+## ✅ DONE: Fix update dialog progress bar off-centre + flicker (11/2)
+
+**Symptom (user report):** The llama-server and other update dialog windows (invoked from the Environment tab) have downloading progress bars that are off-centre in the dialogs, and they flicker a lot during download.
+
+**Root cause (two issues):**
+1. **Off-centre:** The progress bar and labels were in a `FlowLayoutPanel` with a manual `Layout` event handler that set `Left` on each control to center them. This conflicted with the `FlowLayoutPanel`'s own layout engine, causing unreliable centering.
+2. **Flicker:** `SetProgress` was called on every download chunk, updating `_progressBar.Value` and `_progressLabel.Text` each time. Each update triggered a repaint, causing visible flicker during fast downloads.
+
+**Fix:**
+1. Replaced the `FlowLayoutPanel` + manual `Left` centering with a `TableLayoutPanel` (single column, 5 rows). Each control uses `Dock=Fill`; labels use `TextAlign=MiddleCenter` to center their text within the filled cell. The `ProgressBar` fills its cell (full column width). No manual `Left` assignment needed — the layout engine handles centering.
+2. Added a `System.Windows.Forms.Timer` (100ms interval) to throttle progress UI updates to ~10 fps. `SetProgress` now stores the latest values and marks them dirty; the timer applies them at most every 100ms. This eliminates the flicker from rapid repaints.
+3. Enabled `DoubleBuffered` on the form to reduce repaint flicker.
+4. The timer is stopped in `Finish()` when the update completes.
+
+**Files changed:** `FluxMux.Updates/UpdaterForm.cs` (replaced FlowLayoutPanel with TableLayoutPanel, added progress throttle timer, enabled DoubleBuffered)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Trigger an update from the Environment tab → the progress bar should be centered in the dialog and update smoothly without flicker.
+
+---
+
+## ✅ DONE: Fix diagnostics panel not expanding to show VRAM-spill warning (11/2)
+
+**Symptom (user report):** Context hit 241K/393K (well past the 163K VRAM limit) but no VRAM-spill warning was visible. The user had previously requested that the diagnostics panel expand to fit recommendation dialogs without masking existing content, then return to normal when dismissed.
+
+**Root cause:** The diagnostics panel row (Row 3 of MainLayoutGrid) has a `MinHeight` binding to `DiagnosticsPanelMinHeight` (120 default, 400 when a dialog is visible). However, a `GridSplitter` at Row 2 can override the row's height with a pixel value when the user drags it. Once overridden, the `MinHeight` binding can't expand the panel. The `ResetDiagnosticsPanelHeight()` method exists to clear this override but was **never called** — it was dead code. So if the user had ever dragged the GridSplitter, the panel would stay at the pixel height and the spill-compact warning banner would be masked/invisible.
+
+**Fix:** Added a call to `ResetDiagnosticsPanelHeight()` in `OnVmPropertyChanged` (MainWindow.axaml.cs) when `CloudRecommendVisible` or `LocalReloadRecommendVisible` becomes true. This clears any GridSplitter pixel-height override so the `MinHeight` binding can expand the panel to fit the dialog. When the dialog is dismissed, the panel returns to its default height.
+
+**Files changed:** `Views/MainWindow.axaml.cs` (`OnVmPropertyChanged` — added `ResetDiagnosticsPanelHeight` call when a recommendation dialog becomes visible)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Drag the GridSplitter to set a custom diagnostics panel height. Let context grow past the VRAM limit → the spill-compact warning should appear and the panel should expand to fit it (clearing the custom height). Dismiss the warning → the panel returns to its default height.
+
+---
+
+## ✅ DONE: Fix VRAM-spill warning auto-declined without user seeing it (11/2)
+
+**Symptom (user report):** Context hit 241K/393K (well past the 163K VRAM limit) but no VRAM-spill warning was shown. Investigation revealed the warning **did** fire (urgency 2, "most of this chat's context is running in slow RAM"), but was auto-declined (`status: "no"`, `suppress_until` set to ~48 min) without the user ever seeing it.
+
+**Root cause:** `DismissPendingIntervention()` in `MainViewModel.cs` auto-declines any pending local reload/spill-compact warning when the user launches or restarts a model via Quick Select. This was designed for model-routing suggestions ("try a different model"), but it also caught **spill-compact warnings** (which are about context management, not routing). So the sequence was:
+1. Context grew past the VRAM limit → spill-compact warning fired (status: "pending")
+2. User launched/restarted a model via Quick Select → `DismissPendingIntervention` auto-declined the warning (status: "no", suppress_until set)
+3. User never saw the warning because it was auto-declined before they could respond
+
+**Fix:** Modified `DismissPendingIntervention` to **skip** spill-compact warnings. It now reads the local reload recommend snapshot and only auto-declines if `SpillCompact` is false (i.e., it's a model-routing suggestion, not a context-management warning). Spill-compact warnings now persist until the user explicitly responds or the context drops below the hide threshold.
+
+**Files changed:** `ViewModels/MainViewModel.cs` (`DismissPendingIntervention` — added `SpillCompact` check)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass.
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Let context grow past the VRAM limit → the spill-compact warning should appear as a banner. Launch/restart a model via Quick Select → the warning should **persist** (not auto-decline). The user can then respond to it (compact or dismiss).
+
+---
+
+## ✅ DONE: Fix GPU app toggle not responding + add immediate-apply restart (11/2)
+
+**Symptom (user report):** The GPU pill toggles in the Settings tab (VRAM/iGPU app lists) were inert — clicking them showed "Could not change GPU affinity for [app]" in the terminal, and the toggle gave no visual feedback. Even when the registry write succeeded, the change only took effect after a Windows reboot, which is unacceptable for fine-tuning GPU assignments.
+
+**Root cause (three issues):**
+1. `WindowsGpuPreference.ApplyForApp()` only updated an app's GPU affinity if the app **already had a registry entry** in `UserGpuPreferences`. Most apps don't have entries by default, so `ApplyForApp` returned `false` and did nothing.
+2. **Registry key mismatch:** Windows stores GPU affinity under the **full executable path** (e.g. `C:\Program Files\Graphisoft\Archicad 29\Archicad.exe`), not the bare process name ("Archicad"). The code was passing the bare process name, which looked up a non-existent registry key.
+3. **No immediate effect:** Even when the registry write succeeded, Windows only applies `UserGpuPreferences` when a process starts. The user had to reboot or manually relaunch the app for the change to take effect.
+
+**Fix:**
+1. `ApplyForApp` now **creates** the registry entry if it doesn't exist (instead of returning `false`).
+2. Added `ResolveRegistryKey()` helper that resolves the full executable path from the running process when given a bare process name (via `Process.GetProcessesByName()` → `MainModule.FileName`). If the input is already a full path, it's used as-is.
+3. `ApplyForApp` now uses the resolved full path as the registry key.
+4. **Added `RestartAppByName()`** to `WindowsGpuPreference` — finds all running instances of the app, records the executable path and working directory, kills them all (with process tree), then relaunches a single instance. This makes the GPU affinity change take effect immediately.
+5. **Updated `ToggleGpuAppAsync`** in `MainViewModel` — after a successful registry change, shows a confirmation dialog ("Restart [App] now to apply it immediately?"). If the user confirms, calls `RestartAppByName` to kill and relaunch the app. If they cancel, the status message notes the change will apply on next launch.
+
+**Files changed:**
+- `Services/WindowsGpuPreference.cs` (`ApplyForApp` + new `ResolveRegistryKey` + new `RestartAppByName` + `using System.Diagnostics`)
+- `ViewModels/MainViewModel.cs` (`ToggleGpuAppAsync` — added restart confirmation + call)
+
+**Build:** 0 errors. **Tests:** 1738/1738 pass (including 19 WindowsGpuPreference tests).
+**Deploy:** NOT deployed (user: close app → `build-fluxmux.bat clean` → restart)
+**Verify (manual):** Open Settings tab → GPU & VRAM section → click a GPU pill toggle on a running app (e.g. ArchiCAD). A confirmation dialog should appear asking to restart the app. Click "Restart now" → the app closes and relaunches on the new GPU. The toggle should visually flip and the app should move between the VRAM/iGPU lists.
+
+---
+
 ## ✅ DONE: Fix update dialog progress bar width + centering (11/2)
 
 **Symptom (user report):** The llama-server, harness, and FluxMux update dialogs have progress bars that are too wide for the dialogs they sit in, and the bars are not centered within the dialog windows.

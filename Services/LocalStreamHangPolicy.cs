@@ -188,11 +188,32 @@ public sealed class LocalStreamHangClock
 
     public TimeSpan StallDeadline { get; set; }
 
+    /// <summary>
+    /// The estimated prefill duration in seconds, calculated from the prompt token count
+    /// and the learned prefill speed. When set, the hang detection uses this estimate
+    /// instead of the fixed FirstByteDeadline to decide when to show the "wait longer"
+    /// dialog. This prevents the dialog from appearing before the model has had a
+    /// reasonable chance to finish prefilling.
+    /// </summary>
+    public int PrefillEstimateSeconds { get; set; }
+
     public string LastAbortReason { get; set; } = string.Empty;
 
     public int WaitLongerCount { get; set; }
 
+    /// <summary>
+    /// True once the first REAL content token (content / reasoning / tool_calls) has been
+    /// received from the upstream. Before this, the stream is still in the "prefill / first
+    /// token" window even if header bytes have already arrived — for a thinking model the
+    /// first byte arrives quickly but the first content token can be minutes away. The hang
+    /// watchdog uses this to keep the (capped) prefill-estimate window in effect until the
+    /// first content token, instead of switching to the long post-first-byte stall deadline.
+    /// </summary>
+    public bool GotContentToken { get; private set; }
+
     public void NoteByte() => LastByteUtc = DateTime.UtcNow;
+
+    public void NoteContentToken() => GotContentToken = true;
 
     public void ResetForWaitLonger()
     {

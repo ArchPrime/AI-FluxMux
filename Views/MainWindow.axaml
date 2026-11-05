@@ -2839,7 +2839,8 @@
                                                             <ctrl:GpuPillToggle Grid.Column="2"
                                                                                 IsOnMotherboard="{Binding IsOnMotherboardGpu}"
                                                                                 IsSwitchable="{Binding CanToggle}"
-                                                                                ToggleCommand="{Binding $parent[Window].DataContext.ToggleGpuAppCommand}"
+                                                                                HasPendingChange="{Binding HasPendingGpuChange}"
+                                                                                 ToggleCommand="{Binding $parent[Window].DataContext.ToggleGpuAppCommand}"
                                                                                 ToolTip.Tip="Move this app to the Motherboard GPU (iGPU). Click the other side to return it to the Discrete GPU." />
                                                         </Grid>
                                                     </Border>
@@ -2892,7 +2893,8 @@
                                                             <ctrl:GpuPillToggle Grid.Column="2"
                                                                                 IsOnMotherboard="{Binding IsOnMotherboardGpu}"
                                                                                 IsSwitchable="{Binding CanToggle}"
-                                                                                ToggleCommand="{Binding $parent[Window].DataContext.ToggleGpuAppCommand}"
+                                                                                HasPendingChange="{Binding HasPendingGpuChange}"
+                                                                                 ToggleCommand="{Binding $parent[Window].DataContext.ToggleGpuAppCommand}"
                                                                                 ToolTip.Tip="Move this app to the Discrete GPU (dedicated VRAM). Click the other side to return it to the Motherboard GPU." />
                                                         </Grid>
                                                     </Border>
@@ -3131,8 +3133,226 @@
                 Background="{DynamicResource FluxChromeBackground}"
                 BorderBrush="{DynamicResource FluxChromeEdge}"
                 BorderThickness="0,1,0,0">
-            <Grid RowDefinitions="Auto,*" RowSpacing="3">
-                <StackPanel Grid.Row="0" Spacing="4">
+            <Grid RowDefinitions="Auto,Auto,*" RowSpacing="3">
+                <!-- Row 0: Recommendation banners (above the Diagnostics label) -->
+                <StackPanel Grid.Row="0" Spacing="4" x:Name="RecommendBannerPanel">
+                    <Border IsVisible="{Binding CloudRecommendVisible}"
+                            Background="{DynamicResource FluxTintAmberBackground}"
+                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="8,6">
+                        <StackPanel Spacing="8">
+                            <TextBlock views:MarkedText.Source="{Binding CloudRecommendText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="12" />
+                            <TextBlock Text="{Binding RecoveryHarnessRelaunchHint}"
+                                       TextWrapping="Wrap"
+                                       FontSize="11"
+                                       Opacity="0.88"
+                                       IsVisible="{Binding RecoveryHarnessRelaunchVisible}" />
+                            <WrapPanel>
+                                <Button Content="{Binding RecoveryWaitLongerLabel}"
+                                        Margin="0,0,8,4"
+                                        IsVisible="{Binding RecoveryWaitLongerVisible}"
+                                        Command="{Binding ContinueWaitingRecoveryCommand}"
+                                        views:MarkedText.Tip="{Binding RecoveryWaitLongerTooltip}" />
+                                <Button Content="{Binding RecoveryResumeLabel}"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding ResumeCurrentModelRecoveryCommand}"
+                                        views:MarkedText.Tip="{Binding RecoveryResumeTooltip}" />
+                                <Button Content="{Binding RecoverySteerLabel}"
+                                        Margin="0,0,8,4"
+                                        IsVisible="{Binding RecoverySteerVisible}"
+                                        Command="{Binding SteerPortRuleRecoveryCommand}"
+                                        views:MarkedText.Tip="{Binding RecoverySteerTooltip}" />
+                                <Button Content="{Binding RecoverySwitchLocalLabel}"
+                                        Margin="0,0,8,4"
+                                        IsVisible="{Binding RecoverySwitchLocalVisible}"
+                                        Command="{Binding SwitchRecoveryLocalCommand}"
+                                        ToolTip.Tip="{Binding RecoverySwitchLocalTooltip}" />
+                                <Button Content="{Binding RecoverySwitchCloudLabel}"
+                                        Margin="0,0,8,4"
+                                        IsVisible="{Binding RecoverySwitchCloudVisible}"
+                                        Command="{Binding ApproveCloudRecommendCommand}"
+                                        ToolTip.Tip="{Binding RecoverySwitchCloudTooltip}" />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                    <Border IsVisible="{Binding LocalReloadRecommendVisible}"
+                            Background="{Binding LocalReloadRecommendBackgroundBrush}"
+                            BorderBrush="{Binding LocalReloadRecommendAccentBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="0"
+                            views:MarkedText.Tip="{Binding LocalReloadRecommendTooltip}">
+                        <Grid ColumnDefinitions="4,*">
+                            <Border Grid.Column="0"
+                                    CornerRadius="4,0,0,4"
+                                    Background="{Binding LocalReloadRecommendAccentBrush}" />
+                            <StackPanel Grid.Column="1" Spacing="8" Margin="8,6">
+                                <TextBlock views:MarkedText.Source="{Binding LocalReloadRecommendText}"
+                                           TextWrapping="Wrap"
+                                           FontSize="12" />
+                                <WrapPanel>
+                                    <Button Content="Compact"
+                                            Margin="0,0,8,4"
+                                            IsVisible="{Binding LocalReloadCompactVisible}"
+                                            IsEnabled="{Binding CompactionControlsEnabled}"
+                                            Command="{Binding CompactLocalReloadRecommendCommand}"
+                                            ToolTip.Tip="Compact: shorten the older turns that AI-FluxMux forwards to the local model so the current turn fits in the loaded Context." />
+                                    <Button Content="Load suggested model profile"
+                                            Margin="0,0,8,4"
+                                            IsVisible="{Binding LocalReloadLoadVisible}"
+                                            Command="{Binding ApproveLocalReloadRecommendCommand}"
+                                            views:MarkedText.Tip="Unload the model profile that is running now and start the suggested model profile named in the blue note." />
+                                    <Button Content="Keep current model for now"
+                                            Margin="0,0,8,4"
+                                            Command="{Binding DeclineLocalReloadRecommendCommand}"
+                                            ToolTip.Tip="Keep the local model profile that is already loaded. Hide this suggestion for 15 minutes." />
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <Border IsVisible="{Binding HealthReportVisible}"
+                            Background="{DynamicResource FluxTintAmberBackground}"
+                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="8,6">
+                        <DockPanel LastChildFill="True">
+                            <Button DockPanel.Dock="Right"
+                                    Content="Dismiss"
+                                    Margin="8,0,0,0"
+                                    VerticalAlignment="Center"
+                                    Command="{Binding DismissHealthReportCommand}"
+                                    views:MarkedText.Tip="Hide this health note. Click **Health** again if you want a fresh check." />
+                            <TextBlock views:MarkedText.Source="{Binding HealthReportText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="12"
+                                       VerticalAlignment="Center" />
+                        </DockPanel>
+                    </Border>
+                    <Border IsVisible="{Binding HailMaryBannerVisible}"
+                            Background="{Binding HailMaryBannerBackgroundBrush}"
+                            BorderBrush="{Binding HailMaryBannerAccentBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="8,6"
+                            views:MarkedText.Tip="{Binding HailMaryBannerTooltip}">
+                        <StackPanel Spacing="8">
+                            <TextBlock views:MarkedText.Source="{Binding HailMaryBannerText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="12" />
+                            <WrapPanel>
+                                <TextBlock Text="Prune:" VerticalAlignment="Center" Margin="0,0,4,4" FontSize="12" />
+                                <RadioButton Content="Gentle"
+                                             GroupName="HailMaryBannerStop"
+                                             IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Gentle}"
+                                             Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
+                                             ToolTip.Tip="Keep ~8 recent turns; just fit under the window." />
+                                <RadioButton Content="Balanced"
+                                             GroupName="HailMaryBannerStop"
+                                             IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Balanced}"
+                                             Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
+                                             ToolTip.Tip="Keep ~4 recent turns; leave ~20% room for the reply." />
+                                <RadioButton Content="Aggressive"
+                                             GroupName="HailMaryBannerStop"
+                                             IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Aggressive}"
+                                             Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
+                                             ToolTip.Tip="Keep ~2 recent turns; leave ~40% room for the reply." />
+                                <CheckBox Content="also strip older images"
+                                          IsChecked="{Binding HailMaryStripImages}"
+                                          Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
+                                          ToolTip.Tip="Also strip older embedded images (keeps the most recent). Independent of the prune stop." />
+                            </WrapPanel>
+                            <WrapPanel>
+                                <Button Content="Hail Mary Context Trim: shrink this turn"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding HailMaryShrinkTurnCommand}"
+                                        ToolTip.Tip="Prunes the older turns from this chat's forwarded history (keeping the system prompt, your last task, and the chosen number of recent turns) so the reply has room to complete, then re-sends the turn. The Client app still has the full chat." />
+                                <Button Content="Dismiss"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DismissHailMaryBannerCommand}"
+                                        ToolTip.Tip="Hide this suggestion. Start a fresh chat or take another action instead." />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                    <Border IsVisible="{Binding DocumentContextDialogVisible}"
+                            Background="{DynamicResource FluxTintAmberBackground}"
+                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="8,6">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="{Binding DocumentContextDialogText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="12" />
+                            <WrapPanel>
+                                <Button Content="Full fidelity, this turn only"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DocumentContextFullThisTurnCommand}"
+                                        ToolTip.Tip="Read the whole document at full precision. It will run in ordinary memory (slower) for this turn. Next turn, older parts may be compacted to return to the fast card." />
+                                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,0,8,4" VerticalAlignment="Center">
+                                    <Button Content="Full fidelity, keep for"
+                                            Command="{Binding DocumentContextFullNTurnsCommand}"
+                                            ToolTip.Tip="Keep the whole document in context for the next N turns, then compact. Slower for N turns, but the model remembers the document." />
+                                    <NumericUpDown Minimum="1" Maximum="20"
+                                                   Value="{Binding DocumentContextKeepTurns}"
+                                                   Width="60"
+                                                   ToolTip.Tip="How many turns to keep the document at full precision." />
+                                    <TextBlock Text="turns" VerticalAlignment="Center" FontSize="12" />
+                                </StackPanel>
+                                <Button Content="Summarize the document"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DocumentContextSummarizeCommand}"
+                                        ToolTip.Tip="Create a compact summary that fits in graphics memory. This may lose important details — good if you just need the gist, risky if you need precise answers. The full document is kept in this Client app." />
+                                <Button Content="Cancel this turn"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DocumentContextCancelCommand}"
+                                        ToolTip.Tip="Don't send this turn. You can break the document into smaller pieces or try a different approach." />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                    <Border IsVisible="{Binding RecoveryReplacementVisible}"
+                            Background="{DynamicResource FluxMutedBackground}"
+                            BorderBrush="{DynamicResource FluxMutedBorder}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="8,6">
+                        <StackPanel Spacing="6">
+                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                                <TextBlock Grid.Column="0"
+                                           VerticalAlignment="Center"
+                                           FontSize="12"
+                                           Text="Or choose a different model" />
+                                <ComboBox x:Name="RecoveryReplacementChooser"
+                                          Grid.Column="1"
+                                          ItemsSource="{Binding RecoveryReplacementOptions}"
+                                          SelectedItem="{Binding SelectedRecoveryReplacement}"
+                                          HorizontalAlignment="Stretch">
+                                    <ComboBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding DisplayName}" TextWrapping="Wrap" />
+                                        </DataTemplate>
+                                    </ComboBox.ItemTemplate>
+                                </ComboBox>
+                                <Button Grid.Column="2"
+                                        Content="Switch to selected"
+                                        VerticalAlignment="Center"
+                                        Command="{Binding ApplyRecoveryReplacementCommand}"
+                                        ToolTip.Tip="Load or route to the model you picked. The note says whether this Client-app chat can continue." />
+                            </Grid>
+                            <TextBlock Text="{Binding RecoveryReplacementAdvice}"
+                                       TextWrapping="Wrap"
+                                       FontSize="11"
+                                       Opacity="0.88" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- Row 1: Diagnostics label + controls -->
+                <StackPanel Grid.Row="1" Spacing="4">
                     <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto" ColumnSpacing="6" ClipToBounds="False">
                         <TextBlock Grid.Column="0" VerticalAlignment="Center" FontWeight="SemiBold" Text="Diagnostics" />
                         <shapes:Ellipse Grid.Column="1"
@@ -3265,226 +3485,6 @@
                                Text="{Binding LastRouteExplanationText}"
                                IsVisible="{Binding ShowLastRouteExplanationText}"
                                ToolTip.Tip="Settings for the loaded model profile that the name row does not show: Images, Reasoning, Context, GPU, temperature, and max tokens. Compact is for the last Client-app turn on this model." />
-                    <Border IsVisible="{Binding HealthReportVisible}"
-                            Background="{DynamicResource FluxTintAmberBackground}"
-                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
-                            BorderThickness="1"
-                            CornerRadius="4"
-                            Padding="8,6">
-                        <DockPanel LastChildFill="True">
-                            <Button DockPanel.Dock="Right"
-                                    Content="Dismiss"
-                                    Margin="8,0,0,0"
-                                    VerticalAlignment="Center"
-                                    Command="{Binding DismissHealthReportCommand}"
-                                    views:MarkedText.Tip="Hide this health note. Click **Health** again if you want a fresh check." />
-                            <TextBlock views:MarkedText.Source="{Binding HealthReportText}"
-                                       TextWrapping="Wrap"
-                                       FontSize="12"
-                                       VerticalAlignment="Center" />
-                        </DockPanel>
-                    </Border>
-                    <Border IsVisible="{Binding CloudRecommendVisible}"
-                            Background="{DynamicResource FluxTintAmberBackground}"
-                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
-                            BorderThickness="1"
-                            CornerRadius="4"
-                            Padding="8,6">
-                        <StackPanel Spacing="8">
-                            <TextBlock views:MarkedText.Source="{Binding CloudRecommendText}"
-                                       TextWrapping="Wrap"
-                                       FontSize="12" />
-                            <TextBlock Text="{Binding RecoveryHarnessRelaunchHint}"
-                                       TextWrapping="Wrap"
-                                       FontSize="11"
-                                       Opacity="0.88"
-                                       IsVisible="{Binding RecoveryHarnessRelaunchVisible}" />
-                            <WrapPanel>
-                                <Button Content="{Binding RecoveryWaitLongerLabel}"
-                                        Margin="0,0,8,4"
-                                        IsVisible="{Binding RecoveryWaitLongerVisible}"
-                                        Command="{Binding ContinueWaitingRecoveryCommand}"
-                                        views:MarkedText.Tip="{Binding RecoveryWaitLongerTooltip}" />
-                                <Button Content="{Binding RecoveryResumeLabel}"
-                                        Margin="0,0,8,4"
-                                        Command="{Binding ResumeCurrentModelRecoveryCommand}"
-                                        views:MarkedText.Tip="{Binding RecoveryResumeTooltip}" />
-                                <Button Content="{Binding RecoverySteerLabel}"
-                                        Margin="0,0,8,4"
-                                        IsVisible="{Binding RecoverySteerVisible}"
-                                        Command="{Binding SteerPortRuleRecoveryCommand}"
-                                        views:MarkedText.Tip="{Binding RecoverySteerTooltip}" />
-                                <Button Content="{Binding RecoverySwitchLocalLabel}"
-                                        Margin="0,0,8,4"
-                                        IsVisible="{Binding RecoverySwitchLocalVisible}"
-                                        Command="{Binding SwitchRecoveryLocalCommand}"
-                                        ToolTip.Tip="{Binding RecoverySwitchLocalTooltip}" />
-                                <Button Content="{Binding RecoverySwitchCloudLabel}"
-                                        Margin="0,0,8,4"
-                                        IsVisible="{Binding RecoverySwitchCloudVisible}"
-                                        Command="{Binding ApproveCloudRecommendCommand}"
-                                        ToolTip.Tip="{Binding RecoverySwitchCloudTooltip}" />
-                            </WrapPanel>
-                        </StackPanel>
-                    </Border>
-                    <Border IsVisible="{Binding LocalReloadRecommendVisible}"
-                            Background="{Binding LocalReloadRecommendBackgroundBrush}"
-                            BorderBrush="{Binding LocalReloadRecommendAccentBrush}"
-                            BorderThickness="1"
-                            CornerRadius="4"
-                            Padding="0"
-                            views:MarkedText.Tip="{Binding LocalReloadRecommendTooltip}">
-                        <Grid ColumnDefinitions="4,*">
-                            <!-- Severity accent: a 4px-wide bar on the left edge, colored by urgency
-                                 (red/amber/blue). The rest of the dialog is tinted by the background. -->
-                            <Border Grid.Column="0"
-                                    CornerRadius="4,0,0,4"
-                                    Background="{Binding LocalReloadRecommendAccentBrush}" />
-                            <StackPanel Grid.Column="1" Spacing="8" Margin="8,6">
-                                <TextBlock views:MarkedText.Source="{Binding LocalReloadRecommendText}"
-                                           TextWrapping="Wrap"
-                                           FontSize="12" />
-                                <WrapPanel>
-                                    <Button Content="Compact"
-                                            Margin="0,0,8,4"
-                                            IsVisible="{Binding LocalReloadCompactVisible}"
-                                            IsEnabled="{Binding CompactionControlsEnabled}"
-                                            Command="{Binding CompactLocalReloadRecommendCommand}"
-                                            ToolTip.Tip="Compact: shorten the older turns that AI-FluxMux forwards to the local model so the current turn fits in the loaded Context. The Client app still has the full chat.\n\nWhen to use: this is typically a last resort to reanimate a dead chat — use it when the current turn became large enough to kill the chat before auto-compact could trigger.\n\nIf the suggested model profile's Context is too small for this chat, Compact also loads that model profile." />
-                                    <Button Content="Load suggested model profile"
-                                            Margin="0,0,8,4"
-                                            IsVisible="{Binding LocalReloadLoadVisible}"
-                                            Command="{Binding ApproveLocalReloadRecommendCommand}"
-                                            views:MarkedText.Tip="Unload the model profile that is running now and start the suggested model profile named in the blue note. The new local starts without the in-memory reading of this chat. If that model profile's Context is smaller than this chat, the next turn may still fail unless you **Compact** first." />
-                                    <Button Content="Keep current model for now"
-                                            Margin="0,0,8,4"
-                                            Command="{Binding DeclineLocalReloadRecommendCommand}"
-                                            ToolTip.Tip="Keep the local model profile that is already loaded. Hide this suggestion for 15 minutes. Does not shorten what AI-FluxMux forwards." />
-                                </WrapPanel>
-                            </StackPanel>
-                        </Grid>
-                    </Border>
-                    <Border IsVisible="{Binding HailMaryBannerVisible}"
-                            Background="{Binding HailMaryBannerBackgroundBrush}"
-                            BorderBrush="{Binding HailMaryBannerAccentBrush}"
-                            BorderThickness="1"
-                            CornerRadius="4"
-                            Padding="0"
-                            views:MarkedText.Tip="{Binding HailMaryBannerTooltip}">
-                        <Grid ColumnDefinitions="4,*">
-                            <Border Grid.Column="0"
-                                    CornerRadius="4,0,0,4"
-                                    Background="{Binding HailMaryBannerAccentBrush}" />
-                            <StackPanel Grid.Column="1" Spacing="8" Margin="8,6">
-                                <TextBlock views:MarkedText.Source="{Binding HailMaryBannerText}"
-                                           TextWrapping="Wrap"
-                                           FontSize="12" />
-                                <WrapPanel>
-                                    <TextBlock Text="Prune:" VerticalAlignment="Center" Margin="0,0,4,4" FontSize="12" />
-                                    <RadioButton Content="Gentle"
-                                                 GroupName="HailMaryBannerStop"
-                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Gentle}"
-                                                 Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
-                                                 ToolTip.Tip="Keep ~8 recent turns; just fit under the window." />
-                                    <RadioButton Content="Balanced"
-                                                 GroupName="HailMaryBannerStop"
-                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Balanced}"
-                                                 Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
-                                                 ToolTip.Tip="Keep ~4 recent turns; leave ~20% room for the reply." />
-                                    <RadioButton Content="Aggressive"
-                                                 GroupName="HailMaryBannerStop"
-                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Aggressive}"
-                                                 Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
-                                                 ToolTip.Tip="Keep ~2 recent turns; leave ~40% room for the reply." />
-                                    <CheckBox Content="also strip older images"
-                                              IsChecked="{Binding HailMaryStripImages}"
-                                              Margin="0,0,8,4" VerticalAlignment="Center" FontSize="12"
-                                              ToolTip.Tip="Also strip older embedded images (keeps the most recent). Independent of the prune stop." />
-                                </WrapPanel>
-                                <WrapPanel>
-                                    <Button Content="Hail Mary Context Trim: shrink this turn"
-                                            Margin="0,0,8,4"
-                                            Command="{Binding HailMaryShrinkTurnCommand}"
-                                            ToolTip.Tip="Prunes the older turns from this chat's forwarded history (keeping the system prompt, your last task, and the chosen number of recent turns) so the reply has room to complete, then re-sends the turn. The Client app still has the full chat." />
-                                    <Button Content="Dismiss"
-                                            Margin="0,0,8,4"
-                                            Command="{Binding DismissHailMaryBannerCommand}"
-                                            ToolTip.Tip="Hide this suggestion. Start a fresh chat or take another action instead." />
-                                </WrapPanel>
-                            </StackPanel>
-                        </Grid>
-                    </Border>
-                    <Border IsVisible="{Binding DocumentContextDialogVisible}"
-                            Background="{DynamicResource FluxTintAmberBackground}"
-                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
-                            BorderThickness="1"
-                            CornerRadius="4"
-                            Padding="8,6">
-                        <StackPanel Spacing="8">
-                            <TextBlock Text="{Binding DocumentContextDialogText}"
-                                       TextWrapping="Wrap"
-                                       FontSize="12" />
-                            <WrapPanel>
-                                <Button Content="Full fidelity, this turn only"
-                                        Margin="0,0,8,4"
-                                        Command="{Binding DocumentContextFullThisTurnCommand}"
-                                        ToolTip.Tip="Read the whole document at full precision. It will run in ordinary memory (slower) for this turn. Next turn, older parts may be compacted to return to the fast card." />
-                                <StackPanel Orientation="Horizontal" Spacing="4" Margin="0,0,8,4" VerticalAlignment="Center">
-                                    <Button Content="Full fidelity, keep for"
-                                            Command="{Binding DocumentContextFullNTurnsCommand}"
-                                            ToolTip.Tip="Keep the whole document in context for the next N turns, then compact. Slower for N turns, but the model remembers the document." />
-                                    <NumericUpDown Minimum="1" Maximum="20"
-                                                   Value="{Binding DocumentContextKeepTurns}"
-                                                   Width="60"
-                                                   ToolTip.Tip="How many turns to keep the document at full precision." />
-                                    <TextBlock Text="turns" VerticalAlignment="Center" FontSize="12" />
-                                </StackPanel>
-                                <Button Content="Summarize the document"
-                                        Margin="0,0,8,4"
-                                        Command="{Binding DocumentContextSummarizeCommand}"
-                                        ToolTip.Tip="Create a compact summary that fits in graphics memory. This may lose important details — good if you just need the gist, risky if you need precise answers. The full document is kept in this Client app." />
-                                <Button Content="Cancel this turn"
-                                        Margin="0,0,8,4"
-                                        Command="{Binding DocumentContextCancelCommand}"
-                                        ToolTip.Tip="Don't send this turn. You can break the document into smaller pieces or try a different approach." />
-                            </WrapPanel>
-                        </StackPanel>
-                    </Border>
-                    <Border IsVisible="{Binding RecoveryReplacementVisible}"
-                            Background="{DynamicResource FluxMutedBackground}"
-                            BorderBrush="{DynamicResource FluxMutedBorder}"
-                            BorderThickness="1"
-                            CornerRadius="4"
-                            Padding="8,6">
-                        <StackPanel Spacing="6">
-                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
-                                <TextBlock Grid.Column="0"
-                                           VerticalAlignment="Center"
-                                           FontSize="12"
-                                           Text="Or choose a different model" />
-                                <ComboBox x:Name="RecoveryReplacementChooser"
-                                          Grid.Column="1"
-                                          ItemsSource="{Binding RecoveryReplacementOptions}"
-                                          SelectedItem="{Binding SelectedRecoveryReplacement}"
-                                          HorizontalAlignment="Stretch">
-                                    <ComboBox.ItemTemplate>
-                                        <DataTemplate>
-                                            <TextBlock Text="{Binding DisplayName}" TextWrapping="Wrap" />
-                                        </DataTemplate>
-                                    </ComboBox.ItemTemplate>
-                                </ComboBox>
-                                <Button Grid.Column="2"
-                                        Content="Switch to selected"
-                                        VerticalAlignment="Center"
-                                        Command="{Binding ApplyRecoveryReplacementCommand}"
-                                        ToolTip.Tip="Load or route to the model you picked. The note says whether this Client-app chat can continue." />
-                            </Grid>
-                            <TextBlock Text="{Binding RecoveryReplacementAdvice}"
-                                       TextWrapping="Wrap"
-                                       FontSize="11"
-                                       Opacity="0.88" />
-                        </StackPanel>
-                    </Border>
                     <Border Background="#101828"
                             BorderBrush="#344054"
                             BorderThickness="1"
@@ -3512,7 +3512,7 @@
                     <!-- Live telemetry graph (context-fill stress test, launch progress, etc.).
                          Plots time-series or curve data. Points are added incrementally as data
                          arrives, and the graph updates live. -->
-                    <Grid Grid.Row="1" RowSpacing="4" ClipToBounds="True">
+                    <Grid Grid.Row="2" RowSpacing="4" ClipToBounds="True">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />

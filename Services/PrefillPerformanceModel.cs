@@ -9,11 +9,12 @@ using System.Text.RegularExpressions;
 namespace FluxMux.Avalonia.Services;
 
 /// <summary>
-/// A single measured prefill sample: the prompt token count and the measured
-/// request-sent → first-byte duration (which includes the prefill plus the first-token
-/// generation). These are the raw observations the performance model fits against.
+/// A single measured prefill sample: the prompt token count, the measured
+/// request-sent → first-byte duration, and whether this was a cold prefill
+/// (model just loaded, includes model loading time) or a warm prefill
+/// (model already loaded, pure prefill time).
 /// </summary>
-public sealed record PrefillSample(int PromptTokens, long FirstByteMs);
+public sealed record PrefillSample(int PromptTokens, long FirstByteMs, bool IsCold);
 
 /// <summary>
 /// A self-refining prefill performance model for a specific model/variant.
@@ -85,10 +86,19 @@ public sealed class PrefillPerformanceModel
     private readonly string _path;
     private readonly object _lock = new();
 
-    private readonly List<PrefillSample> _samples = new();
-    private double _tokensPerSec = DefaultTokensPerSec;
-    private double _overheadMs = 0.0;
-    private bool _hasData;
+    // Cold-prefill model: first turn after launch (includes model loading from disk).
+    private readonly List<PrefillSample> _coldSamples = new();
+    private double _coldTokensPerSec = DefaultTokensPerSec;
+    private double _coldOverheadMs = 0.0;
+    private bool _coldHasData;
+
+    // Warm-prefill model: subsequent turns where the KV cache was evicted but the model
+    // is already loaded (pure prefill speed, much faster than cold).
+    private readonly List<PrefillSample> _warmSamples = new();
+    private double _warmTokensPerSec = DefaultTokensPerSec;
+    private double _warmOverheadMs = 0.0;
+    private bool _warmHasData;
+
     private double _lastMeasuredSpeed = 0.0;
 
     public PrefillPerformanceModel(string path)
@@ -98,20 +108,63 @@ public sealed class PrefillPerformanceModel
     }
 
     /// <summary>
-    /// True when the model has been fitted from at least one real sample.
+    /// True when the model has been fitted from at least one real sample (cold or warm).
     /// </summary>
     public bool HasData
     {
-        get { lock (_lock) { return _hasData; } }
+        get { lock (_lock) { return _coldHasData || _warmHasData; } }
     }
 
     /// <summary>
-    /// The current fitted prefill speed (tokens/sec), or the conservative default when no
-    /// data exists yet. This is the speed the estimate is based on, suitable for display.
+    /// The fitted prefill speed (tokens/sec) for COLD prefills (first turn after launch).
+    /// </summary>
+    public double ColdSpeedTokensPerSec
+    {
+        get { lock (_lock) { return _coldHasData ? _coldTokensPerSec : DefaultTokensPerSec; } }
+    }
+
+    /// <summary>
+    /// The fitted prefill speed (tokens/sec) for WARM prefills. Falls back to the cold
+    /// speed when no warm data exists yet.
+    /// </summary>
+    public double WarmSpeedTokensPerSec
+    {
+        get { lock (_lock) { return _warmHasData ? _warmTokensPerSec : (_coldHasData ? _coldTokensPerSec : DefaultTokensPerSec); } }
+    }
+
+    /// <summary>
+    /// The current fitted prefill speed for display. Prefers the WARM speed: in the normal
+    /// workflow the operator resumes a chat on an already-loaded model, so the prefill is warm,
+    /// and the warm model is the one that actually accumulates data (the cold model is fit from
+    /// at most one sample — the first turn after a launch — and is then frozen, because the
+    /// operator is usually forced to switch models before a second cold prefill on the same
+    /// variant ever happens). A degenerate cold value (a cold-load turn where the model was
+    /// still loading from disk → huge firstByteMs → implied speed ≈ 0) would otherwise make the
+    /// prefill bar show "0 tok/s" for the entire prefill and never resolve, because it's a
+    /// learned constant, not a live measurement, and the cold model never re-fits. Fall back to
+    /// the cold speed, then to the default, when warm has no data.
     /// </summary>
     public double CurrentSpeedTokensPerSec
     {
-        get { lock (_lock) { return _hasData ? _tokensPerSec : DefaultTokensPerSec; } }
+        get
+        {
+            lock (_lock)
+            {
+                var warm = _warmHasData ? _warmTokensPerSec : 0.0;
+                if (warm > 0)
+                {
+                    return warm;
+                }
+
+                var cold = _coldHasData ? _coldTokensPerSec : 0.0;
+                if (cold > 0)
+                {
+                    return cold;
+                }
+
+                return DefaultTokensPerSec;
+            }
+        }
     }
 
     /// <summary>
@@ -124,10 +177,12 @@ public sealed class PrefillPerformanceModel
     }
 
     /// <summary>
-    /// Estimates the prefill duration in seconds for a given prompt token count. Returns 0
-    /// when the token count is unknown (<= 0).
+    /// Estimates the prefill duration in seconds for a given prompt token count. Uses the
+    /// COLD model when <paramref name="isCold"/> is true (first turn after launch), and the
+    /// WARM model when false (subsequent turns where the KV cache may have been evicted).
+    /// Returns 0 when the token count is unknown (<= 0).
     /// </summary>
-    public int EstimateSeconds(int promptTokens)
+    public int EstimateSeconds(int promptTokens, bool isCold)
     {
         if (promptTokens <= 0)
         {
@@ -138,8 +193,24 @@ public sealed class PrefillPerformanceModel
         double overheadMs;
         lock (_lock)
         {
-            speed = _hasData ? _tokensPerSec : DefaultTokensPerSec;
-            overheadMs = _hasData ? _overheadMs : 0.0;
+            if (isCold)
+            {
+                speed = _coldHasData ? _coldTokensPerSec : DefaultTokensPerSec;
+                overheadMs = _coldHasData ? _coldOverheadMs : 0.0;
+            }
+            else
+            {
+                if (_warmHasData)
+                {
+                    speed = _warmTokensPerSec;
+                    overheadMs = _warmOverheadMs;
+                }
+                else
+                {
+                    speed = _coldHasData ? _coldTokensPerSec : DefaultTokensPerSec;
+                    overheadMs = _coldHasData ? _coldOverheadMs : 0.0;
+                }
+            }
         }
 
         if (speed <= 0)
@@ -152,11 +223,13 @@ public sealed class PrefillPerformanceModel
     }
 
     /// <summary>
-    /// Records a measured prefill sample, refits the model, and persists it. Samples with a
-    /// prompt below <see cref="MinFitTokens"/> are ignored for fitting (first-token time
-    /// dominates there) but the most recent one still updates the "last measured" speed.
+    /// Records a measured prefill sample, refits the appropriate model (cold or warm), and
+    /// persists it. Samples with a prompt below <see cref="MinFitTokens"/> are ignored for
+    /// fitting (first-token time dominates there) but the most recent one still updates the
+    /// "last measured" speed. Delta prefills (first-byte below <see cref="MinFullPrefillMs"/>)
+    /// are not recorded for fitting.
     /// </summary>
-    public void RecordSample(int promptTokens, long firstByteMs)
+    public void RecordSample(int promptTokens, long firstByteMs, bool isCold)
     {
         if (promptTokens <= 0 || firstByteMs <= 0)
         {
@@ -168,45 +241,44 @@ public sealed class PrefillPerformanceModel
             if (promptTokens < MinFitTokens)
             {
                 // Small prompt: update the last-measured speed for display, but don't fit.
-                // The first-byte time for a small prompt is dominated by the first-token
-                // generation time, not the prefill time, so it's not representative of the
-                // model's true cold-prefill speed. But it's still useful for display.
                 _lastMeasuredSpeed = promptTokens / (firstByteMs / 1000.0);
                 return;
             }
 
-            // Only record a sample for fitting when the prefill is a FULL prefill (not a warm-cache
-            // DELTA prefill). A delta prefill completes in well under a second, so its implied speed
-            // (fullPromptTokens / deltaSeconds) is absurdly high and not representative of the
-            // model's true cold-prefill speed. A full prefill takes many seconds to minutes. Using
-            // the first-byte duration as the discriminator: a delta prefill is sub-second, while a
-            // full prefill is well above MinFullPrefillMs (5s). This is the SOLE mechanism for
-            // distinguishing full prefills from delta prefills — there is intentionally NO speed cap,
-            // because capping the speed would mask legitimate fast full prefills (e.g. on next-gen
-            // hardware) and hide real diagnostic anomalies.
+            // Only record a sample for fitting when the prefill is a FULL prefill (not a
+            // warm-cache DELTA prefill). A delta prefill completes in well under a second, so
+            // its implied speed is absurdly high and not representative of the full-prefill
+            // speed. A full prefill takes many seconds to minutes.
             if (firstByteMs < MinFullPrefillMs)
             {
-                return; // delta prefill: not representative of the cold-prefill speed
+                return; // delta prefill: not representative of the full-prefill speed
             }
 
-            // Track the most recent measured speed for display. Only update it for FULL prefills
-            // (not delta prefills), so the displayed speed is always representative of the model's
-            // true cold-prefill speed. No cap is applied: the speed is recorded at its actual value.
+            // Track the most recent measured speed for display.
             _lastMeasuredSpeed = promptTokens / (firstByteMs / 1000.0);
 
-            _samples.Add(new PrefillSample(promptTokens, firstByteMs));
-            while (_samples.Count > MaxSamples)
+            var samples = isCold ? _coldSamples : _warmSamples;
+            samples.Add(new PrefillSample(promptTokens, firstByteMs, isCold));
+            while (samples.Count > MaxSamples)
             {
-                _samples.RemoveAt(0);
+                samples.RemoveAt(0);
             }
 
-            Refit();
+            if (isCold)
+            {
+                RefitInto(_coldSamples, ref _coldTokensPerSec, ref _coldOverheadMs, ref _coldHasData);
+            }
+            else
+            {
+                RefitInto(_warmSamples, ref _warmTokensPerSec, ref _warmOverheadMs, ref _warmHasData);
+            }
+
             Save();
         }
     }
 
     /// <summary>
-    /// Fits <c>prefillMs = overheadMs + tokens / tokensPerSec</c> to the retained samples via
+    /// Fits <c>prefillMs = overheadMs + tokens / tokensPerSec</c> to the given samples via
     /// least squares. We fit in the linear form <c>ms = a + b * tokens</c> where
     /// <c>b = 1000 / tokensPerSec</c> (ms per token) and <c>a = overheadMs</c>.
     ///
@@ -216,9 +288,9 @@ public sealed class PrefillPerformanceModel
     /// floor. We reject any sample whose implied speed (tokens / firstByteMs) is more than
     /// <see cref="OutlierSpeedRatio"/> away from the median implied speed before fitting.
     /// </summary>
-    private void Refit()
+    private void RefitInto(List<PrefillSample> samples, ref double tokensPerSec, ref double overheadMs, ref bool hasData)
     {
-        var usable = _samples
+        var usable = samples
             .Where(s => s.FirstByteMs > 0 && s.PromptTokens > 0)
             .ToList();
         if (usable.Count < 2)
@@ -227,9 +299,19 @@ public sealed class PrefillPerformanceModel
             if (usable.Count == 1)
             {
                 var s = usable[0];
-                _tokensPerSec = s.PromptTokens / (s.FirstByteMs / 1000.0);
-                _overheadMs = 0.0;
-                _hasData = true;
+                // Apply the same lower bound as the multi-sample fit path. A single cold-load
+                // turn (model still loading from disk) can have a huge firstByteMs, making the
+                // implied speed near 0. Persisting that would make the prefill bar show
+                // "0 tok/s" forever (it's a learned constant, not a live measurement).
+                tokensPerSec = Math.Max(s.PromptTokens / (s.FirstByteMs / 1000.0), 50.0);
+                overheadMs = 0.0;
+                hasData = true;
+            }
+            else
+            {
+                tokensPerSec = DefaultTokensPerSec;
+                overheadMs = 0.0;
+                hasData = false;
             }
             return;
         }
@@ -256,9 +338,9 @@ public sealed class PrefillPerformanceModel
         // (a single robust point) rather than fitting a degenerate slope.
         if (usable.Count < 2)
         {
-            _tokensPerSec = medianSpeed;
-            _overheadMs = 0.0;
-            _hasData = true;
+            tokensPerSec = medianSpeed;
+            overheadMs = 0.0;
+            hasData = true;
             return;
         }
 
@@ -282,25 +364,23 @@ public sealed class PrefillPerformanceModel
         // b is ms per token; tokensPerSec = 1000 / b. Guard against non-positive b.
         if (b > 0)
         {
-            _tokensPerSec = 1000.0 / b;
+            tokensPerSec = 1000.0 / b;
         }
         else
         {
             // Degenerate fit (no positive slope); use the aggregate speed instead.
-            _tokensPerSec = usable.Sum(s => s.PromptTokens) / (usable.Sum(s => s.FirstByteMs) / 1000.0);
+            tokensPerSec = usable.Sum(s => s.PromptTokens) / (usable.Sum(s => s.FirstByteMs) / 1000.0);
         }
 
         // Clamp the overhead to a sane range: it should be small and non-negative. A large
         // negative intercept is a fitting artifact; a huge positive one is not physical.
-        _overheadMs = Math.Clamp(a, 0.0, 5000.0);
+        overheadMs = Math.Clamp(a, 0.0, 5000.0);
 
         // Guard against a degenerate fit with a lower bound only. There is intentionally NO upper
         // bound: the fitted speed is recorded at its actual value, so a legitimate fast full prefill
-        // (e.g. on next-gen hardware) is not masked. The MinFullPrefillMs duration threshold (which
-        // rejects delta prefills) is the sole mechanism for ensuring the fitted speed is
-        // representative of a full prefill, not a warm-cache delta.
-        _tokensPerSec = Math.Max(_tokensPerSec, 50.0);
-        _hasData = true;
+        // (e.g. on next-gen hardware) is not masked.
+        tokensPerSec = Math.Max(tokensPerSec, 50.0);
+        hasData = true;
     }
 
     private void Load()
@@ -316,75 +396,62 @@ public sealed class PrefillPerformanceModel
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            if (root.TryGetProperty("tokensPerSec", out var vSpeed) && vSpeed.TryGetDouble(out var speed))
-            {
-                // Load the persisted speed at its actual value. No cap is applied: the
-                // MinFullPrefillMs duration threshold (which filters out delta-prefill samples
-                // below) ensures the re-fit is based on full prefills only, so the loaded value
-                // is representative of a full prefill. A polluted value from an older build
-                // (which may have recorded a delta prefill) is corrected by the re-fit below.
-                _tokensPerSec = speed;
-            }
-            if (root.TryGetProperty("overheadMs", out var vOverhead) && vOverhead.TryGetDouble(out var overhead))
-            {
-                _overheadMs = overhead;
-            }
-            if (root.TryGetProperty("hasData", out var vHasData))
-            {
-                _hasData = vHasData.GetBoolean();
-            }
-            if (root.TryGetProperty("lastMeasuredSpeed", out var vLast) && vLast.TryGetDouble(out var last))
-            {
-                // Load the persisted last-measured speed at its actual value (no cap). The
-                // MinFullPrefillMs filter below ensures only full-prefill samples are retained,
-                // so the re-fit (if any) is based on full prefills only.
-                _lastMeasuredSpeed = last;
-            }
-            if (root.TryGetProperty("samples", out var vSamples) && vSamples.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var item in vSamples.EnumerateArray())
-                {
-                    if (item.TryGetProperty("promptTokens", out var vTokens) && item.TryGetProperty("firstByteMs", out var vMs))
-                    {
-                        var tokens = vTokens.GetInt32();
-                        var ms = vMs.GetInt64();
-                        // Drop delta-prefill samples (first-byte duration below MinFullPrefillMs)
-                        // so they cannot pollute the re-fit on load. A delta prefill's implied speed
-                        // (fullPromptTokens / deltaSeconds) is absurdly high and not representative
-                        // of the model's true cold-prefill speed.
-                        if (ms < MinFullPrefillMs)
-                        {
-                            continue;
-                        }
-                        _samples.Add(new PrefillSample(tokens, ms));
-                    }
-                }
-                while (_samples.Count > MaxSamples)
-                {
-                    _samples.RemoveAt(0);
-                }
-            }
+            LoadSamples(root, "coldSamples", _coldSamples, isCold: true);
+            LoadSamples(root, "warmSamples", _warmSamples, isCold: false);
+
+            // Backward compatibility: the old format had a single "samples" array that mixed
+            // cold and warm prefills. We can no longer distinguish them, so we do NOT load the
+            // old samples — loading them all as cold would skew the cold fit with the fast warm
+            // samples. The model re-learns cleanly within a few turns with proper cold/warm
+            // tagging. (The old fitted constants are intentionally ignored for the same reason.)
 
             // Re-fit from the loaded samples so the persisted constants are always consistent
-            // with the current outlier-rejection logic. This corrects any stale/bad fit that was
-            // saved by an older build (e.g. one skewed by a cold-load outlier).
-            if (_samples.Count > 0)
+            // with the current outlier-rejection logic.
+            if (_coldSamples.Count > 0)
             {
-                Refit();
+                RefitInto(_coldSamples, ref _coldTokensPerSec, ref _coldOverheadMs, ref _coldHasData);
             }
-            else
+            if (_warmSamples.Count > 0)
             {
-                // All loaded samples were delta prefills (filtered out), so there is no reliable
-                // full-prefill data. Reset to the default speed so the model learns from new
-                // full-prefill samples instead of using a polluted/stale value.
-                _tokensPerSec = DefaultTokensPerSec;
-                _overheadMs = 0.0;
-                _hasData = false;
+                RefitInto(_warmSamples, ref _warmTokensPerSec, ref _warmOverheadMs, ref _warmHasData);
+            }
+
+            if (root.TryGetProperty("lastMeasuredSpeed", out var vLast) && vLast.TryGetDouble(out var last))
+            {
+                _lastMeasuredSpeed = last;
             }
         }
         catch
         {
             // Best-effort: a corrupt file just means we start from the conservative default.
+        }
+    }
+
+    private static void LoadSamples(JsonElement root, string propertyName, List<PrefillSample> target, bool isCold)
+    {
+        if (!root.TryGetProperty(propertyName, out var vSamples) || vSamples.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        foreach (var item in vSamples.EnumerateArray())
+        {
+            if (item.TryGetProperty("promptTokens", out var vTokens) && item.TryGetProperty("firstByteMs", out var vMs))
+            {
+                var tokens = vTokens.GetInt32();
+                var ms = vMs.GetInt64();
+                // Drop delta-prefill samples (first-byte duration below MinFullPrefillMs)
+                // so they cannot pollute the re-fit on load.
+                if (ms < MinFullPrefillMs)
+                {
+                    continue;
+                }
+                target.Add(new PrefillSample(tokens, ms, isCold));
+            }
+        }
+        while (target.Count > MaxSamples)
+        {
+            target.RemoveAt(0);
         }
     }
 
@@ -400,11 +467,15 @@ public sealed class PrefillPerformanceModel
 
             var value = new
             {
-                tokensPerSec = _tokensPerSec,
-                overheadMs = _overheadMs,
-                hasData = _hasData,
+                coldTokensPerSec = _coldTokensPerSec,
+                coldOverheadMs = _coldOverheadMs,
+                coldHasData = _coldHasData,
+                warmTokensPerSec = _warmTokensPerSec,
+                warmOverheadMs = _warmOverheadMs,
+                warmHasData = _warmHasData,
                 lastMeasuredSpeed = _lastMeasuredSpeed,
-                samples = _samples.Select(s => new { promptTokens = s.PromptTokens, firstByteMs = s.FirstByteMs })
+                coldSamples = _coldSamples.Select(s => new { promptTokens = s.PromptTokens, firstByteMs = s.FirstByteMs }),
+                warmSamples = _warmSamples.Select(s => new { promptTokens = s.PromptTokens, firstByteMs = s.FirstByteMs })
             };
             var json = JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(_path, json);

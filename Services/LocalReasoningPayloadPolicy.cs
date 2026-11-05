@@ -1,3 +1,4 @@
+using System;
 using System.Globalization;
 using System.Text.Json.Nodes;
 
@@ -5,12 +6,18 @@ namespace FluxMux.Avalonia.Services;
 
 public static class LocalReasoningPayloadPolicy
 {
-    public static bool ApplyToPayload(JsonObject payload, string? reasoningMode)
+    public static bool ApplyToPayload(JsonObject payload, string? reasoningMode, Func<bool>? userClientReinflatesContext = null)
     {
         var mode = LocalReasoningLaunchPolicy.NormalizeMode(reasoningMode);
         var changed = false;
 
-        if (payload["messages"] is JsonArray messages && LocalReasoningLaunchPolicy.IsOff(mode))
+        // If the user's client reinflates the context (forwards the full chat each turn, e.g. Cline),
+        // skip thinking stripping from the messages. Stripping would modify the prompt and prevent
+        // KV cache reuse. However, we still apply the reasoning mode settings (enable_thinking,
+        // thinking_budget, etc.) so the model knows whether to generate thinking.
+        var skipThinkingStrip = userClientReinflatesContext?.Invoke() == true;
+
+        if (!skipThinkingStrip && payload["messages"] is JsonArray messages && LocalReasoningLaunchPolicy.IsOff(mode))
         {
             var (stripped, strippedChanged) = LocalThinkingContentFilter.StripThinkingFromMessages(messages);
             if (strippedChanged)

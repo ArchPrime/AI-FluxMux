@@ -747,7 +747,12 @@ public partial class MainWindow : Window
             if (string.IsNullOrEmpty(texts[i]))
             {
                 // The label's IsVisible is controlled by the XAML binding (StringToVisibilityConverter),
-                // so no need to set it here. Just skip positioning.
+                // so no need to set it here. Move the label far off-screen so it is never visible
+                // even if the text briefly appears before the binding updates. Previously the label
+                // kept its stale position from when it was last visible, causing "residual" numbers
+                // to appear at the left edge of the graph after bars had scrolled off.
+                Canvas.SetLeft(label, -9999);
+                Canvas.SetTop(label, -9999);
                 continue;
             }
 
@@ -757,8 +762,11 @@ public partial class MainWindow : Window
             var labelHeight = label.DesiredSize.Height;
             var left = x - labelWidth / 2.0;
             var top = y - labelHeight - 2.0;
-            if (left < 0) left = 0;
-            if (left + labelWidth > cw) left = cw - labelWidth;
+            // Do NOT clamp left to [0, cw]. In scroll mode, bars (and their value labels)
+            // scroll off the left edge. Clamping to 0 would pin the label at the left edge
+            // instead of letting it exit with the bar. The canvas's ClipToBounds handles
+            // the visual clipping. Only clamp top to prevent the label from going above
+            // the chart.
             if (top < 0) top = 0;
             Canvas.SetLeft(label, left);
             Canvas.SetTop(label, top);
@@ -848,6 +856,23 @@ public partial class MainWindow : Window
             or nameof(MainViewModel.LocalReloadRecommendVisible))
         {
             SyncInterventionPopup();
+
+            // When a recommendation dialog becomes visible, clear any GridSplitter pixel-height
+            // override on the diagnostics panel row so the MinHeight binding can expand the panel
+            // to fit the dialog without masking existing content. When the dialog is dismissed,
+            // the panel returns to its default height.
+            //
+            // The reset is deferred to the next dispatcher frame so it runs AFTER the layout
+            // pass that the GridSplitter uses to re-apply its pixel override. Without this
+            // deferral, the GridSplitter would immediately re-apply its pixel height on the
+            // next layout pass, undoing the reset and preventing the MinHeight binding from
+            // expanding the panel.
+            if (sender is MainViewModel mainVm && (mainVm.CloudRecommendVisible || mainVm.LocalReloadRecommendVisible))
+            {
+                global::Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(
+                    () => ResetDiagnosticsPanelHeight(),
+                    global::Avalonia.Threading.DispatcherPriority.Loaded);
+            }
         }
 
         if (e.PropertyName == nameof(MainViewModel.SelectedMainTabIndex) && IsHelpTabSelected())

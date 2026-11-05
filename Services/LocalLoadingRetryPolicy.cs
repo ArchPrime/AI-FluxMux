@@ -19,10 +19,17 @@ public static class LocalLoadingRetryPolicy
     /// default 6×2s=12s window. Without a longer window the gateway gives up, converts
     /// the "still loading" 503 into a non-transient error, and the launch loop fails
     /// even though llama-server would have been ready a moment later.
+    ///
+    /// The max total wait (300 × 2s = 600s) is aligned with the long-load first-byte
+    /// deadline (ThinkingFirstByteSeconds, default 600s) so the 503-retry loop does not
+    /// give up while the first-byte deadline is still running. If the model takes >300s
+    /// to load, the 503-retry loop would previously stop retrying, the gateway would stop
+    /// sending requests to llama-server, and the turn would hit the 600s first-byte
+    /// deadline and be aborted — even though the model would have been ready shortly after.
     /// </summary>
-    public const int LongLoadRetryCount = 150;
+    public const int LongLoadRetryCount = 300;
     public const int LongLoadDelaySeconds = 2;
-    public const int LongLoadMaxTotalWaitSeconds = 300;
+    public const int LongLoadMaxTotalWaitSeconds = 600;
 
     /// <summary>
     /// True when the active local profile is one that loads slowly from cold: an

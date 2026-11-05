@@ -69,7 +69,8 @@ public static class OpenAiStreamTelemetryProxy
         bool allowParallelToolCalls = true,
         LocalSessionArtifacts? artifacts = null,
         int maxTokens = 0,
-        Action? onFirstContentToken = null)
+        Action? onFirstContentToken = null,
+        Action? onFirstReasoningToken = null)
     {
         var sanitizeResponses = !string.IsNullOrWhiteSpace(localReasoningMode);
         LocalToolCallHealSession? healSession = declaredTools is { Count: > 0 } || artifacts is not null
@@ -78,7 +79,8 @@ public static class OpenAiStreamTelemetryProxy
         var parseLines = sanitizeResponses
             || healSession is not null
             || (tracker is not null && tracker.IsEnabled)
-            || onFirstContentToken is not null;
+            || onFirstContentToken is not null
+            || onFirstReasoningToken is not null;
         if (!parseLines)
         {
             await CopyFlushingAsync(upstream, downstream, cancellationToken, onUpstreamBytes).ConfigureAwait(false);
@@ -89,6 +91,7 @@ public static class OpenAiStreamTelemetryProxy
         var writer = new StreamWriter(downstream, Encoding.UTF8, leaveOpen: true) { AutoFlush = true, NewLine = "\n" };
         var responseSanitized = false;
         var firstContentTokenFired = false;
+        var firstReasoningTokenFired = false;
         LocalThinkingStreamSession? streamSession = sanitizeResponses
             ? new LocalThinkingStreamSession(localReasoningMode, maxTokens)
             : null;
@@ -124,12 +127,25 @@ public static class OpenAiStreamTelemetryProxy
 
             onUpstreamBytes?.Invoke(Math.Max(1, Encoding.UTF8.GetByteCount(line) + 1));
 
-            // Fix 4 — detect the first *content* token (not the first byte). The first byte of an
-            // SSE stream arrives immediately (headers / first data line) and does NOT mark the end
-            // of prefill. The first line that actually carries content / reasoning / tool_calls is
-            // when prefill is truly complete. Fire the callback once so the gateway can measure the
-            // real prefill duration for the self-refining performance model.
-            if (onFirstContentToken is not null && !firstContentTokenFired && HasContentToken(line))
+            // Detect the first *reasoning* token (thinking) and the first *visible content*
+            // token separately. The first byte of an SSE stream arrives immediately (headers /
+            // empty data line) and does NOT mark the end of prefill. For a thinking model the
+            // first token is a reasoning token (the model is "thinking"), and the first visible
+            // content token (content / text / tool_calls) is when the model has finished
+            // thinking and started generating the actual reply.
+            //
+            // - onFirstReasoningToken fires on the first reasoning token → UI shows "Thinking…".
+            // - onFirstContentToken fires on the first VISIBLE content token → UI shows
+            //   "Generating…" AND signals the hang clock that the prefill/thinking window is
+            //   over (GotContentToken). It does NOT fire on reasoning tokens, so a long thinking
+            //   phase does not prematurely switch the UI to "Generating…" or the hang clock to
+            //   the post-first-byte stall window.
+            if (!firstReasoningTokenFired && HasReasoningToken(line))
+            {
+                firstReasoningTokenFired = true;
+                onFirstReasoningToken?.Invoke();
+            }
+            if (onFirstContentToken is not null && !firstContentTokenFired && HasVisibleContentToken(line))
             {
                 firstContentTokenFired = true;
                 onFirstContentToken();
@@ -266,6 +282,171 @@ public static class OpenAiStreamTelemetryProxy
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// True when an SSE <c>data:</c> line carries a REASONING (thinking) token — i.e. the model
+    /// is thinking, not yet producing visible content. This is the signal for the UI to switch
+    /// from "Prefilling…" to "Thinking…". Detects <c>reasoning_content</c> / <c>reasoning</c>
+    /// fields on the delta, or raw thinking tags in <c>content</c>.
+    /// </summary>
+    private static bool HasReasoningToken(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var payload = line.Substring(5).Trim();
+        if (payload.Length == 0 || payload.Equals("[DONE]", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            var root = JsonNode.Parse(payload) as JsonObject;
+            if (root is null)
+            {
+                return false;
+            }
+
+            if (root["choices"] is not JsonArray choices || choices.Count == 0)
+            {
+                return false;
+            }
+
+            if (choices[0] is not JsonObject firstChoice)
+            {
+                return false;
+            }
+
+            // reasoning_content / reasoning fields on the delta (llama-server with --reasoning auto).
+            if (firstChoice["delta"] is JsonObject delta)
+            {
+                if (HasNonEmptyString(delta["reasoning_content"]) || HasNonEmptyString(delta["reasoning"]))
+                {
+                    return true;
+                }
+            }
+
+            // Raw thinking tags in content (llama-server with --reasoning-format none).
+            if (firstChoice["delta"] is JsonObject delta2 && HasNonEmptyString(delta2["content"]))
+            {
+                var content = delta2["content"]!.ToString() ?? string.Empty;
+                if (content.Contains("\x3cthink\x3e", StringComparison.Ordinal)
+                    || content.Contains("\x3c/think\x3e", StringComparison.Ordinal)
+                    || content.Contains("<thinking>", StringComparison.Ordinal)
+                    || content.Contains("\x3creacted_reasoning\x3e", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// True when an SSE <c>data:</c> line carries VISIBLE content — i.e. the model has produced a
+    /// real content / text / tool_calls token that is NOT reasoning. This is the signal for the UI
+    /// to switch from "Thinking…" (or "Prefilling…") to "Generating…", and for the hang clock to
+    /// mark the prefill/thinking window as over. Reasoning tokens do NOT count as visible content.
+    /// </summary>
+    private static bool HasVisibleContentToken(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var payload = line.Substring(5).Trim();
+        if (payload.Length == 0 || payload.Equals("[DONE]", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            var root = JsonNode.Parse(payload) as JsonObject;
+            if (root is null)
+            {
+                return false;
+            }
+
+            if (root["choices"] is not JsonArray choices || choices.Count == 0)
+            {
+                return false;
+            }
+
+            if (choices[0] is not JsonObject firstChoice)
+            {
+                return false;
+            }
+
+            if (firstChoice["delta"] is not JsonObject delta)
+            {
+                // Non-delta shapes (e.g. a full message) — fall back to the generic count.
+                return GenerationSpeedTracker.CountDeltaTokens(root) > 0;
+            }
+
+            // tool_calls are visible content (a tool call is the model's action).
+            if (delta["tool_calls"] is JsonArray { Count: > 0 } toolCalls)
+            {
+                foreach (var callNode in toolCalls)
+                {
+                    if (callNode is JsonObject call
+                        && call["function"] is JsonObject function
+                        && (HasNonEmptyString(function["name"]) || HasNonEmptyString(function["arguments"])))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            // content / text that is NOT a raw thinking tag.
+            if (HasNonEmptyString(delta["content"]))
+            {
+                var content = delta["content"]!.ToString() ?? string.Empty;
+                if (!IsThinkingOnly(content))
+                {
+                    return true;
+                }
+            }
+
+            if (HasNonEmptyString(delta["text"]))
+            {
+                var text = delta["text"]!.ToString() ?? string.Empty;
+                if (!IsThinkingOnly(text))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool HasNonEmptyString(JsonNode? node)
+        => node is JsonValue value && value.TryGetValue<string>(out var s) && !string.IsNullOrWhiteSpace(s);
+
+    /// <summary>
+    /// True when the text is ONLY thinking markup (raw thinking tags / their fragments) with no
+    /// visible content after stripping. Used to avoid counting a thinking delta as visible
+    /// content.
+    /// </summary>
+    private static bool IsThinkingOnly(string text)
+    {
+        var stripped = LocalThinkingContentFilter.StripThinkingFromText(text);
+        return string.IsNullOrWhiteSpace(stripped);
     }
 
     private static async Task WriteThinkCutoffAsync(
