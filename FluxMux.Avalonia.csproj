@@ -5,7 +5,7 @@
     <Nullable>enable</Nullable>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Logos\AI-FluxMux.ico</ApplicationIcon>
-    <Version>0.3.3</Version>
+    <Version>0.3.4</Version>
     <InformationalVersion>0.3.3 beta</InformationalVersion>
     <Product>AI-FluxMux</Product>
     <AssemblyTitle>AI-FluxMux</AssemblyTitle>
