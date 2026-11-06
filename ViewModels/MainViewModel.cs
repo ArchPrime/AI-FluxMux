@@ -511,32 +511,18 @@ public partial class MainViewModel : ViewModelBase
                     // overflow is running in ordinary RAM. The prefill time is dominated by the
                     // TOTAL prompt size, not just the overflow.
                     //
-                    // IMPORTANT: Do NOT assume RAM is 10x slower than VRAM. On the user's hardware,
-                    // the RAM-spill prefill speed is roughly the same as the VRAM prefill speed
-                    // (the learned speed already reflects the real hardware behavior, including
-                    // the RAM-spill effect). Assuming RAM is 10x slower would make the estimate
-                    // ~6x too pessimistic (e.g., 1500s instead of the actual ~243s).
+                    // Use the dedicated RAM-spill model (which learns from actual RAM-spill
+                    // events on this hardware) for the estimate. This is more accurate than
+                    // the VRAM model, which is fitted to faster VRAM-resident prefills.
                     //
-                    // Use the learned estimate (which is based on real full-prefill samples from
-                    // the user's hardware) for the TOTAL prompt size. This is the same as the VRAM
-                    // case, but without the conservative multiplier (because the learned speed
-                    // already reflects the real hardware, including any RAM-spill slowdown).
-                    //
-                    // The learned estimate is fitted to the prompt size, so it's more accurate
-                    // than the most recent sample's speed (which is a single data point and may
-                    // not be representative of the current prompt size).
-                    //
-                    // The learned model is fitted on FULL prefills (cold starts), so it's the
-                    // right model to use for cold-start estimates. Only fall back to the hardcoded
-                    // 60s when no data exists yet.
-                    int baseEstimate = prefillModel.EstimateSeconds(promptTokens, isColdStart);
+                    // Floor at 60s (RAM-spill prefill is never instant), cap at 1800s (30 min)
+                    // to avoid absurd estimates for very large prompts.
+                    int baseEstimate = prefillModel.RamSpillEstimateSeconds(promptTokens);
                     if (baseEstimate <= 0)
                     {
                         baseEstimate = 60; // Fallback when no data exists yet
                     }
                     _prefillEstimatedSeconds = baseEstimate;
-                    // Floor at 60s (RAM-spill prefill is never instant), cap at 1800s (30 min)
-                    // to avoid absurd estimates for very large prompts.
                     _prefillEstimatedSeconds = Math.Clamp(_prefillEstimatedSeconds, 60, 1800);
                 }
                 else
@@ -638,13 +624,19 @@ public partial class MainViewModel : ViewModelBase
             SafeUiInvoke(() =>
             {
                 // Record the real sample so the performance model refits and persists.
-                // Skip RAM-spill samples: they are a different regime (prompt exceeds the
-                // VRAM-resident context, overflow runs in ordinary RAM) and would drag the
-                // warm VRAM speed estimate down. The warm model should only learn from
-                // true VRAM-resident prefills.
-                if (_prefillPromptTokens > 0 && !_prefillIsRamSpill)
+                // RAM-spill samples go into the dedicated RAM-spill model (a different regime
+                // than VRAM-resident prefills). VRAM-resident samples go into the cold/warm
+                // model.
+                if (_prefillPromptTokens > 0)
                 {
-                    GetOrCreatePrefillModel().RecordSample(_prefillPromptTokens, elapsedMs, _prefillIsCold);
+                    if (_prefillIsRamSpill)
+                    {
+                        GetOrCreatePrefillModel().RecordRamSpillSample(_prefillPromptTokens, elapsedMs);
+                    }
+                    else
+                    {
+                        GetOrCreatePrefillModel().RecordSample(_prefillPromptTokens, elapsedMs, _prefillIsCold);
+                    }
                 }
 
                 // Complete the prefill bar, then reset it to 0 so the generation phase can

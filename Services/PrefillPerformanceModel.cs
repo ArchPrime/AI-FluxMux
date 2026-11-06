@@ -99,6 +99,15 @@ public sealed class PrefillPerformanceModel
     private double _warmOverheadMs = 0.0;
     private bool _warmHasData;
 
+    // RAM-spill model: prefills where the prompt exceeds the VRAM-resident context and the
+    // overflow runs in ordinary RAM. This is a different regime than VRAM-resident prefills
+    // (slower, dominated by RAM bandwidth), so it gets its own fitted speed. The user needs
+    // an accurate estimate of how long the RAM load will take.
+    private readonly List<PrefillSample> _ramSpillSamples = new();
+    private double _ramSpillTokensPerSec = DefaultTokensPerSec;
+    private double _ramSpillOverheadMs = 0.0;
+    private bool _ramSpillHasData;
+
     private double _lastMeasuredSpeed = 0.0;
 
     public PrefillPerformanceModel(string path)
@@ -278,7 +287,69 @@ public sealed class PrefillPerformanceModel
     }
 
     /// <summary>
-    /// Fits <c>prefillMs = overheadMs + tokens / tokensPerSec</c> to the given samples via
+    /// Records a measured RAM-spill prefill sample (prompt exceeds the VRAM-resident context,
+    /// overflow runs in ordinary RAM). This is a different regime than VRAM-resident prefills,
+    /// so it gets its own fitted speed. The user needs an accurate estimate of how long the
+    /// RAM load will take.
+    /// </summary>
+    public void RecordRamSpillSample(int promptTokens, long firstByteMs)
+    {
+        if (promptTokens <= 0 || firstByteMs <= 0)
+        {
+            return;
+        }
+
+        lock (_lock)
+        {
+            if (promptTokens < MinFitTokens)
+            {
+                _lastMeasuredSpeed = promptTokens / (firstByteMs / 1000.0);
+                return;
+            }
+
+            if (firstByteMs < MinFullPrefillMs)
+            {
+                return; // delta prefill: not representative
+            }
+
+            _lastMeasuredSpeed = promptTokens / (firstByteMs / 1000.0);
+
+            _ramSpillSamples.Add(new PrefillSample(promptTokens, firstByteMs, IsCold: false));
+            while (_ramSpillSamples.Count > MaxSamples)
+            {
+                _ramSpillSamples.RemoveAt(0);
+            }
+
+            RefitInto(_ramSpillSamples, ref _ramSpillTokensPerSec, ref _ramSpillOverheadMs, ref _ramSpillHasData);
+            Save();
+        }
+    }
+
+    /// <summary>
+    /// Estimates the prefill time (seconds) for a RAM-spill prefill (prompt exceeds the
+    /// VRAM-resident context). Uses the dedicated RAM-spill model if it has data, otherwise
+    /// falls back to the cold/warm VRAM model (which is better than nothing).
+    /// </summary>
+    public int RamSpillEstimateSeconds(int promptTokens)
+    {
+        if (promptTokens <= 0)
+        {
+            return 0;
+        }
+
+        lock (_lock)
+        {
+            if (_ramSpillHasData)
+            {
+                double seconds = _ramSpillOverheadMs / 1000.0 + promptTokens / _ramSpillTokensPerSec;
+                return (int)Math.Ceiling(seconds);
+            }
+
+            // No RAM-spill data yet: fall back to the cold/warm VRAM estimate. This is
+            // pessimistic (VRAM is faster than RAM) but better than a hardcoded guess.
+            return EstimateSeconds(promptTokens, isCold: true);
+        }
+    }
     /// least squares. We fit in the linear form <c>ms = a + b * tokens</c> where
     /// <c>b = 1000 / tokensPerSec</c> (ms per token) and <c>a = overheadMs</c>.
     ///
@@ -407,6 +478,7 @@ public sealed class PrefillPerformanceModel
 
             LoadSamples(root, "coldSamples", _coldSamples, isCold: true);
             LoadSamples(root, "warmSamples", _warmSamples, isCold: false);
+            LoadSamples(root, "ramSpillSamples", _ramSpillSamples, isCold: false);
 
             // Backward compatibility: the old format had a single "samples" array that mixed
             // cold and warm prefills. We can no longer distinguish them, so we do NOT load the
@@ -423,6 +495,10 @@ public sealed class PrefillPerformanceModel
             if (_warmSamples.Count > 0)
             {
                 RefitInto(_warmSamples, ref _warmTokensPerSec, ref _warmOverheadMs, ref _warmHasData);
+            }
+            if (_ramSpillSamples.Count > 0)
+            {
+                RefitInto(_ramSpillSamples, ref _ramSpillTokensPerSec, ref _ramSpillOverheadMs, ref _ramSpillHasData);
             }
 
             if (root.TryGetProperty("lastMeasuredSpeed", out var vLast) && vLast.TryGetDouble(out var last))
@@ -482,9 +558,13 @@ public sealed class PrefillPerformanceModel
                 warmTokensPerSec = _warmTokensPerSec,
                 warmOverheadMs = _warmOverheadMs,
                 warmHasData = _warmHasData,
+                ramSpillTokensPerSec = _ramSpillTokensPerSec,
+                ramSpillOverheadMs = _ramSpillOverheadMs,
+                ramSpillHasData = _ramSpillHasData,
                 lastMeasuredSpeed = _lastMeasuredSpeed,
                 coldSamples = _coldSamples.Select(s => new { promptTokens = s.PromptTokens, firstByteMs = s.FirstByteMs }),
-                warmSamples = _warmSamples.Select(s => new { promptTokens = s.PromptTokens, firstByteMs = s.FirstByteMs })
+                warmSamples = _warmSamples.Select(s => new { promptTokens = s.PromptTokens, firstByteMs = s.FirstByteMs }),
+                ramSpillSamples = _ramSpillSamples.Select(s => new { promptTokens = s.PromptTokens, firstByteMs = s.FirstByteMs })
             };
             var json = JsonSerializer.Serialize(value, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(_path, json);
