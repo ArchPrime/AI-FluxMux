@@ -2,6 +2,82 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
+## ✅ DONE: Dialog content off-centre + unnecessarily tall (11/7)
+
+**Symptom (user report):** The environment-tab update buttons ("Check for updates" / "Update now" for AI-FluxMux, llama-server, Harness) invoke confirmation dialogs (`ThemedDialog.Confirm` → `ConfirmDialogWindow`) whose content is not horizontally centred and whose windows are unnecessarily tall relative to the content.
+
+**Root cause:** Both `ConfirmDialogWindow.axaml` and `LocalLaunchRecoveryDialog.axaml` had:
+1. **Off-centre content:** The `StackPanel` and its children (heading, message, button `WrapPanel`) had no `HorizontalAlignment="Center"` — they left-aligned by default. The heading/message `TextBlock`s also had no `TextAlignment="Center"`.
+2. **Unnecessarily tall:** The `WrapPanel` buttons each had `Margin="0,0,8,8"` (8px bottom margin per button, cumulative), and the `StackPanel Spacing="12"` added 12px between each element. The `Border Padding="14"` was uniform. Combined, this made the dialog taller than the content needed.
+
+**Fix:**
+- `Views/ConfirmDialogWindow.axaml` — added `HorizontalAlignment="Center"` to the outer `StackPanel` and the button row; added `TextAlignment="Center"` + `HorizontalAlignment="Center"` to the heading and message `TextBlock`s; replaced the button `WrapPanel` with a horizontal `StackPanel` (no per-button bottom margin, `Spacing="8"`); reduced `StackPanel Spacing` 12→10; changed `Border Padding` 14→"16,14" (more horizontal, less vertical).
+- `Views/LocalLaunchRecoveryDialog.axaml` — same changes (the button `WrapPanel` keeps `HorizontalAlignment="Center"` since it has up to 5 buttons that may wrap; per-button bottom margin removed, `Spacing` reduced, padding/alignment same as above).
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Click "Update now" on the Environment tab (or trigger the launch-recovery dialog). The dialog content (heading, message, buttons) should be horizontally centred, and the window height should be tighter (no extra bottom margin below the buttons).
+
+## 🟡 OPEN: Spontaneous model unloads + YaRN reload-to-continue-chat failures — memory guard too aggressive (11/6)
+
+**Symptom (user report):** (1) Loaded models sometimes **spontaneously unload**, leaving no running model — recent phenomenon. (2) Loading a new **YaRN model to continue an existing chat** (after the VRAM model ran out of context) often fails to launch.
+
+**Root cause (confirmed via code + RAM state):** The **memory guard** (`ConsiderMemoryGuardStopAsync`, `FluxMuxRuntimeService.cs` line 981) stops llama-server when **free RAM drops below 4 GiB** (`MemoryGuardMinAvailableRamGiB = 4.0`, line 376), **even when idle timeout is off**, and it's checked **every 30 s** (`IdleTimeoutLoopAsync`, line 905). On the user's 63.4 GiB machine, free RAM is currently **8.7 GiB** — only 4.7 GiB above the floor. A YaRN (RAM-spill) model with an unbounded RAM KV cache (`--cache-ram -1`) can dip free RAM below 4 GiB during a large prefill or while idle with a big cached context → **spontaneous kill** (`processToStop.Kill(entireProcessTree: true)`, line 3395). This is the "recent phenomenon" — it correlates with the YaRN RAM-spill work that started using large RAM caches.
+
+**Why symptom 2 (reload-to-continue) fails:** When the VRAM model runs out of context, the user loads the YaRN model to continue. `RestartLocalAsync` → `StopLocalAsync` (kills VRAM model) → `LaunchLocalAsync` (loads YaRN). The YaRN cold start is slow (the 30 s probe issue above), AND the memory guard may fire *during* the YaRN load (RAM dips below 4 GiB while the 17.8 GiB model + RAM KV cache are allocated), killing the new model mid-load → "cannot launch."
+
+**Fix direction (NOT yet implemented):** Raise the memory-guard floor for RAM-spill (YaRN) profiles, or make it proportional to total RAM (e.g. max(4 GiB, 10% of total RAM) = ~6.3 GiB on 64 GB), or disable the guard when the profile explicitly uses a large RAM cache (the user opted into RAM use). The guard's purpose is to prevent OOM-crash; a 4 GiB floor on a 64 GB machine is too tight for a workload that intentionally spills into RAM. Options:
+- **A. Proportional floor:** `MemoryGuardMinAvailableRamGiB = max(4.0, totalRamGiB * 0.10)`.
+- **B. Profile-aware:** skip the guard when the active profile has `ExtendContextIntoRam` (YaRN) on, since the user explicitly opted into RAM use.
+- **C. Higher fixed floor:** raise 4.0 → 8.0 GiB (simple, but may still be tight on smaller machines).
+
+**Related fix (IMPLEMENTED 11/6 — "parked task" notice surfaced ON SCREEN, not just in logs):** When the model is parked (idle timeout / memory guard / hang abort), the user previously got only a transient `StatusMessage` that was overwritten by the next status and lost on app restart — so a user coming back the next morning to find their evening task "dumped" had no record. A log file alone is not enough (the user won't randomly check logs), so the notice is now surfaced **on screen**:
+- **Durable breadcrumb:** `Services/FluxMuxRuntimeService.cs` — `LogParkedTask(reason, model, variant)` appends to `c:\AI_Workbench\Logs\parked_tasks.log` (survives restarts). Called from all three park sites (idle timeout ~line 961, memory guard ~line 1031, hang abort ~line 1089).
+- **On-screen banner (in-session):** `ViewModels/MainViewModel.cs` — `ApplyLocalParkedAfterIdle` now shows a dismissible **Parked-Task banner** (amber, in the Diagnostics area, `MainWindow.axaml` ~line 3236) explaining WHY the model could not remain loaded, that the task is NOT lost, and how to continue. Also appends a "PARKED" entry to the diagnostic terminal.
+- **On-screen banner (on startup):** `AutoLoadSelectedProfileOnStartupAsync` (MainViewModel ~line 8995) checks `GetLastUnacknowledgedParkedTask()` and re-surfaces the banner if there's an unacknowledged breadcrumb from a previous session — so the user who set a task the evening before and returns the next morning sees the notice immediately. Dismissal is recorded in `parked_tasks_ack.json` (`MarkParkedTaskBannerDismissed`) so the same breadcrumb does not re-appear on the next startup.
+- **Banner properties:** `ParkedTaskBannerVisible` / `ParkedTaskBannerText` / `ParkedTaskBannerTooltip` + `DismissParkedTaskBannerCommand` (MainViewModel ~line 4097).
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Let a model park (idle timeout, memory guard, or hang abort). Confirm (a) the amber **Parked-Task banner** appears on screen with the reason + "task is NOT lost" + Dismiss button, (b) the diagnostic terminal shows a "PARKED" entry, and (c) `c:\AI_Workbench\Logs\parked_tasks.log` gains a line. Click Dismiss → banner hides. Restart the app → banner does NOT re-appear (ack recorded). To test the startup re-surface: park a model, dismiss, then add a NEW parked line to `parked_tasks.log` (newer than the ack) and restart → banner re-appears.
+
+**Deploy:** NOT done. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** With a YaRN profile loaded, watch free RAM. Confirm the model no longer spontaneously unloads when free RAM dips below the old 4 GiB floor but stays above the new floor. Confirm reload-to-continue-chat (VRAM → YaRN) completes without the memory guard killing the new model mid-load.
+
+## 🟡 OPEN: Launch "sometimes cannot launch" — public-endpoint probe 30 s timeout too short for YaRN cold start (11/6)
+
+**Symptom (user report + terminal log):** FluxMux intermittently fails to launch. Terminal shows `daemon port 5002 is up; setting local_phase=warming` + `IsModelActuallyReadyAsync(5002) = False` for ~59 s, then `Probe request timed out after 30.0 s waiting for chat completion.`, then `launch: daemon port ready, checking public endpoint` repeated for 470+ s until it gives up.
+
+**Root cause (confirmed via `launch_monitor.log` + `llama_server_output.log`):** The public-endpoint readiness probe is a *real non-streaming chat completion* (`SendChatProbeAsync`, `FluxMuxRuntimeService.cs` ~4822) with a **hard 30 s timeout** (`PublicEndpointReadyProbeTimeoutMs = 30000`, line 244). On the YaRN GPU+CPU (RAM-spill) profile, the *first* completion after a cold start pays large fixed overhead (weight load + KV-cache init + MTP draft build). llama-server log: a 3,422-token prompt took 17.7 s to prefill; a 62,774-token prompt took 169.8 s. So the 30 s probe timeout is too short for the cold-start first completion → probe times out → `IsTransientWarmupProbeFailure` treats "timed out" as transient → launch loop re-probes every ~30 s until the launch deadline (~10–13 min). If the cold-start first completion is slower than the deadline, launch is reported failed even though llama-server is healthy. Intermittent because cold-start time varies with GPU/RAM/disk-cache state (worst right after a Windows restart).
+
+**Fix (IMPLEMENTED 11/6 — surfaces the failure instead of an open-ended "still proceeding" wait):** The codebase already had the right recovery UX — the launch-failure dialog ("Launch did not finish in time" with Wait longer / Retry / Smaller model / Stop, `MainViewModel.HandleLocalLaunchFailureAsync` line ~9262) — but it was only triggered on `!result.IsSuccess`. The deadline-exceeded-but-still-running result was `IsSuccess=true` + "Local route warming up", so it bypassed the dialog and entered `WaitUntilLocalPublicEndpointReadyAsync` (indefinite poll, progress bar animating, route indicator Amber) — the "still proceeding" impression.
+
+**Changes:**
+- `Services/FluxMuxRuntimeService.cs` — `LaunchLocalAsync` gained an `interactiveLaunch` param (default `false`). The deadline-exceeded-but-still-running result now returns `IsSuccess = !interactiveLaunch` (status stays "Local route warming up" so `IsLocalRouteWarming` still routes it to the warming dialog). Auto-load / idle-wake / benchmark launches keep the old success+warming behavior (no user watching, no dialog).
+- `ViewModels/MainViewModel.cs` — the user-initiated launch call site passes `interactiveLaunch: true`, so a failed interactive launch now: sets route indicator to **Fault**, fires the "Launch did not finish in time" recovery dialog (Wait longer / Retry / Smaller model / Stop), and stops the open-ended poll.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger a launch that exceeds its window (e.g. YaRN profile right after a Windows restart, or temporarily shrink the launch budget). Instead of the progress bar animating indefinitely with "still loading", the route indicator should turn **Fault** and the "Launch did not finish in time" dialog should appear with Wait longer / Retry / Smaller model / Stop.
+
+**Note:** This fixes the *symptom* (failure now surfaces). The *root cause* (30 s public-endpoint probe timeout too short for YaRN cold start, which makes the launch window more likely to be exceeded) is still open — see the fix-direction options above.
+
+## ✅ DONE: Prefill estimate too high — performance model learned low warm speed (11/6)
+
+**Symptom (user report):** The prefill progress bar sat at a low value for a long time ("indefinite prefill"), making it look like the prefill was stuck or rewinding. The actual prefill finished in ~3-6s, but the estimate was 48-52s.
+
+**Root cause:** The prefill performance model's outlier rejection used the **median** speed as the reference. With a mix of fast warm samples (9,000-15,000 tok/s) and slow samples (1,780-2,640 tok/s from cold-loads/stalls), the median was 2,640 tok/s. The outlier rejection then dropped the fast samples (as "outliers" >3× the median) and kept the slow ones, causing the fitted warm speed to converge on ~1,686 tok/s. The prefill estimate (promptTokens / warmSpeed) was therefore 20-30× too high.
+
+**Fix:** Changed the outlier rejection to anchor on the **75th percentile** speed instead of the median. Prefill speed is bounded above by hardware but unbounded below by stalls, so the fast samples are the true warm speed. The 75th percentile anchors on the fast side, and the rejection drops samples more than 3× below it (removing cold-loads/stalls while keeping the fast warm samples).
+
+**Files changed:**
+- `Services/PrefillPerformanceModel.cs` — `RefitInto`: replaced median-based outlier rejection with 75th-percentile-based rejection. The fallback case (fewer than 2 samples after rejection) now uses the 75th-percentile speed instead of the median.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** After a few turns, the prefill estimate should match the actual prefill time (within ~2×). The bar should move at the right pace, not creep slowly toward a high estimate.
+
 ## ℹ️ NOTE: Terminal vs. graph turn numbers differ by one during in-flight turns (11/6) — left as-is
 
 **Observation (user report):** The terminal telemetry's most recent turn number sometimes doesn't match the graph's most recent turn number.

@@ -316,29 +316,38 @@ public sealed class PrefillPerformanceModel
             return;
         }
 
-        // Reject outliers: compute the median implied speed (tokens/sec) and drop any sample
-        // whose implied speed is more than OutlierSpeedRatio away from the median. This removes
-        // cold-load turns and one-off stalls without discarding normal variance.
+        // Reject outliers: compute the 75th-percentile implied speed (tokens/sec) and drop any
+        // sample whose implied speed is more than OutlierSpeedRatio below that percentile.
+        // Prefill speed is bounded above by hardware but unbounded below by stalls/cold-loads,
+        // so we anchor on the upper side of the distribution: the fast samples are the true
+        // warm speed, and the slow ones are cold-loads, RAM-spill events, or one-off stalls.
+        // Using the median (as before) dragged the estimate down because a few slow samples
+        // pulled the median into the slow range, causing the fast samples to be rejected as
+        // "outliers" and the estimate to converge on the slow speed.
         var speeds = usable
             .Select(s => s.PromptTokens / (s.FirstByteMs / 1000.0))
             .OrderBy(v => v)
             .ToList();
-        var medianSpeed = speeds.Count % 2 == 1
-            ? speeds[speeds.Count / 2]
-            : (speeds[speeds.Count / 2 - 1] + speeds[speeds.Count / 2]) / 2.0;
+        // 75th percentile: the speed at which 75% of samples are slower. This anchors on the
+        // fast side without being as aggressive as the max (which could be a one-off spike).
+        int p75Index = (int)Math.Ceiling(speeds.Count * 0.75) - 1;
+        p75Index = Math.Clamp(p75Index, 0, speeds.Count - 1);
+        var referenceSpeed = speeds[p75Index];
         usable = usable
             .Where(s =>
             {
                 var speed = s.PromptTokens / (s.FirstByteMs / 1000.0);
-                return medianSpeed > 0 && speed >= medianSpeed / OutlierSpeedRatio && speed <= medianSpeed * OutlierSpeedRatio;
+                // Keep samples within OutlierSpeedRatio of the 75th percentile. This removes
+                // very slow samples (cold-loads, stalls) while keeping the fast warm samples.
+                return referenceSpeed > 0 && speed >= referenceSpeed / OutlierSpeedRatio;
             })
             .ToList();
 
-        // If outlier rejection left fewer than 2 samples, fall back to the median speed directly
-        // (a single robust point) rather than fitting a degenerate slope.
+        // If outlier rejection left fewer than 2 samples, fall back to the 75th-percentile speed
+        // directly (a single robust point) rather than fitting a degenerate slope.
         if (usable.Count < 2)
         {
-            tokensPerSec = medianSpeed;
+            tokensPerSec = referenceSpeed;
             overheadMs = 0.0;
             hasData = true;
             return;
