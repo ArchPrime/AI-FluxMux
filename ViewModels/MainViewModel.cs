@@ -375,6 +375,7 @@ public partial class MainViewModel : ViewModelBase
     private double _prefillMaxProgress;
     private int _prefillPromptTokens;
     private bool _prefillIsCold;
+    private bool _prefillIsRamSpill;
     private DispatcherTimer? _generationTimer;
     private DateTime _generationStartUtc;
 
@@ -501,6 +502,7 @@ public partial class MainViewModel : ViewModelBase
                 _prefillStartUtc = DateTime.UtcNow;
                 var isColdStart = _runtimeService.IsLocalModelCold;
                 _prefillIsCold = isColdStart;
+                _prefillIsRamSpill = isRamSpill;
                 var prefillModel = GetOrCreatePrefillModel();
 
                 if (isRamSpill)
@@ -636,7 +638,11 @@ public partial class MainViewModel : ViewModelBase
             SafeUiInvoke(() =>
             {
                 // Record the real sample so the performance model refits and persists.
-                if (_prefillPromptTokens > 0)
+                // Skip RAM-spill samples: they are a different regime (prompt exceeds the
+                // VRAM-resident context, overflow runs in ordinary RAM) and would drag the
+                // warm VRAM speed estimate down. The warm model should only learn from
+                // true VRAM-resident prefills.
+                if (_prefillPromptTokens > 0 && !_prefillIsRamSpill)
                 {
                     GetOrCreatePrefillModel().RecordSample(_prefillPromptTokens, elapsedMs, _prefillIsCold);
                 }
@@ -4092,6 +4098,53 @@ public partial class MainViewModel : ViewModelBase
     {
         OnPropertyChanged(nameof(HailMaryBannerAccentBrush));
         OnPropertyChanged(nameof(HailMaryBannerBackgroundBrush));
+    }
+
+    // Parked-task banner: shown on screen when the local model has been parked/unloaded
+    // (idle timeout, memory guard, or hang abort) so the user is told WHY the model could
+    // not remain loaded and that their task is not lost. It also re-surfaces on startup if
+    // there is an unacknowledged parked-task breadcrumb from a previous session (e.g. the
+    // user set a task the evening before and comes back the next morning to find the model
+    // gone). The user dismisses it with the Dismiss button; dismissal is recorded so it does
+    // not re-appear on the next startup.
+    [ObservableProperty]
+    public partial bool ParkedTaskBannerVisible { get; set; }
+
+    [ObservableProperty]
+    public partial string ParkedTaskBannerText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string ParkedTaskBannerTooltip { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Shows the parked-task banner with the given reason text. Used both in-session (when
+    /// the model is parked) and on startup (when an unacknowledged parked-task breadcrumb is
+    /// found from a previous session).
+    /// </summary>
+    public void ShowParkedTaskBanner(string reason, string model, string variant)
+    {
+        var modelLabel = string.IsNullOrWhiteSpace(model) ? "the local model" : model;
+        var variantLabel = string.IsNullOrWhiteSpace(variant) ? string.Empty : " (" + variant + ")";
+        ParkedTaskBannerText = "Your local model was unloaded: " + reason + ". Model: " + modelLabel + variantLabel
+            + ". Your task is NOT lost — the Client app still has the full conversation. "
+            + "To continue, launch the model again (or send another message, which will auto-reload it).";
+        ParkedTaskBannerTooltip = "The local model was parked to free memory. This is not an error and your conversation is intact in the Client app. Launching the model (or sending a message) will reload it and continue where you left off.";
+        ParkedTaskBannerVisible = true;
+    }
+
+    [RelayCommand]
+    private void DismissParkedTaskBanner()
+    {
+        ParkedTaskBannerVisible = false;
+        // Record the dismissal so the same breadcrumb does not re-surface on the next startup.
+        try
+        {
+            _runtimeService?.MarkParkedTaskBannerDismissed();
+        }
+        catch
+        {
+            // Best-effort; never block the UI on a dismissal-record failure.
+        }
     }
 
     /// <summary>
@@ -8945,6 +8998,26 @@ public partial class MainViewModel : ViewModelBase
     /// </summary>
     public async Task AutoLoadSelectedProfileOnStartupAsync()
     {
+        // Re-surface any unacknowledged "parked task" notice from a previous session ON SCREEN.
+        // This is the key path for a user who set a task the evening before, came back the next
+        // morning to find the model gone (parked by idle timeout / memory guard / hang abort),
+        // and needs to be told WHY the model could not remain loaded and that their task is not
+        // lost. The check runs regardless of whether auto-load is enabled, so the user always
+        // sees the notice when they return.
+        try
+        {
+            var parked = _runtimeService?.GetLastUnacknowledgedParkedTask();
+            if (parked is { } p)
+            {
+                ShowParkedTaskBanner(p.Reason, p.Model, p.Variant);
+                AppendDiagnosticEntry("PARKED", "On startup: a parked-task notice from a previous session was found (" + p.When + "). " + p.Reason + ". Model: " + (string.IsNullOrWhiteSpace(p.Model) ? "(unknown)" : p.Model) + (string.IsNullOrWhiteSpace(p.Variant) ? string.Empty : " (" + p.Variant + ")") + ". Your task is NOT lost — the Client app still has the full conversation.", "AI-FluxMux");
+            }
+        }
+        catch
+        {
+            // Best-effort; a failure to read the breadcrumb should not block startup.
+        }
+
         if (!LoadSelectedProfileOnStartup)
         {
             return;
@@ -9128,7 +9201,8 @@ public partial class MainViewModel : ViewModelBase
                     vision.Enabled,
                     vision.ProjectorPath,
                     vision.MaxImageEdge,
-                    progressReporter: UpdateLocalLaunchPhase);
+                    progressReporter: UpdateLocalLaunchPhase,
+                    interactiveLaunch: true);
 
             ApplyLocalLaunchOutcome(result, model, variant, launchStartedUtc, out keepCountdownRunning);
         }
@@ -15353,6 +15427,26 @@ public partial class MainViewModel : ViewModelBase
         LocalRouteIndicatorState = RouteIndicatorState.Off;
         RefreshRouteSlotIndicators();
         UpdateRoutingPoolStatus();
+        // Also record it in the in-session diagnostic terminal so the user sees the park
+        // immediately (the StatusMessage alone can be overwritten by the next status). The
+        // durable, restart-surviving record is written to parked_tasks.log by the runtime
+        // service (LogParkedTask) at the same moment.
+        AppendDiagnosticEntry("PARKED", message, "AI-FluxMux");
+        // Surface the park ON SCREEN with a dismissible banner explaining why the model could
+        // not remain loaded and that the task is not lost. The runtime service already wrote
+        // the durable breadcrumb; here we just show it to the user immediately.
+        try
+        {
+            var parked = _runtimeService?.GetLastUnacknowledgedParkedTask();
+            if (parked is { } p)
+            {
+                ShowParkedTaskBanner(p.Reason, p.Model, p.Variant);
+            }
+        }
+        catch
+        {
+            // Best-effort; the diagnostic entry + status message already convey the park.
+        }
     }
 
     private void ApplyPortRulesPostMortem(string message)
