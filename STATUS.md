@@ -78,6 +78,21 @@
 
 **Verify (manual):** After a few turns, the prefill estimate should match the actual prefill time (within ~2×). The bar should move at the right pace, not creep slowly toward a high estimate.
 
+## ✅ DONE: RAM-spill samples polluting warm prefill speed estimate (11/6)
+
+**Symptom:** The warm prefill speed estimate was ~1,686 tok/s, but the actual VRAM-resident prefill speed was ~12,000 tok/s. The slow samples (1,780–2,640 tok/s) were RAM-spill events (prompt exceeds VRAM-resident context, overflow runs in ordinary RAM).
+
+**Root cause:** RAM-spill prefills were being recorded into the warm model's sample set (only `isCold` was passed to `RecordSample`, not `isRamSpill`). The slow RAM-spill samples dragged the warm VRAM speed estimate down.
+
+**Fix:** Added a `_prefillIsRamSpill` field, set from the existing `isRamSpill` detection. RAM-spill samples are now excluded from the warm model's sample set (`RecordSample` is skipped when `_prefillIsRamSpill` is true). The warm model only learns from true VRAM-resident prefills.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — added `_prefillIsRamSpill` field, set from `isRamSpill`, and skip `RecordSample` when RAM-spill.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** After a few VRAM-resident turns (no RAM-spill), the warm speed estimate should converge on the real VRAM speed (~12,000 tok/s on the user's hardware). RAM-spill turns should not affect the warm estimate.
+
 ## ℹ️ NOTE: Terminal vs. graph turn numbers differ by one during in-flight turns (11/6) — left as-is
 
 **Observation (user report):** The terminal telemetry's most recent turn number sometimes doesn't match the graph's most recent turn number.
