@@ -109,6 +109,21 @@
 
 **Verify (manual):** After a few RAM-spill turns, the RAM-spill estimate should converge on the real RAM-spill speed. The prefill bar should move at the right pace for RAM-spill prefills.
 
+## ✅ DONE: Prefill estimate floor too high (15s → 5s) (11/6)
+
+**Symptom:** A warm VRAM prefill of 152K tokens at 17,000 tok/s finishes in ~9s, but the estimate was floored at 15s. The bar crept slowly toward the 15s estimate instead of matching the actual ~9s prefill time.
+
+**Root cause:** The prefill estimate floor was 15s when the learned model has data. This was too high for fast VRAM prefills that finish in seconds.
+
+**Fix:** Lowered the floor from 15s to 5s when the learned model has data. The learned model's accurate estimate now passes through, so the bar moves at the right pace.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — lowered the prefill estimate floor from 15s to 5s when `hasLearnedData` is true.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** After a few turns, the prefill estimate should match the actual prefill time (within ~2×). The bar should move at the right pace, not creep slowly toward a high estimate.
+
 ## ℹ️ NOTE: Terminal vs. graph turn numbers differ by one during in-flight turns (11/6) — left as-is
 
 **Observation (user report):** The terminal telemetry's most recent turn number sometimes doesn't match the graph's most recent turn number.
