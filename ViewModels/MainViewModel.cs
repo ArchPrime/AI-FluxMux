@@ -557,11 +557,11 @@ public partial class MainViewModel : ViewModelBase
                     _prefillEstimatedSeconds = (int)Math.Ceiling(baseEstimate * multiplier);
 
                     // Floor: when the learned model has data, trust it down to a small floor
-                    // (15s) — a warm VRAM prefill can genuinely finish in seconds, and flooring
-                    // it at 60s is what made the UI over-promise. When there is no learned data,
-                    // keep the conservative 30s floor for large prompts (even a fast VRAM prefill
-                    // of 50K+ tokens takes at least ~30s). Cap at 1800s.
-                    int floor = hasLearnedData ? 15 : (promptTokens > 32768 ? 30 : 0);
+                    // (5s) — a warm VRAM prefill can genuinely finish in seconds, and flooring
+                    // it at 15s (or 60s) is what made the UI over-promise. When there is no
+                    // learned data, keep the conservative 30s floor for large prompts (even a
+                    // fast VRAM prefill of 50K+ tokens takes at least ~30s). Cap at 1800s.
+                    int floor = hasLearnedData ? 5 : (promptTokens > 32768 ? 30 : 0);
                     _prefillEstimatedSeconds = Math.Max(_prefillEstimatedSeconds, floor);
                     _prefillEstimatedSeconds = Math.Clamp(_prefillEstimatedSeconds, 0, 1800);
                 }
