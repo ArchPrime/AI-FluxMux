@@ -93,6 +93,22 @@
 
 **Verify (manual):** After a few VRAM-resident turns (no RAM-spill), the warm speed estimate should converge on the real VRAM speed (~12,000 tok/s on the user's hardware). RAM-spill turns should not affect the warm estimate.
 
+## ✅ DONE: Dedicated RAM-spill prefill performance model (11/6)
+
+**Symptom:** When a RAM-spill prefill happens (prompt exceeds VRAM-resident context), the user needs an accurate estimate of how long the RAM load will take. Previously, the estimate used the VRAM model (fitted to faster VRAM-resident speeds), which was inaccurate for the RAM-spill case.
+
+**Root cause:** RAM-spill prefills are a different regime than VRAM-resident prefills (slower, dominated by RAM bandwidth). They need their own fitted speed.
+
+**Fix:** Added a dedicated RAM-spill sample set and fitted speed to `PrefillPerformanceModel`. RAM-spill samples are now recorded into this dedicated model (via `RecordRamSpillSample`), and the estimate uses `RamSpillEstimateSeconds` (which falls back to the cold VRAM model when no RAM-spill data exists yet).
+
+**Files changed:**
+- `Services/PrefillPerformanceModel.cs` — added `_ramSpillSamples`, `_ramSpillTokensPerSec`, `_ramSpillOverheadMs`, `_ramSpillHasData`; added `RecordRamSpillSample` and `RamSpillEstimateSeconds` methods; updated `Load`/`Save` to persist RAM-spill samples.
+- `ViewModels/MainViewModel.cs` — RAM-spill prefills now use `RamSpillEstimateSeconds` for the estimate, and RAM-spill samples are recorded via `RecordRamSpillSample` (not the warm VRAM model).
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** After a few RAM-spill turns, the RAM-spill estimate should converge on the real RAM-spill speed. The prefill bar should move at the right pace for RAM-spill prefills.
+
 ## ℹ️ NOTE: Terminal vs. graph turn numbers differ by one during in-flight turns (11/6) — left as-is
 
 **Observation (user report):** The terminal telemetry's most recent turn number sometimes doesn't match the graph's most recent turn number.
