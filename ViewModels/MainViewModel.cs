@@ -4508,7 +4508,14 @@ public partial class MainViewModel : ViewModelBase
             // working. Extend by 50% of the original estimate each time we outlast it, capped so
             // we don't grow unboundedly. This only affects the DISPLAY (the bar + ETA text); the
             // hang-detection uses its own separate estimate (CurrentPrefillEstimateSeconds).
-            if (_prefillEstimatedSeconds > 0 && elapsedSeconds > _prefillEstimatedSeconds)
+            //
+            // IMPORTANT: Only extend the estimate when the learned model has NO data. When the
+            // learned model has data, the estimate is already accurate (based on real samples
+            // from this hardware), so extending it makes the bar creep slowly and look stuck.
+            // The bar should reach 100% when the prefill actually finishes, not creep toward a
+            // growing estimate.
+            bool hasLearnedData = GetOrCreatePrefillModel().HasData;
+            if (_prefillEstimatedSeconds > 0 && elapsedSeconds > _prefillEstimatedSeconds && !hasLearnedData)
             {
                 const int MaxPrefillEstimateSeconds = 1800;
                 _prefillEstimatedSeconds = Math.Min(
