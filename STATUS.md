@@ -124,6 +124,21 @@
 
 **Verify (manual):** After a few turns, the prefill estimate should match the actual prefill time (within ~2×). The bar should move at the right pace, not creep slowly toward a high estimate.
 
+## ✅ DONE: Prefill estimate extension causing bar to look stuck/rewinding (11/7)
+
+**Symptom:** The prefill bar crept slowly toward a high estimate (88s for a cold prefill), and when the estimate was extended (because the real prefill outlasted it), the bar appeared to "rewind" or get stuck.
+
+**Root cause:** The prefill estimate was being extended by 50% each time the real prefill outlasted it, even when the learned model had data. When the learned model has data, the estimate is already accurate (based on real samples from this hardware), so extending it makes the bar creep slowly and look stuck. The `_prefillMaxProgress` clamp prevents the bar from going backwards, but the extension makes the raw value drop, so the bar gets stuck at the previous max while the estimate grows.
+
+**Fix:** Only extend the estimate when the learned model has NO data (i.e., the estimate is a guess). When the learned model has data, trust the estimate and don't extend it. The bar reaches 100% when the prefill actually finishes, instead of creeping toward a growing estimate.
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — `StartPrefillTimer`: only extend the estimate when `!hasLearnedData`.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** After a few turns, the prefill bar should reach 100% when the prefill actually finishes, not creep slowly toward a growing estimate. No more "stuck" or "rewinding" appearance.
+
 ## ℹ️ NOTE: Terminal vs. graph turn numbers differ by one during in-flight turns (11/6) — left as-is
 
 **Observation (user report):** The terminal telemetry's most recent turn number sometimes doesn't match the graph's most recent turn number.
