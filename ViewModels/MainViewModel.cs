@@ -501,7 +501,15 @@ public partial class MainViewModel : ViewModelBase
                 _prefillPromptTokens = promptTokens;
                 _prefillStartUtc = DateTime.UtcNow;
                 var isColdStart = _runtimeService.IsLocalModelCold;
-                _prefillIsCold = isColdStart;
+                // Also treat a prefill as cold if the model became ready very recently (within
+                // 30s). After a model switch, the model is loaded (phase=ready) but the KV cache
+                // is cold, so the first prefill is effectively a cold prefill (slow, full
+                // re-processing of the prompt). Without this, the first post-switch prefill is
+                // tagged "warm" and pollutes the warm speed estimate with a slow sample.
+                var modelReadyUtc = _runtimeService.LocalModelReadyUtc;
+                bool recentModelSwitch = modelReadyUtc != DateTime.MinValue
+                    && (DateTime.UtcNow - modelReadyUtc).TotalSeconds < 30;
+                _prefillIsCold = isColdStart || recentModelSwitch;
                 _prefillIsRamSpill = isRamSpill;
                 var prefillModel = GetOrCreatePrefillModel();
 

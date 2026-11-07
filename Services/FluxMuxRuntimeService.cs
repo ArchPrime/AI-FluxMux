@@ -297,6 +297,10 @@ public sealed class FluxMuxRuntimeService
 
 	private readonly string _proxyCloudHandshakeLogPath;
 
+	private readonly string _parkedTasksLogPath;
+
+	private readonly string _parkedTasksAckPath;
+
 	private readonly object _directoryIndexLock = new object();
 
 	private readonly object _jsonCacheLock = new object();
@@ -592,6 +596,8 @@ public sealed class FluxMuxRuntimeService
 		_proxyStdErrPath = Path.Combine(_logDirectory, "proxy_python_stderr.log");
 		_proxyBridgeScriptPath = Path.Combine(Path.GetTempPath(), "fluxmux_server_bridge.py");
 		_switchBenchmarkLogPath = Path.Combine(_logDirectory, "Switch_Context_Fidelity_Benchmarks.jsonl");
+		_parkedTasksLogPath = Path.Combine(_logDirectory, "parked_tasks.log");
+		_parkedTasksAckPath = Path.Combine(_logDirectory, "parked_tasks_ack.json");
 		Directory.CreateDirectory(_logDirectory);
 		_gatewayHost = CreateGatewayHost();
 		EnsureIdleTimeoutLoop();
@@ -955,6 +961,10 @@ public sealed class FluxMuxRuntimeService
 
 				await StopLocalCoreAsync(preserveParkedForIdleWake: true).ConfigureAwait(false);
 				_localSleepingFromIdle = true;
+				LogParkedTask(
+					"Idle timeout (no chat for " + _idleTimeoutMinutes.ToString(CultureInfo.InvariantCulture) + " minutes)",
+					_managedLocalModel,
+					_managedLocalVariant);
 				IdleTimeoutNotice?.Invoke(
 					"Idle timeout: stopped the local model after " + _idleTimeoutMinutes.ToString(CultureInfo.InvariantCulture)
 					+ " minutes with no chat. The next chat will reload it.");
@@ -1021,6 +1031,10 @@ public sealed class FluxMuxRuntimeService
 				await StopLocalCoreAsync(preserveParkedForIdleWake: true).ConfigureAwait(false);
 				_localSleepingFromIdle = true;
 				_lastMemoryGuardStopUtc = DateTime.UtcNow;
+				LogParkedTask(
+					"Memory guard (free RAM dropped to " + availableRamGiB.ToString("0.0", CultureInfo.InvariantCulture) + " GiB, below the " + MemoryGuardMinAvailableRamGiB.ToString("0", CultureInfo.InvariantCulture) + " GiB floor)",
+					_managedLocalModel,
+					_managedLocalVariant);
 				IdleTimeoutNotice?.Invoke(
 					"Memory guard: stopped the local model because free RAM dropped to "
 					+ availableRamGiB.ToString("0.0", CultureInfo.InvariantCulture)
@@ -1075,6 +1089,10 @@ public sealed class FluxMuxRuntimeService
 
 			await StopLocalCoreAsync(preserveParkedForIdleWake: true).ConfigureAwait(false);
 			_localSleepingFromIdle = true;
+			LogParkedTask(
+				"Hang abort (the local stream stalled; parked so the window stays usable)",
+				_managedLocalModel,
+				_managedLocalVariant);
 			IdleTimeoutNotice?.Invoke(
 				"Hang abort: parked llama-server so the AI-FluxMux window stays usable. The next local chat reloads it.");
 		}
@@ -3551,7 +3569,7 @@ public sealed class FluxMuxRuntimeService
 		}
 	}
 
-	public async Task<RuntimeActionResult> LaunchLocalAsync(string selectedLocalModel, string selectedVariant, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, CancellationToken cancellationToken = default(CancellationToken), Action<string>? progressReporter = null, bool recordLastLaunched = true)
+	public async Task<RuntimeActionResult> LaunchLocalAsync(string selectedLocalModel, string selectedVariant, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, CancellationToken cancellationToken = default(CancellationToken), Action<string>? progressReporter = null, bool recordLastLaunched = true, bool interactiveLaunch = false)
 	{
 		JsonObject root = LoadJsonCached(_configPath);
 		int localBackendPort = port + 1;
@@ -4117,9 +4135,19 @@ public sealed class FluxMuxRuntimeService
 			{
 				WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "warming", "Local process running while endpoint warms up.");
 				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "warming", "llama-server is still warming up on the daemon port.", GetGatewayPid());
+				// For an interactive (user-initiated) launch, the launch window has now expired and
+				// the model is NOT ready. Reporting this as a success (IsSuccess=true) makes the
+				// caller enter an indefinite "still warming" poll with the progress bar animating,
+				// which leaves the user waiting with the impression that things are still proceeding
+				// when in fact the launch attempt has failed. Marking it a failure routes the caller
+				// to the launch-failure recovery dialog ("Launch did not finish in time" with
+				// Wait longer / Retry / Smaller model / Stop), which surfaces the failure and gives
+				// the user a choice instead of an open-ended wait. Auto-load / idle-wake / benchmark
+				// launches (interactiveLaunch=false) keep the old success+warming behavior so they
+				// don't block on a dialog with no user watching.
 				return new RuntimeActionResult
 				{
-					IsSuccess = true,
+					IsSuccess = !interactiveLaunch,
 					Status = "Local route warming up",
 					Details = "llama-server is running and its port is open, but llama-server health is not ready yet. Current startup window is about " + FormatDurationMs(launchBudgetMs) + " for this model profile based on prior launches. Wait a little longer, then use Check Connection Health." + (string.IsNullOrWhiteSpace(_lastLocalStderrTail) ? string.Empty : (" Last llama-server output: " + _lastLocalStderrTail))
 				};
@@ -4680,6 +4708,145 @@ public sealed class FluxMuxRuntimeService
 		catch
 		{
 			// Ignore log write failures.
+		}
+	}
+
+	/// <summary>
+	/// Writes a persistent "parked task" breadcrumb to <c>parked_tasks.log</c> in the log
+	/// directory. This survives app restarts, so a user who comes back later (e.g. the next
+	/// morning) to discover that the AI task they set the evening before has been parked /
+	/// unloaded can find out what happened and when. The in-session diagnostic terminal also
+	/// shows this (via the IdleTimeoutNotice handler), but that is in-memory only and is lost
+	/// on restart — this file is the durable record.
+	/// </summary>
+	private void LogParkedTask(string reason, string model, string variant)
+	{
+		try
+		{
+			string when = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+			string modelLabel = string.IsNullOrWhiteSpace(model) ? "(unknown model)" : model;
+			string variantLabel = string.IsNullOrWhiteSpace(variant) ? string.Empty : " (" + variant + ")";
+			string line = $"[{when}] PARKED: {reason} Model: {modelLabel}{variantLabel}. The local model was unloaded to free memory; the next local chat will reload it. Your in-progress task is NOT lost — the Client app still has the full conversation. To continue, launch the model again (or send another message, which will auto-reload it).";
+			lock (_proxyStateLock)
+			{
+				File.AppendAllText(_parkedTasksLogPath, line + Environment.NewLine);
+			}
+		}
+		catch
+		{
+			// Ignore log write failures — the breadcrumb is best-effort.
+		}
+	}
+
+	/// <summary>
+	/// Returns the most recent parked-task breadcrumb that has NOT yet been acknowledged by the
+	/// user (i.e. its timestamp is newer than the last dismissal recorded in
+	/// <c>parked_tasks_ack.json</c>), or null when there is none. Used on startup to re-surface
+	/// the "your model was parked" notice on screen for a user returning to a session where the
+	/// model was unloaded (e.g. set a task the evening before, comes back the next morning).
+	/// </summary>
+	public (string Reason, string Model, string Variant, string When)? GetLastUnacknowledgedParkedTask()
+	{
+		try
+		{
+			if (!File.Exists(_parkedTasksLogPath))
+			{
+				return null;
+			}
+			// Read the last dismissal timestamp (ISO 8601) if present.
+			DateTime lastAck = DateTime.MinValue;
+			if (File.Exists(_parkedTasksAckPath))
+			{
+				try
+				{
+					var ackRoot = JsonNode.Parse(File.ReadAllText(_parkedTasksAckPath)) as JsonObject;
+					if (DateTime.TryParse(ackRoot?["last_ack"]?.ToString() ?? string.Empty, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var parsedAck))
+					{
+						lastAck = parsedAck;
+					}
+				}
+				catch
+				{
+					// Corrupt ack file — treat as never-acknowledged.
+				}
+			}
+
+			// Scan the log from the end for the most recent PARKED line newer than lastAck.
+			string[] lines = File.ReadAllLines(_parkedTasksLogPath);
+			for (int i = lines.Length - 1; i >= 0; i--)
+			{
+				string line = lines[i];
+				// Line format: [yyyy-MM-dd HH:mm:ss] PARKED: <reason> Model: <model>( <variant>). ...
+				if (!line.StartsWith("[", StringComparison.Ordinal) || !line.Contains("] PARKED:", StringComparison.Ordinal))
+				{
+					continue;
+				}
+				int closeBracket = line.IndexOf(']');
+				if (closeBracket < 1)
+				{
+					continue;
+				}
+				string whenText = line.Substring(1, closeBracket - 1);
+				if (!DateTime.TryParse(whenText, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var when))
+				{
+					continue;
+				}
+				if (when <= lastAck)
+				{
+					// This and any earlier entries were already acknowledged.
+					break;
+				}
+				// Parse reason / model / variant out of the line.
+				string afterMarker = line[(closeBracket + " PARKED:".Length)..];
+				string reason = afterMarker;
+				string model = string.Empty;
+				string variant = string.Empty;
+				int modelIdx = afterMarker.IndexOf(" Model: ", StringComparison.Ordinal);
+				if (modelIdx >= 0)
+				{
+					reason = afterMarker[..modelIdx];
+					string rest = afterMarker[(modelIdx + " Model: ".Length)..];
+					// rest looks like: "<model>( <variant>). The local model was unloaded..."
+					int periodIdx = rest.IndexOf(". The local model was unloaded", StringComparison.Ordinal);
+					string modelVariantPart = periodIdx >= 0 ? rest[..periodIdx] : rest;
+					int parenIdx = modelVariantPart.IndexOf(" (", StringComparison.Ordinal);
+					if (parenIdx >= 0)
+					{
+						model = modelVariantPart[..parenIdx];
+						variant = modelVariantPart[(parenIdx + 2)..].TrimEnd(')');
+					}
+					else
+					{
+						model = modelVariantPart;
+					}
+				}
+				return (reason.Trim(), model, variant, whenText);
+			}
+			return null;
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary>
+	/// Records that the user has acknowledged (dismissed) the parked-task banner "now", so the
+	/// same breadcrumb does not re-surface on the next startup.
+	/// </summary>
+	public void MarkParkedTaskBannerDismissed()
+	{
+		try
+		{
+			string now = DateTime.Now.ToString("o", CultureInfo.InvariantCulture);
+			lock (_proxyStateLock)
+			{
+				File.WriteAllText(_parkedTasksAckPath, new JsonObject { ["last_ack"] = now }.ToJsonString());
+			}
+		}
+		catch
+		{
+			// Best-effort; a failed dismissal record just means the banner may re-appear next startup.
 		}
 	}
 
@@ -10123,6 +10290,41 @@ private List<GpuProcessUse> CollectGpuProcessUses()
 			catch
 			{
 				return true;
+			}
+		}
+	}
+
+	/// <summary>
+	/// The UTC time when the local model last became ready (phase transitioned to "ready").
+	/// Used to detect recent model switches: a prefill that starts within a short window of
+	/// the model becoming ready is likely a cold prefill (KV cache not yet warm), even though
+	/// the model is loaded. Returns <c>DateTime.MinValue</c> when the timestamp is unavailable.
+	/// </summary>
+	public DateTime LocalModelReadyUtc
+	{
+		get
+		{
+			try
+			{
+				if (!File.Exists(_localRuntimeStatePath))
+				{
+					return DateTime.MinValue;
+				}
+				JsonObject root = LoadJson(_localRuntimeStatePath);
+				string updatedUtc = GetString(root, "updated_utc");
+				if (DateTime.TryParse(
+					updatedUtc,
+					CultureInfo.InvariantCulture,
+					DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+					out var dt))
+				{
+					return dt;
+				}
+				return DateTime.MinValue;
+			}
+			catch
+			{
+				return DateTime.MinValue;
 			}
 		}
 	}
