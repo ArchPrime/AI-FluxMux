@@ -3674,6 +3674,17 @@ public sealed class FluxMuxRuntimeService
 			progressReporter?.Invoke("AI-FluxMux is checking the previous llama-server");
 			int stoppedLeftover = StopStaleManagedLocalFromRuntimeState(clearStateIfStopped: true);
 			stoppedPrevious = stoppedLeftover > 0;
+			// Also kill any process on the target port that is NOT in the runtime state.
+			// A stuck llama-server process (e.g., from a previous failed launch) might still
+			// be holding the port but not tracked in the runtime state. Without this, the
+			// IsLlamaEndpointReadyAsync check below would find the stuck process and try to
+			// reuse it, causing the new launch to hang.
+			if (IsTcpPortOpen("127.0.0.1", localBackendPort) &&
+				TryStopLocalEndpointOwnerByPort(localBackendPort, out int killedPid, out string killedName))
+			{
+				stoppedPrevious = true;
+				LogLaunchMonitor($"pre-launch: killed stale process {killedName} (PID {killedPid}) on port {localBackendPort}");
+			}
 			Process localServerProcess = null;
 			bool alreadyRunningThisProfile = false;
 			if (await IsLlamaEndpointReadyAsync(localBackendPort, launchToken))
