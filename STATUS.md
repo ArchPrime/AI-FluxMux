@@ -139,6 +139,22 @@
 
 **Verify (manual):** After a few turns, the prefill bar should reach 100% when the prefill actually finishes, not creep slowly toward a growing estimate. No more "stuck" or "rewinding" appearance.
 
+## ✅ DONE: Detect recent model switches and tag first post-switch prefill as cold (11/7)
+
+**Symptom:** After a model switch, the first prefill is slow (cold KV cache) but is tagged "warm" (because the model is loaded, phase=ready). This pollutes the warm speed estimate with a slow sample, making the estimate too high for subsequent warm prefills.
+
+**Root cause:** The `isCold` flag only checks if the model is loaded (phase=ready), not if the KV cache is warm. After a model switch, the model is loaded but the KV cache is cold, so the first prefill is effectively a cold prefill.
+
+**Fix:** Added a `LocalModelReadyUtc` property to `FluxMuxRuntimeService` (reads the `updated_utc` timestamp from `Local_Runtime_State.json`). In `MainViewModel`, a prefill that starts within 30s of the model becoming ready is tagged cold, so it's recorded into the cold model (not the warm model). This keeps the warm speed estimate accurate (based on true warm prefills).
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — added `LocalModelReadyUtc` property.
+- `ViewModels/MainViewModel.cs` — detect recent model switches (within 30s of model becoming ready) and tag the prefill as cold.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** After a model switch, the first prefill should be tagged cold (slow estimate), and subsequent prefills should be tagged warm (fast estimate). The warm speed estimate should not be polluted by the first post-switch prefill.
+
 ## ℹ️ NOTE: Terminal vs. graph turn numbers differ by one during in-flight turns (11/6) — left as-is
 
 **Observation (user report):** The terminal telemetry's most recent turn number sometimes doesn't match the graph's most recent turn number.
