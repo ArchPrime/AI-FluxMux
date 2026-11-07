@@ -155,6 +155,21 @@
 
 **Verify (manual):** After a model switch, the first prefill should be tagged cold (slow estimate), and subsequent prefills should be tagged warm (fast estimate). The warm speed estimate should not be polluted by the first post-switch prefill.
 
+## ✅ DONE: Pre-launch cleanup kills any process on the target port (11/7)
+
+**Symptom:** Manually closing and restarting FluxMux was often the only reliable way to get a successful launch. Sometimes launching a VRAM-only model in a fresh chat helped.
+
+**Root cause:** A stuck llama-server process (from a previous failed launch) might still be holding the port but not tracked in the runtime state. The pre-launch cleanup only killed processes from the runtime state, so the stuck process was not killed. The `IsLlamaEndpointReadyAsync` check would then find the stuck process and try to reuse it, causing the new launch to hang.
+
+**Fix:** Added a call to `TryStopLocalEndpointOwnerByPort` in the pre-launch cleanup. This kills any process on the target port, not just the one in the runtime state. This ensures a clean slate for the new launch.
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — `LaunchLocalAsync`: added a call to `TryStopLocalEndpointOwnerByPort` after `StopStaleManagedLocalFromRuntimeState`.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass. **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** After a failed launch, clicking "Launch" again should kill the stuck process and start a fresh launch. No need to manually close and restart FluxMux.
+
 ## ℹ️ NOTE: Terminal vs. graph turn numbers differ by one during in-flight turns (11/6) — left as-is
 
 **Observation (user report):** The terminal telemetry's most recent turn number sometimes doesn't match the graph's most recent turn number.
