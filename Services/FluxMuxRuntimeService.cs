@@ -3316,8 +3316,7 @@ public sealed class FluxMuxRuntimeService
 			psi.ArgumentList.Add("--fixed-strings");
 			psi.ArgumentList.Add("--grep");
 			psi.ArgumentList.Add(grepPattern);
-			psi.ArgumentList.Add("--format");
-			psi.ArgumentList.Add("%h|%s|%ad");
+			psi.ArgumentList.Add("--format=%h|%s|%ad");
 			psi.ArgumentList.Add("--date=short");
 			psi.ArgumentList.Add("-20");
 

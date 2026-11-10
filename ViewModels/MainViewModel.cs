@@ -3125,6 +3125,19 @@ public partial class MainViewModel : ViewModelBase
                 chosenPath = parent;
             }
         }
+
+        // Confirm before creating the checkpoint.
+        var confirm = ThemedDialog.Confirm(
+            "Create Git Checkpoint",
+            $"Create a git checkpoint in:\n{chosenPath}\n\nThis will commit all current changes to the git repository.",
+            "Create Checkpoint",
+            "Cancel");
+        if (!confirm)
+        {
+            StatusMessage = "Checkpoint cancelled.";
+            return;
+        }
+
         LocalGitCheckpointDirectory = chosenPath;
         SaveCurrentSelections();
 
