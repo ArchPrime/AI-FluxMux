@@ -3317,7 +3317,7 @@ public sealed class FluxMuxRuntimeService
 			psi.ArgumentList.Add("--grep");
 			psi.ArgumentList.Add(grepPattern);
 			psi.ArgumentList.Add("--format=%h|%s|%ad");
-			psi.ArgumentList.Add("--date=short");
+			psi.ArgumentList.Add("--date=iso");
 			psi.ArgumentList.Add("-20");
 
 			var process = System.Diagnostics.Process.Start(psi);
