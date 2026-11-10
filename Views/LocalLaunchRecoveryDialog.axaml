@@ -10,36 +10,40 @@
         Background="{DynamicResource FluxPaneBackground}"
         Foreground="{DynamicResource FluxHeadingForeground}">
 
-    <Border Padding="14"
+    <Border Padding="16,14"
             Background="{DynamicResource FluxCardBackground}"
             BorderBrush="{DynamicResource FluxCardBorder}"
             BorderThickness="1">
-        <StackPanel Spacing="12">
+        <StackPanel Spacing="10" HorizontalAlignment="Center">
             <TextBlock x:Name="HeadingText"
                        FontSize="15"
                        FontWeight="SemiBold"
                        TextWrapping="Wrap"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
                        Foreground="{DynamicResource FluxHeadingForeground}" />
             <TextBlock x:Name="MessageText"
                        TextWrapping="Wrap"
                        FontSize="12"
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center"
                        Foreground="{DynamicResource FluxHeadingForeground}" />
-            <WrapPanel>
+            <WrapPanel HorizontalAlignment="Center">
                 <Button x:Name="SmallerContextButton"
-                        Margin="0,0,8,8"
+                        Margin="0,0,8,0"
                         Click="SmallerContext_Click" />
                 <Button x:Name="RetryButton"
-                        Margin="0,0,8,8"
+                        Margin="0,0,8,0"
                         Click="Retry_Click" />
                 <Button x:Name="SmallerModelButton"
-                        Margin="0,0,8,8"
+                        Margin="0,0,8,0"
                         Click="SmallerModel_Click" />
                 <Button x:Name="StopButton"
-                        Margin="0,0,8,8"
+                        Margin="0,0,8,0"
                         IsVisible="False"
                         Click="Stop_Click" />
                 <Button x:Name="WaitLongerButton"
-                        Margin="0,0,8,8"
+                        Margin="0,0,8,0"
                         IsVisible="False"
                         Click="WaitLonger_Click" />
             </WrapPanel>

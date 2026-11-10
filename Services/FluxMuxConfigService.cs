@@ -90,56 +90,12 @@ public sealed class FluxMuxConfigService
 
     /// <summary>
     /// Writes <paramref name="contents"/> to <paramref name="path"/> without ever throwing.
-    /// The config file can be held open by another process (a second AI-FluxMux instance,
-    /// an editor, or a file watcher on .vscode). A failed save must never take the app down,
-    /// so this writes to a temp file, retries while the target is locked, then atomically
-    /// replaces it. On final failure it swallows the error rather than propagating it.
+    /// Delegates to the shared <see cref="AtomicFile"/> helper (the single atomic-write
+    /// implementation for the app). Kept as a thin wrapper so existing call sites are unchanged.
     /// </summary>
     private static void WriteAllTextResilient(string path, string contents)
     {
-        var dir = Path.GetDirectoryName(path);
-        if (!string.IsNullOrWhiteSpace(dir))
-        {
-            Directory.CreateDirectory(dir);
-        }
-
-        var tempPath = path + ".tmp-" + Guid.NewGuid().ToString("N");
-        for (var attempt = 0; attempt < 5; attempt++)
-        {
-            try
-            {
-                File.WriteAllText(tempPath, contents);
-                File.Move(tempPath, path, overwrite: true);
-                return;
-            }
-            catch (IOException)
-            {
-                // Target (or temp) is locked by another process; back off and retry.
-            }
-            catch (UnauthorizedAccessException)
-            {
-                // Same class of failure on some setups; retry.
-            }
-            finally
-            {
-                try
-                {
-                    if (File.Exists(tempPath))
-                    {
-                        File.Delete(tempPath);
-                    }
-                }
-                catch
-                {
-                    // Best effort; a stray .tmp file is harmless.
-                }
-            }
-
-            Thread.Sleep(120 * (attempt + 1));
-        }
-
-        // Give up quietly. Losing one geometry/settings save is acceptable;
-        // crashing the whole app over a locked config file is not.
+        AtomicFile.WriteAllTextResilient(path, contents);
     }
 
     public string ConfigPath => _configPath;

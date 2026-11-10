@@ -13,6 +13,7 @@ using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using FluxMux.Avalonia.Services.ContextEngine;
 
 namespace FluxMux.Avalonia.Services;
 
@@ -133,6 +134,41 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// be resolved (treated as on, the default).
     /// </summary>
     public Func<string, string, bool?>? GetForwardPruneEnabled { get; set; }
+
+    /// <summary>
+    /// Per-profile VIBE_STATE toggle ("LocalVibeStateEnabled", default on). Read live each turn.
+    /// When on, the context engine re-injects the session's task/state/next at the top of the
+    /// system prompt so the model always knows "where we are" even after the working context has
+    /// been paged away. Returns null when the profile cannot be resolved (treated as on).
+    /// </summary>
+    public Func<string, string, bool?>? GetVibeStateEnabled { get; set; }
+
+    /// <summary>
+    /// The context engine (VIBE_STATE + paged context). Injected by the runtime service; null when
+    /// the capability is not wired up (treated as disabled). The engine reads/writes
+    /// <c>VIBE_STATE.md</c> through its <c>IContextIo</c> seam, so a locked or missing file never
+    /// breaks a turn.
+    /// </summary>
+    public FluxMux.Avalonia.Services.ContextEngine.IContextEngine? ContextEngine { get; set; }
+
+    /// <summary>
+    /// Path to the session's <c>VIBE_STATE.md</c>. Supplied by the runtime service (next to the
+    /// config file). The engine uses this to load/save the persistent task/state/next record.
+    /// </summary>
+    public string VibeStatePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The paged-context swap store. Injected by the runtime service; null when paging is not
+    /// wired up. When non-null and paging is enabled, the forward-prune truncate stage spills
+    /// oversized older tool-result bodies here and leaves a <c>swap_id</c> pointer (lossless).
+    /// </summary>
+    public FluxMux.Avalonia.Services.ContextEngine.ContextSwapStore? SwapStore { get; set; }
+
+    /// <summary>
+    /// The MCP control plane (update_vibe_state, read_swap_log, git_checkpoint). Injected by the
+    /// runtime service; null when not wired up. Handles <c>POST /mcp</c> requests.
+    /// </summary>
+    public FluxMux.Avalonia.Services.ContextEngine.McpControlPlane? McpControlPlane { get; set; }
 
     /// <summary>
     /// Raised when the armed Hail Mary rear-prune is actually consumed on a turn (success or
@@ -451,6 +487,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 return;
             }
 
+            // MCP control plane: the model's tools for managing the paged-context capability
+            // (update_vibe_state, read_swap_log, git_checkpoint). POST /mcp with a JSON body of
+            // { "tool": "name", "args": { ... } }. Returns { "ok": true, ... } or
+            // { "ok": false, "error": "..." }. 404 when the control plane is not wired up.
+            if (method.Equals("POST", StringComparison.OrdinalIgnoreCase) && path == "/mcp")
+            {
+                await HandleMcpRequestAsync(context).ConfigureAwait(false);
+                return;
+            }
+
             if (!method.Equals("POST", StringComparison.OrdinalIgnoreCase)
                 || (path != "/v1/chat/completions" && path != "/chat/completions"))
             {
@@ -473,7 +519,31 @@ public sealed class FluxMuxGatewayHost : IDisposable
             Log("gateway handler failed: " + ex.Message);
             try
             {
-                await SendOpenAiErrorAsync(context.Response, "AI-FluxMux could not finish this request. Retry in a fresh chat.", 502, "proxy_error").ConfigureAwait(false);
+                // If the local model was stopped (memory guard, idle timeout, or user-initiated),
+                // return a 503 with Retry-After so the client (e.g. Cline) can automatically retry.
+                // A 502 is treated as a terminal error by most clients, so the chat gets stuck.
+                var state = await WaitForRoutableStateAsync().ConfigureAwait(false);
+                var phase = Str(state, "phase", "idle");
+                var localPhase = Str(state, "local_phase", "");
+                bool modelWasStopped = !HasReadyTarget(state)
+                    && (phase is "idle" or "" || localPhase is "idle" or "" || localPhase == "stopped");
+
+                if (modelWasStopped)
+                {
+                    // The model was stopped (memory guard, idle timeout, or user-initiated).
+                    // Return a 503 with Retry-After so the client can automatically retry.
+                    // The model will be reloaded on the next request.
+                    await SendOpenAiErrorAsync(
+                        context.Response,
+                        "The local model was stopped to free memory. It will be reloaded automatically. Please retry your request.",
+                        503,
+                        "route_unavailable",
+                        headers: new Dictionary<string, string> { ["Retry-After"] = "5" }).ConfigureAwait(false);
+                }
+                else
+                {
+                    await SendOpenAiErrorAsync(context.Response, "AI-FluxMux could not finish this request. Retry in a fresh chat.", 502, "proxy_error").ConfigureAwait(false);
+                }
             }
             catch
             {
@@ -504,18 +574,35 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
     private async Task HandleChatCompletionsAsync(HttpListenerContext context, CancellationToken handlerToken)
     {
-        // Limit concurrent requests to the local model to 1. When the client sends multiple
-        // requests concurrently (e.g., a probe + the real request, or retries), the model
-        // processes them in parallel, which slows down each one. By limiting concurrent requests
-        // to 1, the model can focus on the real request and generate it faster.
-        await _localRequestSemaphore.WaitAsync(handlerToken).ConfigureAwait(false);
+        // Detect probe requests BEFORE the semaphore. Probes are tiny "Reply with the single
+        // word ready." checks fired by the launch monitor to confirm a (re)loaded model is
+        // responding. They must NEVER queue behind a multi-minute YaRN/RAM-spill prefill, and a
+        // prefill must never block a probe. Before the semaphore was added (pre-Nov-2), probes
+        // and the real request ran in parallel (llama-server's single slot time-slices them), so
+        // a VRAM→YaRN mid-chat switch "just worked." Serializing them turned a slow-but-fine
+        // prefill into a hard Long-load first-byte timeout.
+        var isProbeRequest =
+            context.Request.Headers[CloudEndpointValidationProbe.ProbeRequestHeader]?.Any() ?? false;
+
+        // Limit concurrent REAL requests to the local model to 1. When the client sends multiple
+        // real requests concurrently (e.g., retries, or two overlapping turns), the model
+        // processes them in parallel, which slows down each one. By limiting concurrent real
+        // requests to 1, the model can focus on the real request and generate it faster. Probes
+        // are excluded (see above) so they never contend with a long prefill.
+        if (!isProbeRequest)
+        {
+            await _localRequestSemaphore.WaitAsync(handlerToken).ConfigureAwait(false);
+        }
         try
         {
             await HandleChatCompletionsCoreAsync(context, handlerToken).ConfigureAwait(false);
         }
         finally
         {
-            _localRequestSemaphore.Release();
+            if (!isProbeRequest)
+            {
+                _localRequestSemaphore.Release();
+            }
         }
     }
 
@@ -838,6 +925,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 }
             }
 
+            // VIBE_STATE re-injection (stage 0): when enabled, prepend the session's persistent
+            // task/state/next to the system prompt so the model always knows "where we are" even
+            // after the working context has been paged away. This is a cheap, prefix-safe system
+            // suffix (a few lines) and runs before forward-prune so the pruned turn still carries
+            // the current vibe. No-op when disabled or when no VIBE_STATE.md exists yet.
+            if (!isProbeRequest && hotContext > 0)
+            {
+                InjectVibeState(payload, model, Str(state, "local_variant"));
+            }
+
             // Forward pruning: a per-turn fill throttle. On EVERY local turn, as it happens, trim
             // the turn's own waste (dedupe, collapse repeated tool loops, truncate oversized older
             // tool results) so the context fills more slowly. This is NOT conventional compaction
@@ -854,7 +951,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // turn's own measurement will reflect the pruned history anyway.
             if (!isProbeRequest && hotContext > 0 && GetForwardPruneEnabled?.Invoke(model, Str(state, "local_variant")) == true)
             {
-                var forwardPruned = ForwardPrune.PruneTurn(payload, hotContext, measuredPromptTokens);
+                // Paged context: when the context engine is wired up and paging is enabled, use
+                // its PageContext (which passes the swap store so the truncate stage spills
+                // oversized bodies and leaves a swap_id pointer — lossless). When paging is off or
+                // the engine is not wired up, fall back to the direct ForwardPrune.PruneTurn call
+                // (the lossy head+tail stub, identical to pre-paging behavior).
+                var forwardPruned = (ContextEngine is not null && ContextEngine.IsContextPagingEnabled())
+                    ? ContextEngine.PageContext(payload, hotContext, measuredPromptTokens, swapStore: SwapStore)
+                    : ForwardPrune.PruneTurn(payload, hotContext, measuredPromptTokens);
                 forwardPruneSummary = forwardPruned.Pruned
                     ? "pruned " + forwardPruned.TokensSaved + " tokens (" + string.Join(", ", forwardPruned.Stages.Select(s => s.Split(':')[0].Trim())) + ")"
                     : "nothing to prune";
@@ -1525,6 +1629,22 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     ? " · " + forwardPruneSummary 
                     : string.Empty;
                 Log("[turn " + SharedTurnCounter + "] " + routeKind + " · " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms" + pruneBit);
+
+                // DIAG (temporary): one line that ties together the measured prompt size, which
+                // context transforms fired this turn, and whether the client reinflates the context.
+                // This lets us see from the log whether the prompt is large (context-size problem)
+                // or small-but-reprefilled (cache-miss problem), and which transform is active.
+                // Remove once the prefill behavior is understood.
+                if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+                {
+                    var reinflate = GetUserClientReinflatesContext?.Invoke() == true;
+                    var fpOn = GetForwardPruneEnabled?.Invoke(model, Str(state, "local_variant")) == true;
+                    Log("[prefill-diag] turn=" + SharedTurnCounter
+                        + " promptTokens=" + measuredPromptTokens
+                        + " reinflate=" + reinflate
+                        + " forwardPruneGate=" + fpOn
+                        + " pruneFired=" + (forwardPruneSummary is not null));
+                }
             }
             HttpResponseMessage? response = null;
             var loadingRetries = 0;
@@ -1981,6 +2101,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 }
                 EmitContextEvent("upstream_ok", $"provider={provider} model={model} status={status} stream=true");
                 NoteSuccessfulUpstream(routeKind, provider, model, overlayVariant, compactApplied, reloadOffered, cloudConsentOffered, requestId);
+                // VIBE_STATE is NOT auto-updated after every turn. Auto-updating would change the
+                // reinjection block (Task/State/Next) on every turn, which changes the system prompt
+                // and breaks the KV cache prefix — forcing a full cold prefill every single turn.
+                // Instead, VIBE_STATE is only updated when the model explicitly calls the
+                // update_vibe_state MCP tool, or when the user edits the file directly. This keeps
+                // the injected block stable across turns so the KV cache prefix is preserved.
                 return;
             }
 
@@ -2048,6 +2174,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
             Log($"upstream ok provider={provider} model={model} status={status}");
             EmitContextEvent("upstream_ok", $"provider={provider} model={model} status={status}");
             NoteSuccessfulUpstream(routeKind, provider, model, overlayVariant, compactApplied, reloadOffered, cloudConsentOffered, requestId);
+            // VIBE_STATE is NOT auto-updated after every turn (see the streaming path above for
+            // the full rationale). Auto-updating would change the system prompt every turn and
+            // break the KV cache prefix, forcing a full cold prefill every time.
             }
         }
         catch (Exception ex)
@@ -3559,6 +3688,220 @@ public sealed class FluxMuxGatewayHost : IDisposable
         return string.Empty;
     }
 
+    /// <summary>
+    /// Handles a <c>POST /mcp</c> request: reads the JSON body, dispatches to the
+    /// <see cref="McpControlPlane"/>, and writes the JSON response. 404 when the control plane is
+    /// not wired up; 400 on a malformed body; 200 with the tool's result otherwise. Never throws.
+    /// </summary>
+    private async Task HandleMcpRequestAsync(HttpListenerContext context)
+    {
+        var plane = McpControlPlane;
+        if (plane is null)
+        {
+            await SendOpenAiErrorAsync(context.Response, "MCP not available", 404, "mcp_not_available").ConfigureAwait(false);
+            return;
+        }
+
+        JsonObject? body;
+        try
+        {
+            using var reader = new StreamReader(context.Request.InputStream);
+            var raw = await reader.ReadToEndAsync().ConfigureAwait(false);
+            body = string.IsNullOrWhiteSpace(raw) ? null : JsonNode.Parse(raw) as JsonObject;
+        }
+        catch
+        {
+            await SendOpenAiErrorAsync(context.Response, "Malformed JSON body", 400, "invalid_request").ConfigureAwait(false);
+            return;
+        }
+
+        var result = plane.Handle(body ?? new JsonObject());
+        await SendJsonAsync(context.Response, 200, result).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Stage-0 VIBE_STATE re-injection: when the per-profile toggle is on and a
+    /// <c>VIBE_STATE.md</c> exists, prepends the session's persistent task/state/next to the
+    /// system prompt so the model always knows "where we are" even after the working context has
+    /// been paged away.
+    ///
+    /// This is a prefix-safe system suffix: it is appended to the existing system message (not
+    /// prepended, so the model's original system instructions keep their position and the KV-cache
+    /// prefix stays stable). The block is deliberately terse (a few lines) so it costs almost
+    /// nothing in tokens. No-op when the engine is not wired up, the toggle is off, or no
+    /// VIBE_STATE.md exists yet. All I/O goes through the engine's <c>IContextIo</c> seam, so a
+    /// locked or corrupt file never breaks a turn.
+    /// </summary>
+    private void InjectVibeState(JsonObject payload, string model, string variant)
+    {
+        var engine = ContextEngine;
+        if (engine is null)
+        {
+            return;
+        }
+
+        // Read the live per-profile toggle. Null (profile unresolvable) is treated as on, the
+        // default — matching the forward-prune gate.
+        var enabled = GetVibeStateEnabled?.Invoke(model, variant);
+        if (enabled == false)
+        {
+            return;
+        }
+
+        var block = engine.BuildReinjectionBlock(VibeStatePath);
+        if (string.IsNullOrWhiteSpace(block))
+        {
+            // No VIBE_STATE.md yet, or empty state — nothing to inject.
+            return;
+        }
+
+        var messages = payload["messages"] as JsonArray;
+        if (messages is null || messages.Count == 0)
+        {
+            return;
+        }
+
+        // Find the first system/developer message and append the block to it. If none exists,
+        // insert a new system message at the front (prefix-safe: it becomes the first message).
+        for (var i = 0; i < messages.Count; i++)
+        {
+            if (messages[i] is not JsonObject msg)
+            {
+                continue;
+            }
+
+            var role = Str(msg, "role").Trim().ToLowerInvariant();
+            if (role is "system" or "developer")
+            {
+                var existing = MessageText(msg);
+                msg["content"] = existing.Length > 0 ? existing + "\n\n" + block : block;
+                // DIAG (temporary): hash the injected block so we can see from the log whether the
+                // VIBE_STATE block is changing between turns. A changing block changes the system
+                // prompt, which breaks the KV cache prefix and forces a large re-prefill every turn.
+                // If this hash is stable across turns, the VIBE_STATE block is NOT the cause of the
+                // repeated prefilling. Remove this once the prefill behavior is understood.
+                Log("vibe-state: re-injected " + block.Length + " chars into the system prompt (blockHash=" + StableHash(block) + ")");
+                return;
+            }
+        }
+
+        // No system message present: insert one at the front so the block is prefix-stable.
+        messages.Insert(0, new JsonObject { ["role"] = "system", ["content"] = block });
+        Log("vibe-state: inserted a system message with " + block.Length + " chars at the front (blockHash=" + StableHash(block) + ")");
+    }
+
+    /// <summary>
+    /// DIAG (temporary): a cheap, stable 8-hex-char hash of a string, used only to detect whether
+    /// the VIBE_STATE reinjection block is changing between turns. Not a security hash — just a
+    /// quick "did this string change?" fingerprint for the log. Remove once the prefill behavior
+    /// is understood.
+    /// </summary>
+    private static string StableHash(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            return "empty";
+        }
+
+        unchecked
+        {
+            var hash = 23;
+            foreach (var c in value)
+            {
+                hash = hash * 31 + c;
+            }
+
+            return ((uint)hash).ToString("x8");
+        }
+    }
+
+    /// <summary>
+    /// After each local turn, refresh VIBE_STATE.md with the current task/state/next. This is the
+    /// automatic counterpart to the <c>update_vibe_state</c> MCP tool: instead of the model calling
+    /// the tool explicitly, FluxMux updates the file on every turn so the session's "where we are"
+    /// note stays current without any model involvement.
+    ///
+    /// The update is conservative: it only writes if the state actually changed, and it never
+    /// throws. A failure here must never break a turn.
+    /// </summary>
+    private void UpdateVibeStateAfterTurn(JsonObject payload, string model, string variant)
+    {
+        var engine = ContextEngine;
+        if (engine is null)
+        {
+            return;
+        }
+
+        // Read the live per-profile toggle. Null (profile unresolvable) is treated as on, the
+        // default — matching the forward-prune gate.
+        var enabled = GetVibeStateEnabled?.Invoke(model, variant);
+        if (enabled == false)
+        {
+            return;
+        }
+
+        try
+        {
+            var messages = payload["messages"] as JsonArray;
+            if (messages is null || messages.Count < 2)
+            {
+                return;
+            }
+
+            // Find the last user message (the task) and the last assistant message (the state).
+            string lastUser = string.Empty;
+            string lastAssistant = string.Empty;
+            for (var i = messages.Count - 1; i >= 0; i--)
+            {
+                if (messages[i] is not JsonObject msg)
+                {
+                    continue;
+                }
+
+                var role = Str(msg, "role").Trim().ToLowerInvariant();
+                if (role == "user" && string.IsNullOrEmpty(lastUser))
+                {
+                    lastUser = MessageText(msg);
+                }
+                else if (role == "assistant" && string.IsNullOrEmpty(lastAssistant))
+                {
+                    lastAssistant = MessageText(msg);
+                }
+
+                if (!string.IsNullOrEmpty(lastUser) && !string.IsNullOrEmpty(lastAssistant))
+                {
+                    break;
+                }
+            }
+
+            if (string.IsNullOrEmpty(lastUser))
+            {
+                return;
+            }
+
+            // Load the existing state and update it with the new task/state.
+            var existing = engine.LoadVibeState(VibeStatePath);
+            var newState = new VibeState
+            {
+                Task = lastUser.Length > 120 ? lastUser[..120] + "…" : lastUser,
+                State = lastAssistant.Length > 200 ? lastAssistant[..200] + "…" : lastAssistant,
+                Next = existing.Next, // Preserve the next step (the model updates it via tool call or user instruction)
+                Files = existing.Files, // Preserve the files list
+            };
+
+            // Only write if something actually changed (avoid unnecessary disk I/O).
+            if (newState.Task != existing.Task || newState.State != existing.State)
+            {
+                engine.SaveVibeState(VibeStatePath, newState);
+                Log("vibe-state: auto-updated after turn (task=" + newState.Task.Length + " chars, state=" + newState.State.Length + " chars)");
+            }
+        }
+        catch
+        {
+            // A VIBE_STATE update failure must never break a turn.
+        }
+    }
+
     private static string MessageText(JsonNode? msg)
     {
         if (msg is not JsonObject obj)
@@ -4353,8 +4696,18 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 // SAFETY CAP: Even if the estimate is large (e.g. inflated by a corrupted learned
                 // model), the dialog must appear after 120s. This prevents the user from being
                 // stuck with no options for an unbounded time.
+                //
+                // The effective prefill window is max(estimate, FirstByteDeadline): the estimate
+                // may EXTEND the wait for a genuinely slow prefill, but it must never SHORTEN the
+                // long-load first-byte deadline. A stale estimate from a previous turn (the
+                // estimate is only cleared on launch/abort, not on normal completion) can be far
+                // smaller than the 600s long-load deadline; using min() let a 60s stale estimate
+                // surface the dialog at 60s and then oscillate (StreamRecovered kept returning
+                // true because header bytes were present and the stall deadline was 1800s), spamming
+                // the log for the rest of the prefill. max() keeps the long-load deadline intact.
                 const int PrefillEstimateHardCapSeconds = 120;
-                int effectiveEstimate = Math.Min(CurrentPrefillEstimateSeconds, PrefillEstimateHardCapSeconds);
+                int cappedEstimate = Math.Min(CurrentPrefillEstimateSeconds, PrefillEstimateHardCapSeconds);
+                int effectiveEstimate = Math.Max(cappedEstimate, clock.FirstByteDeadlineSeconds);
                 string reason;
                 if (!clock.GotContentToken && effectiveEstimate > 0)
                 {
@@ -4371,8 +4724,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         }
                         continue;
                     }
-                    // Past the capped prefill window with no content token: fall through to the
-                    // dialog below (reason = first-byte, since no content token has arrived).
+                    // Past the prefill window with no content token: fall through to the dialog
+                    // below (reason = first-byte, since no content token has arrived).
                     reason = LocalStreamHangPolicy.FirstByteReason;
                 }
                 else if (!LocalStreamHangPolicy.ShouldAbort(
@@ -4382,6 +4735,18 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     clock.FirstByteDeadline,
                     clock.StallDeadline,
                     out reason))
+                {
+                    continue;
+                }
+
+                // Oscillation guard: once we have surfaced the "wait longer" dialog for this turn
+                // and the user chose to keep waiting (WaitLongerCount > 0), do NOT re-surface it
+                // every 250ms. The previous cycle already extended the copy timeout; re-asking the
+                // same question on every tick (which is what happened for 897s when the estimate
+                // was stale and StreamRecovered kept returning true) spams the log and the UI.
+                // After a wait-longer choice, rely on ShouldAbort's extended deadlines to detect a
+                // genuinely stuck stream; only re-surface if a NEW stall condition arises.
+                if (clock.WaitLongerCount > 0 && reason == LocalStreamHangPolicy.FirstByteReason)
                 {
                     continue;
                 }

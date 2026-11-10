@@ -411,7 +411,20 @@
                                                                                             ToolTip.Tip="Forward pruning: on every turn, trim this turn's own waste (duplicate messages, repeated tool loops, oversized older tool results) so the context fills more slowly. Conservative — it never touches your current task. A per-turn throttle, separate from Compaction (which summarizes older turns). Toggle takes effect on the next turn, no reload needed." />
                                                                               </StackPanel>
 
-                                                                             <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                  <CheckBox IsChecked="{Binding LocalVibeStateEnabled}" IsEnabled="{Binding VibeStateControlsEnabled}"
+                                                                                            VerticalAlignment="Center"
+                                                                                            Content="Keep session vibe (VIBE_STATE.md)"
+                                                                                            ToolTip.Tip="VIBE_STATE: keeps a small persistent file (VIBE_STATE.md, next to the config) with the session's task / state / next step. On every local turn it is re-injected at the top of the system prompt so the model always knows 'where we are', even after the working context has been paged away. You can read and edit the file directly. Toggle takes effect on the next turn, no reload needed." />
+                                                                              </StackPanel>
+
+                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
+                                                                                  <CheckBox IsChecked="{Binding LocalContextPagingEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
+                                                                                            VerticalAlignment="Center"
+                                                                                            Content="Page context (lossless spill)"
+                                                                                            ToolTip.Tip="Context paging: when forward-prune truncates an oversized older tool result, the full body is spilled to context_swap.json and the prompt carries a short swap_id pointer. The model can read the full body back via the read_swap_log tool, making the truncation lossless. When off, the lossy head+tail stub is used (identical to pre-paging behavior). Toggle takes effect on the next turn, no reload needed." />
+                                                                              </StackPanel>
+<StackPanel Orientation="Horizontal" Spacing="6">
                                                                                  <CheckBox IsChecked="{Binding LocalAutoCompactEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                            VerticalAlignment="Center"
                                                                                            Content="Auto-compact"
@@ -3062,6 +3075,28 @@
                                 </StackPanel>
                             </StackPanel>
                         </GroupBox>
+
+                        <GroupBox Header="Git Checkpoints"
+                                  ToolTip.Tip="Folder where the '📌 Checkpoint' button and the model's git_checkpoint tool create commits. Global setting — applies to all profiles and client types. Leave blank to use the workspace root.">
+                            <StackPanel Margin="8" Spacing="8">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock Text="Checkpoint folder" VerticalAlignment="Center"
+                                               FontSize="11" FontWeight="SemiBold" />
+                                    <TextBox Text="{Binding LocalGitCheckpointDirectory}"
+                                             Width="220"
+                                             VerticalAlignment="Center"
+                                             ToolTip.Tip="The folder where git checkpoint commits are created. Leave blank to use the workspace root (shown below)." />
+                                    <Button Content="Browse…" Command="{Binding BrowseGitCheckpointDirectoryCommand}"
+                                            VerticalAlignment="Center"
+                                            ToolTip.Tip="Pick a folder for git checkpoints." />
+                                    <Button Content="Reset" Command="{Binding ClearGitCheckpointDirectoryCommand}"
+                                            VerticalAlignment="Center"
+                                            ToolTip.Tip="Reset to the workspace root." />
+                                    <TextBlock VerticalAlignment="Center" FontSize="10" Foreground="Gray"
+                                               Text="{Binding GitCheckpointDefaultDirectory, StringFormat='(default: {0})'}" />
+                                </StackPanel>
+                            </StackPanel>
+                        </GroupBox>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -3233,6 +3268,48 @@
                                        VerticalAlignment="Center" />
                         </DockPanel>
                     </Border>
+                    <Border IsVisible="{Binding MemoryGuardWarningBannerVisible}"
+                            Background="{DynamicResource FluxTintAmberBackground}"
+                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="8,6"
+                            views:MarkedText.Tip="{Binding MemoryGuardWarningBannerTooltip}">
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="{Binding MemoryGuardWarningBannerText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="12" />
+                            <WrapPanel>
+                                <Button Content="Stop model now"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding StopModelFromMemoryGuardWarningCommand}"
+                                        ToolTip.Tip="Proactively stop the local model to free up RAM. Your task is safe in the Client app; launch the model (or send a message) to continue." />
+                                <Button Content="Dismiss"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DismissMemoryGuardWarningBannerCommand}"
+                                        ToolTip.Tip="Hide this warning. The model keeps running; if free RAM drops below 4 GiB the memory guard will stop it." />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                    <Border IsVisible="{Binding ParkedTaskBannerVisible}"
+                            Background="{DynamicResource FluxTintAmberBackground}"
+                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="8,6"
+                            views:MarkedText.Tip="{Binding ParkedTaskBannerTooltip}">
+                        <StackPanel Spacing="6">
+                            <TextBlock Text="{Binding ParkedTaskBannerText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="12" />
+                            <WrapPanel>
+                                <Button Content="Dismiss"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DismissParkedTaskBannerCommand}"
+                                        ToolTip.Tip="Hide this notice. Your task is safe in the Client app; launch the model (or send a message) to continue." />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
                     <Border IsVisible="{Binding HailMaryBannerVisible}"
                             Background="{Binding HailMaryBannerBackgroundBrush}"
                             BorderBrush="{Binding HailMaryBannerAccentBrush}"
@@ -3399,6 +3476,7 @@
                                 x:Name="HailMaryButton"
                                 Classes="hailMary"
                                 IsEnabled="{Binding HailMaryButtonEnabled}"
+                                MinWidth="180"
                                 Height="32"
                                 VerticalAlignment="Center"
                                 VerticalContentAlignment="Center"
@@ -3409,7 +3487,21 @@
                                 Foreground="White"
                                 BorderBrush="#333333"
                                 Click="HailMaryButton_Click"
-                                ToolTip.Tip="Prunes the older turns from the chat, when the current turn lacks sufficient context space to complete, and your normal auto compact method didn&#39;t activate in time. Recent turns and your last task are kept, and your chat app window still keeps the full conversation.&#10;&#10;Click to choose how much to prune (Gentle / Balanced / Aggressive) and whether to also strip older images.&#10;&#10;Warning: the model forgets the pruned turns, so it may repeat work, lose understanding or lose track of early decisions. Use this when you really want to keep this chat going on a local model and don&#39;t have a suitable bigger-context local or cloud model to switch to. This may buy you time at the expense of fidelity – so you may want to use the opportunity to steer the chat towards a graceful end" />
+                                ToolTip.Tip="When the current turn lacks sufficient context space to complete, and your normal auto-compact didn&#39;t activate in time.&#10;&#10;For most clients: prunes older turns from the forwarded chat (recent turns and your last task are kept). The model forgets the pruned turns, so it may repeat work or lose track of early decisions.&#10;&#10;For Cline-like clients (reinflating): triggers Cline&#39;s own /smol (compact) command via keyboard simulation. This writes a .compaction.json that Cline reads on subsequent turns, actually reducing the context. Focus shifts to VS Code briefly.&#10;&#10;Warning: use this when you really want to keep this chat going on a local model and don&#39;t have a suitable bigger-context model to switch to. This may buy you time at the expense of fidelity." />
+                        <Button Grid.Column="5"
+                                x:Name="GitCheckpointButton"
+                                MinWidth="100"
+                                Height="32"
+                                VerticalAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                FontSize="12"
+                                Content="📌 Checkpoint"
+                                Background="#1A1A1A"
+                                Foreground="White"
+                                BorderBrush="#333333"
+                                Command="{Binding RunGitCheckpointCommand}"
+                                ToolTip.Tip="Creates a git checkpoint in the workspace. This is a safety net: if the model goes off the rails, you can reset to this checkpoint.&#10;&#10;The checkpoint is a git commit with a message like 'fluxmux-checkpoint: manual checkpoint' so it's easy to find and reset to later." />
                         <Popup x:Name="HailMaryPickerPopup"
                                 IsOpen="False"
                                 PlacementTarget="{Binding ElementName=HailMaryButton}"
@@ -3463,21 +3555,7 @@
                                    HorizontalAlignment="Left"
                                    Opacity="0.9"
                                    Text="{Binding HailMaryOutcome}" />
-                        <Button Grid.Column="5"
-                                VerticalAlignment="Center"
-                                Height="32"
-                                VerticalContentAlignment="Center"
-                                MinWidth="72"
-                                Padding="10,4"
-                                FontSize="12"
-                                FontWeight="SemiBold"
-                                Content="■ Stop model"
-                                Background="#DC2626"
-                                Foreground="White"
-                                BorderBrush="#991B1B"
-                                Command="{Binding KillLocalModelNowCommand}"
-                                ToolTip.Tip="Immediately stop the local model (llama-server). Use this if the model is freezing the PC due to running out of memory. The next local chat will reload it. Shortcut: Ctrl+Shift+K." />
-                    </Grid>
+                        </Grid>
                     <TextBlock FontSize="11"
                                Opacity="0.78"
                                TextWrapping="NoWrap"
@@ -4068,7 +4146,7 @@
                                      container, and the divider-resize must not reflow the text.
                                      The ETA sits in the rightmost column (right edge of the row). -->
                                  <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" Margin="0,2,0,0" Height="16" ClipToBounds="False">
-                                    <!-- Left text: phase label (prefill status, generation phase, or idle).
+                                    <!-- Left text: phase label (prefill status, thinking, generation phase, or idle).
                                          The prefill label pulses (like the generation phase text) so the
                                          user sees live activity while the context is being read. -->
                                     <TextBlock x:Name="PrefillStatusTextBlock" Grid.Column="1"
@@ -4077,6 +4155,15 @@
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillStatusText}"
                                                IsVisible="{Binding IsBottomBarPrefill}" />
+                                    <!-- Thinking phase: shown when the model has finished prefilling
+                                         and is thinking before generating. The bar keeps running
+                                         (driven by the prefill timer) so the user sees activity. -->
+                                    <TextBlock x:Name="ThinkingStatusTextBlock" Grid.Column="1"
+                                               FontSize="11"
+                                               Foreground="#000000"
+                                               VerticalAlignment="Center"
+                                               Text="Thinking…"
+                                               IsVisible="{Binding IsBottomBarThinking}" />
                                      <!-- Generation phase: line 1 = "Generating…" + detail (seconds/tokens/speed),
                                           line 2 = ETA. Vertical layout so the ETA sits on its own line
                                           below the detail text instead of overlapping it. -->
@@ -4116,6 +4203,14 @@
                                                VerticalAlignment="Center"
                                                Text="{Binding PrefillEtaText}"
                                                IsVisible="{Binding IsBottomBarPrefill}" />
+                                    <!-- ETA during thinking phase: the prefill timer keeps running,
+                                         so the ETA continues to count down while the model thinks. -->
+                                    <TextBlock Grid.Column="2"
+                                               FontSize="11"
+                                               Foreground="#000000"
+                                               VerticalAlignment="Center"
+                                               Text="{Binding PrefillEtaText}"
+                                               IsVisible="{Binding IsBottomBarThinking}" />
                                 </Grid>
                             </Grid>
                             <WrapPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">

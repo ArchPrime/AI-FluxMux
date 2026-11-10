@@ -373,6 +373,12 @@ public partial class MainViewModel : ViewModelBase
     // the running max keeps the bar monotonically non-decreasing — it creeps toward 100% and
     // only resets to 0 when the prefill phase actually ends (first content token).
     private double _prefillMaxProgress;
+    // The minimum remaining-seconds value shown so far this turn. The ETA text must never
+    // jump backwards (e.g. from "finishing…" back to "~30s remaining") when the estimate is
+    // extended because the real prefill is outlasting it. Clamping to the running min keeps
+    // the ETA monotonically non-increasing — it counts down to 0 and stays there until the
+    // prefill phase actually ends.
+    private int _prefillMinRemainingSeconds = int.MaxValue;
     private int _prefillPromptTokens;
     private bool _prefillIsCold;
     private bool _prefillIsRamSpill;
@@ -437,6 +443,10 @@ public partial class MainViewModel : ViewModelBase
         {
             SafeUiInvoke(() => ApplyLocalParkedAfterIdle(message));
         };
+        _runtimeService.MemoryGuardWarning += message =>
+        {
+            SafeUiInvoke(() => ShowMemoryGuardWarningBanner(message));
+        };
         _runtimeService.PortRulesPostMortemNotice += message =>
         {
             SafeUiInvoke(() => ApplyPortRulesPostMortem(message));
@@ -494,6 +504,16 @@ public partial class MainViewModel : ViewModelBase
                     && fullContext > vramContext;
                 int spillTokens = isRamSpill ? promptTokens - vramContext : 0;
 
+                // Detect long-load profile (YaRN / extended-context / GPU+CPU) for the estimate.
+                // A long-load profile uses the RAM-spill prefill model even when the prompt is
+                // not strictly > VRAM context, because the KV cache is large and the prefill
+                // speed is dominated by RAM bandwidth, not VRAM. Using the VRAM warm speed
+                // (fitted to small, VRAM-resident prefills) underestimates the prefill time by
+                // 10-100x for large prompts on these profiles, which is what caused the 897s
+                // stall to be misreported as a 60s estimate.
+                var offloadMode = _runtimeService.ManagedLocalGpuOffloadMode;
+                bool isLongLoadProfile = LocalLoadingRetryPolicy.IsLongLoadProfile(fullContext, offloadMode);
+
                 PrefillStatusText = promptTokens > 0
                     ? "Prefilling context… ~" + FormatTokenCount(promptTokens) + " tokens"
                     : "Prefilling context…";
@@ -513,65 +533,24 @@ public partial class MainViewModel : ViewModelBase
                 _prefillIsRamSpill = isRamSpill;
                 var prefillModel = GetOrCreatePrefillModel();
 
-                if (isRamSpill)
+                // Reset the supervisor's prefill speed calibration when the model changes
+                // (cold start or recent model switch). The last actual prefill speed is
+                // from a different model and would mislead the estimate.
+                if (_prefillIsCold)
                 {
-                    // RAM-spill prefill: the prompt exceeds the VRAM-resident context, so the
-                    // overflow is running in ordinary RAM. The prefill time is dominated by the
-                    // TOTAL prompt size, not just the overflow.
-                    //
-                    // Use the dedicated RAM-spill model (which learns from actual RAM-spill
-                    // events on this hardware) for the estimate. This is more accurate than
-                    // the VRAM model, which is fitted to faster VRAM-resident prefills.
-                    //
-                    // Floor at 60s (RAM-spill prefill is never instant), cap at 1800s (30 min)
-                    // to avoid absurd estimates for very large prompts.
-                    int baseEstimate = prefillModel.RamSpillEstimateSeconds(promptTokens);
-                    if (baseEstimate <= 0)
-                    {
-                        baseEstimate = 60; // Fallback when no data exists yet
-                    }
-                    _prefillEstimatedSeconds = baseEstimate;
-                    _prefillEstimatedSeconds = Math.Clamp(_prefillEstimatedSeconds, 60, 1800);
+                    _runtimeService.Supervisor?.ResetPrefillSpeedCalibration();
                 }
-                else
+
+                // Delegate the estimate to the supervisor (single source of truth). The
+                // supervisor's PredictPrefillSeconds applies the same RAM-spill / long-load
+                // branch, the conservative large-prompt multiplier, and the floor/cap that
+                // were previously inlined here. This keeps the UI progress bar and the
+                // gateway hang-dialog on the same number.
+                _prefillEstimatedSeconds = _runtimeService.PredictPrefillSeconds(
+                    promptTokens, _prefillIsCold, isRamSpill, isLongLoadProfile, prefillModel);
+                if (_prefillEstimatedSeconds <= 0)
                 {
-                    // VRAM prefill (or cold start). Use the learned estimate.
-                    //
-                    // The learned model is fitted on FULL prefills (cold starts), so it's the
-                    // right model to use for cold-start estimates. Only fall back to the hardcoded
-                    // 60s when no data exists yet.
-                    int baseEstimate = prefillModel.EstimateSeconds(promptTokens, isColdStart);
-                    bool hasLearnedData = baseEstimate > 0;
-                    if (baseEstimate <= 0)
-                    {
-                        baseEstimate = 60; // Fallback when no data exists yet
-                    }
-
-                    // Conservative multiplier for large prompts: prefill speed can drop as the
-                    // context grows (KV cache pressure, attention over a long sequence), so the
-                    // linear estimate from smaller samples can be optimistic. Apply it ONLY when
-                    // the learned model has no data yet — when it does, the learned speed already
-                    // reflects the real hardware at this prompt size, and multiplying it would
-                    // make the estimate (and the hang-detection wait) far too pessimistic. This
-                    // was the "excessive wait": a warm 22K-token prefill that finishes in ~8s was
-                    // floored at 60s and, for >32K prompts, multiplied by 1.5x, so the UI showed
-                    // "up to ~1-2 minutes" and the hang dialog waited that long.
-                    double multiplier = 1.0;
-                    if (!hasLearnedData)
-                    {
-                        if (promptTokens > 65536) multiplier = 2.0;
-                        else if (promptTokens > 32768) multiplier = 1.5;
-                    }
-                    _prefillEstimatedSeconds = (int)Math.Ceiling(baseEstimate * multiplier);
-
-                    // Floor: when the learned model has data, trust it down to a small floor
-                    // (5s) — a warm VRAM prefill can genuinely finish in seconds, and flooring
-                    // it at 15s (or 60s) is what made the UI over-promise. When there is no
-                    // learned data, keep the conservative 30s floor for large prompts (even a
-                    // fast VRAM prefill of 50K+ tokens takes at least ~30s). Cap at 1800s.
-                    int floor = hasLearnedData ? 5 : (promptTokens > 32768 ? 30 : 0);
-                    _prefillEstimatedSeconds = Math.Max(_prefillEstimatedSeconds, floor);
-                    _prefillEstimatedSeconds = Math.Clamp(_prefillEstimatedSeconds, 0, 1800);
+                    _prefillEstimatedSeconds = 60; // Safety fallback when no learned data exists yet
                 }
                 StartPrefillTimer();
 
@@ -624,6 +603,7 @@ public partial class MainViewModel : ViewModelBase
                 if (PrefillInProgress)
                 {
                     PrefillStatusText = "Thinking…";
+                    BottomBarPhase = 2; // Thinking
                 }
             });
         };
@@ -645,6 +625,9 @@ public partial class MainViewModel : ViewModelBase
                     {
                         GetOrCreatePrefillModel().RecordSample(_prefillPromptTokens, elapsedMs, _prefillIsCold);
                     }
+                    // Live telemetry: record the actual prefill speed so the supervisor can
+                    // calibrate the next estimate when the learned model has no data.
+                    _runtimeService.Supervisor.RecordActualPrefillSpeed(_prefillPromptTokens, elapsedMs);
                 }
 
                 // Complete the prefill bar, then reset it to 0 so the generation phase can
@@ -652,6 +635,12 @@ public partial class MainViewModel : ViewModelBase
                 // "new phase starting" rather than the bar sitting stuck at 100%.
                 StopPrefillTimer();
                 PrefillProgress = 0.0;
+                // Clear the prefill estimate now that prefill is done. The estimate is only
+                // cleared on launch/abort otherwise, so a stale value from this turn would
+                // persist into the next turn and could shorten the next turn's hang-detection
+                // window (e.g. a 60s stale estimate vs. a 600s long-load deadline). Clearing it
+                // here means the next turn's watchdog falls back to the FirstByteDeadline.
+                _runtimeService.ClearPrefillEstimate();
                 // Clear the prefill text BEFORE switching to the generation phase so the
                 // two labels never overlap in the same Grid column. The phase switch makes
                 // the prefill TextBlock invisible and the generation StackPanel visible in
@@ -659,7 +648,7 @@ public partial class MainViewModel : ViewModelBase
                 PrefillStatusText = string.Empty;
                 PrefillEtaText = string.Empty;
                 PrefillInProgress = false;
-                BottomBarPhase = 2; // Generate
+                BottomBarPhase = 3; // Generate
                 StartGenerationTimer();
             });
         };
@@ -786,7 +775,9 @@ public partial class MainViewModel : ViewModelBase
     public const string UserClientReinflationWarning =
         "AI-FluxMux compaction can shorten what it sends to the model from your end. " +
         "But endpoints that resend the full chat history every turn (e.g. Cline) will keep reinflating the context at their end from the full chat. " +
-        "If you use Cline or similar clients, you will need to manage compaction from the client side and/or start new chats more frequently.";
+        "Forward-prune and context-paging are disabled for these clients (they break the KV cache). " +
+        "VIBE_STATE remains available (it's prefix-safe). " +
+        "The Hail Mary button triggers Cline's /smol command to compact the conversation from the client side.";
 
     /// <summary>
     /// True when the user's client reinflates the context (forwards the full chat each turn).
@@ -802,12 +793,24 @@ public partial class MainViewModel : ViewModelBase
     public bool CompactionControlsEnabled => !UserClientReinflatesContext;
 
     /// <summary>
+    /// True when the VIBE_STATE checkbox should be enabled. VIBE_STATE is prefix-safe
+    /// (its block hash is stable across turns, so it does NOT break the KV cache prefix),
+    /// so it remains available for ALL client types including Cline-like. This is unlike
+    /// forward-prune and context-paging, which are defeated by reinflation and break the
+    /// cache — those are gated on CompactionControlsEnabled.
+    /// </summary>
+    public bool VibeStateControlsEnabled => true;
+
+    /// <summary>
     /// True when the Hail Mary button should be enabled. The button is always visible,
     /// but greyed out when:
-    /// - The user's client reinflates the context (e.g. Cline), OR
     /// - There's no context data yet (no turns have been measured).
+    ///
+    /// Note: when the user's client reinflates the context (e.g. Cline), the button is
+    /// still enabled — but it triggers Cline's /smol command instead of a middle-cut,
+    /// because a middle-cut is undone by Cline's reinflation on the next turn.
     /// </summary>
-    public bool HailMaryButtonEnabled => CompactionControlsEnabled && HailMaryButtonVisible;
+    public bool HailMaryButtonEnabled => HailMaryButtonVisible;
 
     /// <summary>
     /// Tooltip for the "User client" dropdown. Explains that this tells FluxMux which
@@ -3069,6 +3072,109 @@ public partial class MainViewModel : ViewModelBase
     }
 
     [RelayCommand]
+    private async Task RunGitCheckpoint()
+    {
+        var owner = GetMainWindowStorageProvider();
+        if (owner is null)
+        {
+            StatusMessage = "Checkpoint picker unavailable in current session.";
+            return;
+        }
+
+        // Always confirm the save location before committing. The picker opens at the
+        // last-used location (the configured checkpoint dir, or the workspace root), so
+        // staying in one project is a single click, and switching projects is one navigate.
+        IStorageFolder? startLocation = null;
+        try
+        {
+            var startPath = !string.IsNullOrWhiteSpace(LocalGitCheckpointDirectory)
+                ? LocalGitCheckpointDirectory
+                : GitCheckpointDefaultDirectory;
+            if (!string.IsNullOrWhiteSpace(startPath) && Directory.Exists(startPath))
+            {
+                startLocation = await owner.TryGetFolderFromPathAsync(startPath);
+            }
+        }
+        catch
+        {
+        }
+
+        var selected = await owner.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Confirm Git Checkpoint Location",
+            SuggestedStartLocation = startLocation,
+            AllowMultiple = false
+        });
+
+        var folder = selected.FirstOrDefault();
+        if (folder is null)
+        {
+            StatusMessage = "Checkpoint cancelled.";
+            return;
+        }
+
+        var chosenPath = folder.Path.LocalPath;
+        LocalGitCheckpointDirectory = chosenPath;
+        SaveCurrentSelections();
+
+        StatusMessage = "Creating git checkpoint…";
+        var result = await _runtimeService.RunGitCheckpointAsync("manual checkpoint", chosenPath);
+        StatusMessage = result.IsSuccess
+            ? "Checkpoint created: " + result.Details
+            : "Checkpoint failed: " + result.Details;
+    }
+
+    [RelayCommand]
+    private async Task BrowseGitCheckpointDirectory()
+    {
+        var desktop = Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;
+        var owner = desktop?.MainWindow;
+        if (owner is null || owner.StorageProvider is null)
+        {
+            StatusMessage = "Folder picker unavailable in current session.";
+            return;
+        }
+
+        IStorageFolder? startLocation = null;
+        try
+        {
+            var startPath = !string.IsNullOrWhiteSpace(LocalGitCheckpointDirectory)
+                ? LocalGitCheckpointDirectory
+                : GitCheckpointDefaultDirectory;
+            if (!string.IsNullOrWhiteSpace(startPath) && Directory.Exists(startPath))
+            {
+                startLocation = await owner.StorageProvider.TryGetFolderFromPathAsync(startPath);
+            }
+        }
+        catch
+        {
+        }
+
+        var selected = await owner.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Select Git Checkpoint Directory",
+            SuggestedStartLocation = startLocation,
+            AllowMultiple = false
+        });
+
+        var folder = selected.FirstOrDefault();
+        if (folder is not null)
+        {
+            LocalGitCheckpointDirectory = folder.Path.LocalPath;
+            SaveCurrentSelections();
+            StatusMessage = "Git checkpoint directory updated.";
+        }
+    }
+
+    [RelayCommand]
+    private void ClearGitCheckpointDirectory()
+    {
+        LocalGitCheckpointDirectory = string.Empty;
+        SaveCurrentSelections();
+        StatusMessage = "Git checkpoint directory reset to workspace root.";
+    }
+
+    [RelayCommand]
     private async Task SwitchRecoveryLocal()
     {
         var hotHop = RouteRecoveryPolicy.IsHotHopSource(_runtimeService.ReadCloudRecommend()?.Source)
@@ -4147,6 +4253,62 @@ public partial class MainViewModel : ViewModelBase
         }
     }
 
+    // Memory-guard warning banner: shown when free RAM drops below the warning threshold
+    // (8 GiB) and stays there for 60 seconds. Prompts the user to free up RAM (compact the
+    // chat, close other apps, or proactively stop the model) BEFORE the hard-stop fires at
+    // 4 GiB. The model keeps running during the warning.
+    [ObservableProperty]
+    public partial bool MemoryGuardWarningBannerVisible { get; set; }
+
+    [ObservableProperty]
+    public partial string MemoryGuardWarningBannerText { get; set; } = string.Empty;
+
+    [ObservableProperty]
+    public partial string MemoryGuardWarningBannerTooltip { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Shows the memory-guard warning banner with the given message. Called from the
+    /// <c>MemoryGuardWarning</c> event on the runtime service.
+    /// </summary>
+    public void ShowMemoryGuardWarningBanner(string message)
+    {
+        MemoryGuardWarningBannerText = message;
+        MemoryGuardWarningBannerTooltip = "The local model is still running. If free RAM drops below 4 GiB the memory guard will stop it to protect the PC from running out of memory. To avoid an unexpected stop: compact the chat, close other apps, or stop the model now.";
+        MemoryGuardWarningBannerVisible = true;
+        AppendDiagnosticEntry("MEMGUARD-WARN", message, "AI-FluxMux");
+    }
+
+    [RelayCommand]
+    private void DismissMemoryGuardWarningBanner()
+    {
+        MemoryGuardWarningBannerVisible = false;
+        try
+        {
+            _runtimeService?.AcknowledgeMemoryGuardWarning();
+        }
+        catch
+        {
+            // Best-effort; never block the UI on an acknowledgment failure.
+        }
+    }
+
+    [RelayCommand]
+    private async void StopModelFromMemoryGuardWarning()
+    {
+        MemoryGuardWarningBannerVisible = false;
+        try
+        {
+            if (_runtimeService is { } svc)
+            {
+                await svc.StopLocalModelForMemoryGuardAsync();
+            }
+        }
+        catch
+        {
+            // Best-effort; the parked-task banner will surface if the stop succeeds.
+        }
+    }
+
     /// <summary>
     /// Always-visible Hail Mary button in Diagnostics. Shown when a local model is loaded
     /// and the Context gauge is tracking a real prompt (promptTokens > 0). The operator can
@@ -4419,16 +4581,18 @@ public partial class MainViewModel : ViewModelBase
     // phase enum makes the three states mutually exclusive by construction.
 
     [ObservableProperty]
-    private int _bottomBarPhase; // 0 = Idle, 1 = Prefill, 2 = Generate
+    private int _bottomBarPhase; // 0 = Idle, 1 = Prefill, 2 = Thinking, 3 = Generate
 
     public bool IsBottomBarIdle => BottomBarPhase == 0;
     public bool IsBottomBarPrefill => BottomBarPhase == 1;
-    public bool IsBottomBarGenerate => BottomBarPhase == 2;
+    public bool IsBottomBarThinking => BottomBarPhase == 2;
+    public bool IsBottomBarGenerate => BottomBarPhase == 3;
 
     partial void OnBottomBarPhaseChanged(int value)
     {
         OnPropertyChanged(nameof(IsBottomBarIdle));
         OnPropertyChanged(nameof(IsBottomBarPrefill));
+        OnPropertyChanged(nameof(IsBottomBarThinking));
         OnPropertyChanged(nameof(IsBottomBarGenerate));
         OnPropertyChanged(nameof(IsIdle));
     }
@@ -4503,6 +4667,8 @@ public partial class MainViewModel : ViewModelBase
     private void StartPrefillTimer()
     {
         _prefillTimer?.Stop();
+        _prefillMaxProgress = 0.0;
+        _prefillMinRemainingSeconds = int.MaxValue;
         _prefillTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _prefillTimer.Tick += (_, _) =>
         {
@@ -4541,6 +4707,12 @@ public partial class MainViewModel : ViewModelBase
             PrefillProgress = _prefillMaxProgress;
 
             var remaining = Math.Max(0, _prefillEstimatedSeconds - (int)elapsedSeconds);
+            // Never let the ETA jump backwards: when the estimate is extended above (because
+            // the real prefill is outlasting it), `remaining` would snap back up (e.g. from 0
+            // to 30). Clamp to the running min so the ETA is monotonically non-increasing —
+            // it counts down to 0 and stays there until the prefill phase actually ends.
+            _prefillMinRemainingSeconds = Math.Min(_prefillMinRemainingSeconds, remaining);
+            remaining = _prefillMinRemainingSeconds;
             var speed = Services.PrefillPerformanceModel.FormatSpeed(GetOrCreatePrefillModel().CurrentSpeedTokensPerSec);
             PrefillEtaText = remaining > 0
                 ? "~" + remaining + "s remaining" + (string.IsNullOrEmpty(speed) ? "" : " · " + speed)
@@ -4767,6 +4939,44 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand(CanExecute = nameof(CanHailMaryShrinkTurn))]
     private void HailMaryShrinkTurn()
     {
+        // When the user's client reinflates the context (e.g. Cline), a middle-cut is
+        // defeated: Cline sends the full history again on the next turn, undoing the cut
+        // and breaking the KV cache prefix. Instead, trigger Cline's own /smol command,
+        // which writes a .compaction.json file that Cline reads on subsequent turns.
+        if (UserClientReinflatesContext)
+        {
+            System.Diagnostics.Debug.WriteLine("[HailMary] Cline-like mode: triggering /smol via keyboard simulation");
+            HailMaryBannerVisible = false;
+            HailMaryQueued = true;
+            SetHailMaryOutcome("Triggering Cline's /smol command…");
+            StatusMessage = "Triggering Cline's /smol (compact) command. Focus will shift to VS Code briefly.";
+
+            // Run on a background thread so the UI doesn't freeze during the keyboard
+            // simulation (which includes Thread.Sleep calls).
+            _ = System.Threading.Tasks.Task.Run(() =>
+            {
+                var result = ClineSmolTrigger.TriggerSmol();
+                System.Diagnostics.Debug.WriteLine("[HailMary] ClineSmolTrigger result: " + result);
+                // Update the UI on the main thread.
+                global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    if (result.Success)
+                    {
+                        SetHailMaryOutcome("Cline's /smol triggered. Cline should now be compacting the conversation.");
+                        StatusMessage = "Cline's /smol command was triggered. Cline should now be compacting the conversation. If nothing happens, type /smol manually in Cline's chat input.";
+                    }
+                    else
+                    {
+                        SetHailMaryOutcome("Failed to trigger Cline's /smol: " + result.Message);
+                        StatusMessage = "Failed to trigger Cline's /smol automatically. Please type /smol manually in Cline's chat input.";
+                    }
+                    HailMaryQueued = false;
+                    ResetHailMaryPicker();
+                });
+            });
+            return;
+        }
+
         // The non-destructive prune pipeline (stages 1-4) already ran automatically when the
         // turn 400'd on context overflow. This button runs a one-off REAR-context prune: it
         // drops older conversational turns (the "rear") so the full forward turn can complete
@@ -7794,6 +8004,43 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     private bool _localForwardPruneEnabled = true;
 
+    /// <summary>
+    /// Per-profile VIBE_STATE toggle ("LocalVibeStateEnabled", default on). When on, the context
+    /// engine re-injects the session's task/state/next at the top of every local turn so the model
+    /// always knows "where we are" even after the working context has been paged away. Read live
+    /// each turn, so toggling takes effect on the next turn without a reload. Persisted per profile
+    /// in the config.
+    /// </summary>
+    [ObservableProperty]
+    private bool _localVibeStateEnabled = true;
+
+    /// <summary>
+    /// Per-profile context-paging toggle ("LocalContextPagingEnabled", default on). When on, the
+    /// forward-prune truncate stage spills oversized older tool-result bodies to the swap store
+    /// and leaves a short swap_id pointer in the prompt (lossless: the model can read the full
+    /// body back via read_swap_log). When off, the lossy head+tail stub is used (identical to
+    /// pre-paging behavior). Read live each turn, so toggling takes effect on the next turn
+    /// without a reload. Persisted per profile in the config.
+    /// </summary>
+    [ObservableProperty]
+    private bool _localContextPagingEnabled = true;
+
+    /// <summary>
+    /// The directory that the "📌 Checkpoint" button (and the model's git_checkpoint tool) commits
+    /// to. Empty means "use the workspace root" (the parent of the config file's folder). This is a
+    /// global setting, not per-profile: the git repo location is not tied to a model profile.
+    /// Persisted at the top level of the config as "LocalGitCheckpointDirectory".
+    /// </summary>
+    [ObservableProperty]
+    private string _localGitCheckpointDirectory = string.Empty;
+
+    /// <summary>
+    /// The workspace root directory, shown in the Settings UI as the default checkpoint location.
+    /// Populated when the runtime service is available.
+    /// </summary>
+    [ObservableProperty]
+    private string _gitCheckpointDefaultDirectory = string.Empty;
+
     public ObservableCollection<LocalAutoCompactModeOption> LocalAutoCompactModeOptions { get; } =
     [
         new LocalAutoCompactModeOption { Value = "port-rules", Display = "Port rules default" },
@@ -9165,9 +9412,12 @@ public partial class MainViewModel : ViewModelBase
         // (and any later launch of the same file) is a warm RAM read, not a cold NVMe read.
         // This is the single biggest factor in cold-vs-warm launch time, and it's what lets
         // a cold YaRN launch (big KV allocation + cold disk) finish instead of timing out.
+        // Show a progress indicator while the prewarm is running so the user knows the model
+        // is being prewarmed, not that the launch is stuck.
         var modelPathForWarm = ResolveLocalModelPath(model);
         if (!string.IsNullOrWhiteSpace(modelPathForWarm))
         {
+            StatusMessage = "Prewarming model file into page cache...";
             _runtimeService.PreWarmModelPageCache(modelPathForWarm);
         }
 
@@ -13708,6 +13958,8 @@ public partial class MainViewModel : ViewModelBase
         LocalExperimentalHardwareTuneEnabled = _config.GetBool("LocalExperimentalHardwareTuneEnabled", LocalExperimentalHardwareTuneEnabled);
         LocalVisionEnabled = _config.GetBool("LocalVisionEnabled", LocalVisionEnabled);
         LocalVisionProjectorPath = FirstNonEmpty(_config.GetString("LocalVisionProjectorPath", LocalVisionProjectorPath), LocalVisionProjectorPath);
+        LocalGitCheckpointDirectory = _config.GetString("LocalGitCheckpointDirectory", string.Empty)?.Trim() ?? string.Empty;
+        GitCheckpointDefaultDirectory = _runtimeService.WorkspaceRoot;
 
         var maxImageEdge = _config.GetInt("LocalVisionMaxImageEdge", (int)LocalVisionMaxImageEdge);
         if (maxImageEdge < 256 || maxImageEdge > 4096)
@@ -15310,6 +15562,7 @@ public partial class MainViewModel : ViewModelBase
         _config.SetBool("LocalVisionEnabled", LocalVisionEnabled);
         _config.SetString("LocalVisionProjectorPath", LocalVisionProjectorPath);
         _config.SetInt("LocalVisionMaxImageEdge", (int)LocalVisionMaxImageEdge);
+        _config.SetString("LocalGitCheckpointDirectory", LocalGitCheckpointDirectory?.Trim() ?? string.Empty);
         _config.SetString("SwitchBenchmarkOrder", SelectedSwitchBenchmarkOrder);
         _config.SetString("SwitchBenchmarkProfileA", SelectedSwitchBenchmarkProfileA?.Key ?? string.Empty);
         _config.SetString("SwitchBenchmarkProfileB", SelectedSwitchBenchmarkProfileB?.Key ?? string.Empty);
@@ -20917,6 +21170,8 @@ public partial class MainViewModel : ViewModelBase
         settings["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled;
         settings["LocalAutoCompactMode"] = LocalAutoCompactMode;
         settings["LocalForwardPruneEnabled"] = LocalForwardPruneEnabled;
+        settings["LocalVibeStateEnabled"] = LocalVibeStateEnabled;
+        settings["LocalContextPagingEnabled"] = LocalContextPagingEnabled;
         settings["LocalAutoCompactTriggerPercent"] = ((int)LocalAutoCompactTriggerPercent).ToString();
         settings["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString();
         settings["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString();
@@ -21520,6 +21775,10 @@ public partial class MainViewModel : ViewModelBase
         LocalAutoCompactMode = CoerceLocalAutoCompactMode(settings["LocalAutoCompactMode"]?.ToString());
         // Forward-prune toggle: default on, so only an explicit "false" disables it.
         LocalForwardPruneEnabled = ParseBool(settings["LocalForwardPruneEnabled"]?.ToString() ?? string.Empty, true);
+        // VIBE_STATE toggle: default on, so only an explicit "false" disables it.
+        LocalVibeStateEnabled = ParseBool(settings["LocalVibeStateEnabled"]?.ToString() ?? string.Empty, true);
+        // Context-paging toggle: default on, so only an explicit "false" disables it.
+        LocalContextPagingEnabled = ParseBool(settings["LocalContextPagingEnabled"]?.ToString() ?? string.Empty, true);
         SelectedLocalAutoCompactModeOption = LocalAutoCompactModeOptions.FirstOrDefault(o =>
             string.Equals(o.Value, LocalAutoCompactMode, StringComparison.OrdinalIgnoreCase))
             ?? LocalAutoCompactModeOptions.FirstOrDefault(o =>
@@ -22940,6 +23199,8 @@ public partial class MainViewModel : ViewModelBase
         LocalAutoCompactKeepToolResults = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactKeepToolResults", LocalAutoCompactKeepToolResults.ToString()), 8d), 4m, 16m);
         LocalAutoCompactPinUserChars = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactPinUserChars", LocalAutoCompactPinUserChars.ToString()), 2000d), 500m, 5000m);
         LocalForwardPruneEnabled = ParseBool(settings.GetValueOrDefault("LocalForwardPruneEnabled", LocalForwardPruneEnabled.ToString()), true);
+        LocalVibeStateEnabled = ParseBool(settings.GetValueOrDefault("LocalVibeStateEnabled", LocalVibeStateEnabled.ToString()), true);
+        LocalContextPagingEnabled = ParseBool(settings.GetValueOrDefault("LocalContextPagingEnabled", LocalContextPagingEnabled.ToString()), true);
         LocalMaxForwardedImages = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalMaxForwardedImages", LocalMaxForwardedImages.ToString()), 1d), 1m, 8m);
         LocalVariantAutoCompressEnabled = !string.Equals(LocalAutoCompactMode, "none", StringComparison.OrdinalIgnoreCase);
         RefreshLocalVisionHint();
@@ -23257,6 +23518,8 @@ public partial class MainViewModel : ViewModelBase
             ["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled,
             ["LocalAutoCompactMode"] = LocalAutoCompactMode,
             ["LocalForwardPruneEnabled"] = LocalForwardPruneEnabled,
+            ["LocalVibeStateEnabled"] = LocalVibeStateEnabled,
+            ["LocalContextPagingEnabled"] = LocalContextPagingEnabled,
             ["LocalAutoCompactTriggerPercent"] = ((int)LocalAutoCompactTriggerPercent).ToString(),
             ["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString(),
             ["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString(),

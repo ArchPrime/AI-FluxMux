@@ -241,7 +241,7 @@ public sealed class FluxMuxRuntimeService
 	// on healthy large-context models (YaRN/VRAM) whose daemon port already reports ready.
 	// 30s comfortably exceeds the cold-start cost while still catching genuinely broken models
 	// (a truly stuck model will not produce a reply in 30s).
-	public const int PublicEndpointReadyProbeTimeoutMs = 30000;
+	public const int PublicEndpointReadyProbeTimeoutMs = 60000;
 
 	private const int PublicEndpointReadyProbeAttempts = 3;
 
@@ -262,6 +262,50 @@ public sealed class FluxMuxRuntimeService
 	private readonly string _scriptRoot;
 
 	private readonly string _workspaceRoot;
+
+	/// <summary>
+	/// The workspace root directory (the parent of the config file's folder). This is the default
+	/// location for git checkpoints. Exposed so the Settings UI can show the user where checkpoints
+	/// will land when no custom directory is configured.
+	/// </summary>
+	public string WorkspaceRoot => _workspaceRoot;
+
+	/// <summary>
+	/// The directory that git checkpoints commit to. Defaults to the workspace root; the user can
+	/// override it via the "LocalGitCheckpointDirectory" setting (a top-level config key, since the
+	/// git repo location is not tied to a model profile). Read live so a change in Settings takes
+	/// effect on the next checkpoint without a reload.
+	/// </summary>
+	public string GitCheckpointDirectory
+	{
+		get
+		{
+			var custom = ReadLocalGitCheckpointDirectory();
+			return string.IsNullOrWhiteSpace(custom) ? _workspaceRoot : custom;
+		}
+	}
+
+	/// <summary>
+	/// Reads the top-level "LocalGitCheckpointDirectory" key from the config. Returns null/empty when
+	/// unset (meaning: use the workspace root).
+	/// </summary>
+	private string? ReadLocalGitCheckpointDirectory()
+	{
+		try
+		{
+			var config = LoadJsonCached(_configPath);
+			if (config is null)
+			{
+				return null;
+			}
+
+			return config["LocalGitCheckpointDirectory"]?.ToString();
+		}
+		catch
+		{
+			return null;
+		}
+	}
 
 	private readonly string _workbenchRoot;
 
@@ -341,6 +385,13 @@ public sealed class FluxMuxRuntimeService
 	private const int RamWatchdogSustainSeconds = 30;
 
 	private FluxMuxGatewayHost? _gatewayHost;
+	private FluxMuxSupervisor? _supervisor;
+
+	/// <summary>
+	/// The supervisor instance, exposed for the UI to record actual prefill speed
+	/// and reset calibration when the model changes. Null until the runtime starts.
+	/// </summary>
+	public FluxMuxSupervisor? Supervisor => _supervisor;
 
 	private PortForwardingRules _portForwardingRules = PortForwardingRules.Defaults;
 
@@ -377,7 +428,45 @@ public sealed class FluxMuxRuntimeService
 	/// (--cache-ram -1) can creep up to tens of GB; when free RAM drops below this floor the
 	/// OS starts paging to SSD and Windows can crash/reboot.
 	/// </summary>
-	private const double MemoryGuardMinAvailableRamGiB = 4.0;
+	private const double MemoryGuardMinAvailableRamGiB = 2.0;
+
+	/// <summary>
+	/// Available-RAM threshold (GiB) below which the memory guard warns the user (via
+	/// <see cref="MemoryGuardWarning"/>) that RAM is getting low and the model may be stopped
+	/// soon. This gives the user a chance to free up RAM (compact the chat, close other apps,
+	/// or proactively stop the model) BEFORE the hard-stop fires at
+	/// <see cref="MemoryGuardMinAvailableRamGiB"/>. The warning is suppressed for
+	/// <see cref="MemoryGuardWarningCooldownMinutes"/> after it fires (or after the user
+	/// dismisses it) to avoid banner flapping.
+	/// </summary>
+	private const double MemoryGuardWarningAvailableRamGiB = 4.0;
+
+	/// <summary>
+	/// How long (seconds) the low-RAM condition must persist before the warning fires.
+	/// A transient dip (e.g. another app briefly allocating memory) should not trigger the
+	/// banner; only a sustained low-RAM state warrants user attention.
+	/// </summary>
+	private const int MemoryGuardWarningSustainSeconds = 60;
+
+	/// <summary>
+	/// Cooldown (minutes) after the warning fires (or is dismissed) before it may fire again.
+	/// Prevents the banner from re-appearing every 30s while RAM stays low.
+	/// </summary>
+	private const int MemoryGuardWarningCooldownMinutes = 10;
+
+	/// <summary>
+	/// Timestamp (UTC) when the low-RAM condition was first observed. Used together with
+	/// <see cref="MemoryGuardWarningSustainSeconds"/> to require a sustained low-RAM state
+	/// before the warning fires. Reset to <see cref="DateTime.MinValue"/> when RAM recovers
+	/// above the warning threshold.
+	/// </summary>
+	private DateTime _memoryGuardWarningObservedUtc = DateTime.MinValue;
+
+	/// <summary>
+	/// Timestamp (UTC) of the last time the memory-guard warning fired (or was dismissed).
+	/// Used to suppress re-firing for <see cref="MemoryGuardWarningCooldownMinutes"/>.
+	/// </summary>
+	private DateTime _lastMemoryGuardWarningUtc = DateTime.MinValue;
 
 	private ParkedLocalLaunch? _parkedLocalLaunch;
 
@@ -386,6 +475,16 @@ public sealed class FluxMuxRuntimeService
 	public event Action<string>? PortRulesPostMortemNotice;
 
 	public event Action<PortRulesTelemetry>? PortRulesTelemetryNotice;
+
+	/// <summary>
+	/// Raised when free RAM drops below <see cref="MemoryGuardWarningAvailableRamGiB"/> and
+	/// has stayed there for <see cref="MemoryGuardWarningSustainSeconds"/>. The UI shows an
+	/// amber banner prompting the user to free up RAM (compact the chat, close other apps,
+	/// or proactively stop the model) BEFORE the hard-stop fires at
+	/// <see cref="MemoryGuardMinAvailableRamGiB"/>. The argument is a human-readable message
+	/// describing the current free-RAM level and the recommended actions.
+	/// </summary>
+	public event Action<string>? MemoryGuardWarning;
 
 	/// <summary>
 	/// Raised when a turn 400s on context overflow and the non-destructive Hail Mary prune
@@ -458,6 +557,38 @@ public sealed class FluxMuxRuntimeService
 	}
 
 	/// <summary>
+	/// Computes the prefill estimate (seconds) for the given prompt, delegating to the
+	/// supervisor's <see cref="FluxMuxSupervisor.PredictPrefillSeconds"/> so there is a single
+	/// source of truth for the estimate. The result drives both the UI progress bar and the
+	/// gateway hang-dialog. Returns 0 when the supervisor is unavailable or no learned data
+	/// exists; callers should fall back to a conservative default.
+	/// </summary>
+	public int PredictPrefillSeconds(int promptTokens, bool isColdStart, bool isRamSpill, bool isLongLoadProfile, PrefillPerformanceModel? model)
+	{
+		if (_supervisor is null)
+		{
+			return 0;
+		}
+		var scenario = new ModelScenario(
+			IsClineLike: false,
+			IsRamSpill: isRamSpill,
+			IsLongLoadProfile: isLongLoadProfile,
+			IsColdStart: isColdStart,
+			IsPortRulesOn: false,
+			IsRoutingOn: false,
+			IsLocalReady: true,
+			IsCloudReady: false,
+			CloudCapacity: null,
+			HotContext: 0,
+			VramContext: 0,
+			PromptTokens: promptTokens,
+			PredictedPrefillSeconds: 0,
+			RamUsagePercent: 0.0,
+			CloudBreakerOpen: false);
+		return _supervisor.PredictPrefillSeconds(scenario, promptTokens, model);
+	}
+
+	/// <summary>
 	/// When armed, the next local forward applies the Hail Mary REAR-context prune to the
 	/// payload before sending, using the chosen one-off aggression stop + image-strip choice.
 	/// Set by <see cref="RequestHailMaryMiddleCut"/>, cleared after one use. Not persisted —
@@ -504,6 +635,7 @@ public sealed class FluxMuxRuntimeService
 	private int _managedLocalVramContext;
 	private bool _managedLocalExtendContextIntoRam;
 	private int _managedLocalMaxTokens;
+	private string _managedLocalGpuOffloadMode = string.Empty;
 	private string _managedLocalLaunchFingerprint = string.Empty;
 
 	private int _managedProxyPort = -1;
@@ -542,6 +674,13 @@ public sealed class FluxMuxRuntimeService
 
 	private readonly string _switchBenchmarkLogPath;
 
+	/// <summary>
+	/// Path to the session's <c>VIBE_STATE.md</c> file. Lives next to the config file so it is
+	/// easy for the user to find and edit. The context engine reads/writes it through
+	/// <see cref="ContextEngine.IContextIo"/> so a locked or missing file never breaks a turn.
+	/// </summary>
+	private readonly string _vibeStatePath;
+
 
 	private string _startupRuntimeNotice = string.Empty;
 
@@ -578,10 +717,20 @@ public sealed class FluxMuxRuntimeService
 	{
 		_configPath = configPath;
 		_scriptRoot = Path.GetDirectoryName(configPath) ?? AppContext.BaseDirectory;
+		// VIBE_STATE.md lives next to the config file so the user can find and edit it easily.
+		_vibeStatePath = Path.Combine(_scriptRoot, "VIBE_STATE.md");
+		
+		// Diagnostic: log that _scriptRoot was set.
+		try
+		{
+			string diagPath = Path.Combine(_scriptRoot, "RuntimeService_AfterScriptRootSet.log");
+			File.AppendAllText(diagPath, $"[{DateTime.UtcNow:O}] _scriptRoot set to: {_scriptRoot}\n");
+		}
+		catch { }
 		_workspaceRoot = Directory.GetParent(_scriptRoot)?.FullName ?? _scriptRoot;
 		_workbenchRoot = Directory.GetParent(_workspaceRoot)?.FullName ?? _workspaceRoot;
 		_secretsPath = Path.Combine(_scriptRoot, "fluxmux_secrets.json");
-		_logDirectory = Path.Combine(_workbenchRoot, "Logs");
+		_logDirectory = Path.Combine(_workspaceRoot, "Logs");
 		_proxyRuntimeStatePath = Path.Combine(_logDirectory, "Proxy_Runtime_State.json");
 		_proxyLastServedPath = Path.Combine(_logDirectory, "Proxy_Last_Served.json");
 		_proxyLastRouteExplanationPath = Path.Combine(_logDirectory, "Proxy_Last_Route_Explanation.json");
@@ -599,7 +748,42 @@ public sealed class FluxMuxRuntimeService
 		_parkedTasksLogPath = Path.Combine(_logDirectory, "parked_tasks.log");
 		_parkedTasksAckPath = Path.Combine(_logDirectory, "parked_tasks_ack.json");
 		Directory.CreateDirectory(_logDirectory);
+
+		// Wire up the supervisor. This was previously declared but never instantiated, which
+		// silently broke launch_monitor.log logging, the RAM watchdog, and the prefill-estimate
+		// path (all calls used `?.` so they no-opped). The supervisor owns the launch-monitor log,
+		// the RAM watchdog, and the prefill-estimate math (single source of truth for the UI
+		// progress bar and the gateway hang-dialog).
+		_supervisor = new FluxMuxSupervisor(_logDirectory);
+		_supervisor.GetLocalServerProcess = () => _localServerProcess;
+		_supervisor.KillLocalServerProcess = () =>
+		{
+			try
+			{
+				Process? p = _localServerProcess;
+				if (p != null && !p.HasExited)
+				{
+					p.Kill(entireProcessTree: true);
+					_localServerProcess = null;
+				}
+			}
+			catch
+			{
+				// Best-effort; the hotkey is the fallback.
+			}
+		};
+		_supervisor.RamOverflowNotice = msg => IdleTimeoutNotice?.Invoke(msg);
+
 		_gatewayHost = CreateGatewayHost();
+
+		// Wire the supervisor's prefill-estimate delegates to the gateway host so the estimate
+		// flows to the hang-detection logic. The ViewModel calls PredictPrefillSeconds on the
+		// runtime service (which delegates to the supervisor) and the result is pushed here.
+		_supervisor.SetGatewayPrefillEstimate = s => _gatewayHost.CurrentPrefillEstimateSeconds = s;
+		_supervisor.ClearGatewayPrefillEstimate = () => _gatewayHost.CurrentPrefillEstimateSeconds = 0;
+
+		_supervisor.Start();
+
 		EnsureIdleTimeoutLoop();
 		int stoppedCloudBridges = StopStaleManagedProxyFromRuntimeState(clearStateIfStopped: true);
 		int stoppedLocalRuntimes = StopStaleManagedLocalFromRuntimeState(clearStateIfStopped: true);
@@ -707,6 +891,42 @@ public sealed class FluxMuxRuntimeService
 		host.GetLocalAutoCompactSettings = GetLocalAutoCompactSettings;
 		host.GetForwardPruneEnabled = GetForwardPruneEnabled;
 		host.GetUserClientReinflatesContext = () => UserClientReinflatesContext;
+		// VIBE_STATE + paged-context engine. The engine is self-contained: it reads its config
+		// flags via injected delegates (backed by the per-profile GetProfileBool one-liners) and
+		// does all file I/O through the IContextIo seam, so it has no hard dependency on this
+		// service. The VibeStatePath is next to the config file so the user can find/edit it.
+		host.GetVibeStateEnabled = GetVibeStateEnabled;
+		host.VibeStatePath = _vibeStatePath;
+		host.ContextEngine = new FluxMux.Avalonia.Services.ContextEngine.ContextEngine(
+			new FluxMux.Avalonia.Services.ContextEngine.FileSystemContextIo(),
+			new FluxMux.Avalonia.Services.ContextEngine.ContextEngineOptions
+			{
+				IsVibeStateEnabled = () => GetVibeStateEnabled(
+					_managedLocalModel,
+					_managedLocalVariant) != false,
+				IsContextPagingEnabled = () => GetContextPagingEnabled(
+					_managedLocalModel,
+					_managedLocalVariant) != false,
+			});
+
+		// Paged-context swap store + MCP control plane. The swap store lives next to the config
+		// file (context_swap.json). The MCP control plane exposes update_vibe_state, read_swap_log,
+		// and git_checkpoint over POST /mcp. Both are self-contained (no hard dependency on this
+		// service) and never throw.
+		var swapStorePath = Path.Combine(_scriptRoot, "context_swap.json");
+		var swapStore = new FluxMux.Avalonia.Services.ContextEngine.ContextSwapStore(
+			new FluxMux.Avalonia.Services.ContextEngine.FileSystemContextIo(),
+			swapStorePath);
+		swapStore.EnsureExists();
+		host.SwapStore = swapStore;
+
+		var mcpPlane = new FluxMux.Avalonia.Services.ContextEngine.McpControlPlane(
+			host.ContextEngine,
+			swapStore,
+			new FluxMux.Avalonia.Services.ContextEngine.GitRunner(),
+			_vibeStatePath,
+			_workspaceRoot);
+		host.McpControlPlane = mcpPlane;
 		host.ReportHailMaryApplied = tokens => HailMaryAppliedNotice?.Invoke(tokens);
 		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);
 		host.ReportPortRulesTelemetry = snap => PortRulesTelemetryNotice?.Invoke(snap);
@@ -801,8 +1021,82 @@ public sealed class FluxMuxRuntimeService
 	/// the config file each turn (same LoadJsonCached path as the auto-compact settings) so it
 	/// can be switched mid-chat without a reload. Returns null when the profile cannot be
 	/// resolved; the gateway treats null as "on" (the default).
+	///
+	/// IMPORTANT: forward-prune is forced OFF when the user's client reinflates the context
+	/// (forwards the full chat each turn, e.g. Cline). For those clients the prune is defeated
+	/// (the client resends the full history on the next turn, undoing the prune) AND it breaks
+	/// the KV cache prefix (pruning a slightly different set of tool results each turn changes
+	/// the prompt, forcing a cold re-prefill every turn). This is the same rationale as skipping
+	/// session artifact stripping for reinflating clients. The per-profile config toggle is
+	/// therefore ignored for reinflating clients — they always get forward-prune off.
 	/// </summary>
 	private bool? GetForwardPruneEnabled(string model, string variant)
+	{
+		// Reinflating clients (Cline-like) always get forward-prune off, regardless of the config.
+		if (_userClientReinflatesContext)
+		{
+			return false;
+		}
+
+		// Default on: only an explicit "false" disables forward pruning.
+		return GetProfileBool(model, variant, "LocalForwardPruneEnabled", fallback: true);
+	}
+
+	/// <summary>
+	/// Per-profile VIBE_STATE toggle ("LocalVibeStateEnabled", default on). When on, the context
+	/// engine re-injects the session's task/state/next at the top of every local turn so the model
+	/// always knows "where we are" even after the working context has been paged away. Read live
+	/// each turn so it can be switched mid-chat without a reload.
+	///
+	/// IMPORTANT: VIBE_STATE is SAFE for reinflating clients (Cline-like). The VIBE_STATE block
+	/// is a prefix-stable system suffix: its hash is stable across turns (verified), so it does
+	/// NOT break the KV cache prefix. Unlike forward-prune and context-paging (which change the
+	/// prompt content each turn and force a cold re-prefill), VIBE_STATE is appended after the
+	/// stable prefix and does not invalidate the cache. It is therefore NOT forced off for
+	/// reinflating clients — it remains available as a useful feature for Cline sessions.
+	/// </summary>
+	private bool? GetVibeStateEnabled(string model, string variant)
+	{
+		// Default on: only an explicit "false" disables VIBE_STATE re-injection.
+		// NOTE: NOT gated on _userClientReinflatesContext — VIBE_STATE is prefix-safe and
+		// works correctly for Cline-like clients without breaking the KV cache.
+		return GetProfileBool(model, variant, "LocalVibeStateEnabled", fallback: true);
+	}
+
+	/// <summary>
+	/// Per-profile context-paging toggle ("LocalContextPagingEnabled", default on). When on, the
+	/// forward-prune truncate stage spills oversized older tool-result bodies to the swap store
+	/// and leaves a short swap_id pointer in the prompt (lossless: the model can read the full
+	/// body back via read_swap_log). When off, the lossy head+tail stub is used (identical to
+	/// pre-paging behavior). Read live each turn so it can be switched mid-chat without a reload.
+	///
+	/// IMPORTANT: context-paging is forced OFF when the user's client reinflates the context
+	/// (forwards the full chat each turn, e.g. Cline). For those clients, paging changes the
+	/// prompt content each turn (swapping different tool-result bodies in and out), which
+	/// breaks the KV cache prefix and forces a cold re-prefill every turn. This is the same
+	/// rationale as forcing forward-prune off for reinflating clients. The per-profile config
+	/// toggle is therefore ignored for reinflating clients — they always get paging off.
+	/// </summary>
+	private bool? GetContextPagingEnabled(string model, string variant)
+	{
+		// Reinflating clients (Cline-like) always get context-paging off, regardless of the config.
+		if (_userClientReinflatesContext)
+		{
+			return false;
+		}
+
+		// Default on: only an explicit "false" disables paged-context spill.
+		return GetProfileBool(model, variant, "LocalContextPagingEnabled", fallback: true);
+	}
+
+	/// <summary>
+	/// Reads a per-profile boolean flag from <c>fluxmux_config.json</c> (under
+	/// <c>LocalProfiles["model::variant"]</c>), falling back to <paramref name="fallback"/> when
+	/// the key is absent. This is the single per-profile bool-read for the app; new flags
+	/// (e.g. <c>LocalVibeStateEnabled</c>, <c>LocalContextPagingEnabled</c>) are one-liners over
+	/// it rather than copies of this body.
+	/// </summary>
+	private bool? GetProfileBool(string model, string variant, string key, bool fallback)
 	{
 		try
 		{
@@ -818,21 +1112,20 @@ public sealed class FluxMuxRuntimeService
 				return null;
 			}
 
-			var key = model + "::" + variant;
-			var profile = localProfiles[key] as JsonObject;
+			var profileKey = model + "::" + variant;
+			var profile = localProfiles[profileKey] as JsonObject;
 			if (profile is null)
 			{
 				return null;
 			}
 
-			// Default on: only an explicit "false" disables forward pruning.
-			var raw = profile["LocalForwardPruneEnabled"]?.ToString();
+			var raw = profile[key]?.ToString();
 			if (string.IsNullOrWhiteSpace(raw))
 			{
-				return true;
+				return fallback;
 			}
 
-			return ParseBool(raw, fallback: true);
+			return ParseBool(raw, fallback: fallback);
 		}
 		catch
 		{
@@ -981,8 +1274,17 @@ public sealed class FluxMuxRuntimeService
 	}
 
 	/// <summary>
-	/// Stops the local llama-server when available physical RAM drops below
-	/// <see cref="MemoryGuardMinAvailableRamGiB"/>, to prevent the machine from OOM-crashing.
+	/// Two-tier memory guard:
+	/// <list type="number">
+	/// <item><b>Warning tier</b> — when free RAM drops below <see cref="MemoryGuardWarningAvailableRamGiB"/>
+	/// and stays there for <see cref="MemoryGuardWarningSustainSeconds"/>, raise
+	/// <see cref="MemoryGuardWarning"/> so the UI can prompt the user to free up RAM
+	/// (compact the chat, close other apps, or proactively stop the model). The model keeps
+	/// running during the warning.</item>
+	/// <item><b>Hard-stop tier</b> — when free RAM drops below <see cref="MemoryGuardMinAvailableRamGiB"/>,
+	/// stop llama-server to prevent the machine from OOM-crashing. This is the last line of
+	/// defense; the warning tier above gives the user a chance to act first.</item>
+	/// </list>
 	/// This is independent of the idle-timeout setting: the RAM leak happens while the server
 	/// sits idle with an unbounded RAM KV cache, so the guard must fire even when
 	/// <c>IdleTimeoutEnabled</c> is false. Returns true when a stop was performed (or was
@@ -996,18 +1298,59 @@ public sealed class FluxMuxRuntimeService
 		bool anyLlamaServerRunning = IsManagedLocalAlive() || HasOrphanedLlamaServerProcess();
 		if (!anyLlamaServerRunning)
 		{
+			// No model running — reset the warning observation so a future launch starts fresh.
+			_memoryGuardWarningObservedUtc = DateTime.MinValue;
+			return false;
+		}
+
+		double availableRamGiB = HostTelemetrySampler.GetAvailablePhysicalRamGiB();
+		if (availableRamGiB <= 0.0)
+		{
+			// Telemetry failed; do not act on a bad reading.
+			return false;
+		}
+
+		// --- Warning tier: prompt the user BEFORE the hard-stop fires. ---
+		if (availableRamGiB < MemoryGuardWarningAvailableRamGiB)
+		{
+			// Track how long the low-RAM condition has persisted.
+			if (_memoryGuardWarningObservedUtc == DateTime.MinValue)
+			{
+				_memoryGuardWarningObservedUtc = DateTime.UtcNow;
+			}
+
+			bool sustained = DateTime.UtcNow - _memoryGuardWarningObservedUtc >= TimeSpan.FromSeconds(MemoryGuardWarningSustainSeconds);
+			bool inCooldown = DateTime.UtcNow - _lastMemoryGuardWarningUtc < TimeSpan.FromMinutes(MemoryGuardWarningCooldownMinutes);
+
+			if (sustained && !inCooldown)
+			{
+				_lastMemoryGuardWarningUtc = DateTime.UtcNow;
+				string warningMessage =
+					"Low RAM warning: free RAM is " + availableRamGiB.ToString("0.0", CultureInfo.InvariantCulture)
+					+ " GiB (below the " + MemoryGuardWarningAvailableRamGiB.ToString("0", CultureInfo.InvariantCulture)
+					+ " GiB warning threshold). The local model is still running, but if free RAM drops below "
+					+ MemoryGuardMinAvailableRamGiB.ToString("0", CultureInfo.InvariantCulture)
+					+ " GiB the memory guard will stop it to protect the PC from running out of memory. "
+					+ "To avoid an unexpected stop: compact the chat, close other apps, or stop the model now.";
+				GatewayLogLine?.Invoke("MEMGUARD-WARN: " + warningMessage);
+				MemoryGuardWarning?.Invoke(warningMessage);
+			}
+		}
+		else
+		{
+			// RAM recovered above the warning threshold — reset the observation timer.
+			_memoryGuardWarningObservedUtc = DateTime.MinValue;
+		}
+
+		// --- Hard-stop tier: the last line of defense. ---
+		if (availableRamGiB >= MemoryGuardMinAvailableRamGiB)
+		{
 			return false;
 		}
 
 		// Cooldown: after a guard stop, stay quiet for MemoryGuardCooldownMinutes so a still-low
 		// RAM reading (e.g. while the next model is loading) does not immediately stop it again.
 		if (DateTime.UtcNow - _lastMemoryGuardStopUtc < TimeSpan.FromMinutes(MemoryGuardCooldownMinutes))
-		{
-			return false;
-		}
-
-		double availableRamGiB = HostTelemetrySampler.GetAvailablePhysicalRamGiB();
-		if (availableRamGiB <= 0.0 || availableRamGiB >= MemoryGuardMinAvailableRamGiB)
 		{
 			return false;
 		}
@@ -1031,6 +1374,7 @@ public sealed class FluxMuxRuntimeService
 				await StopLocalCoreAsync(preserveParkedForIdleWake: true).ConfigureAwait(false);
 				_localSleepingFromIdle = true;
 				_lastMemoryGuardStopUtc = DateTime.UtcNow;
+				_memoryGuardWarningObservedUtc = DateTime.MinValue;
 				LogParkedTask(
 					"Memory guard (free RAM dropped to " + availableRamGiB.ToString("0.0", CultureInfo.InvariantCulture) + " GiB, below the " + MemoryGuardMinAvailableRamGiB.ToString("0", CultureInfo.InvariantCulture) + " GiB floor)",
 					_managedLocalModel,
@@ -1594,47 +1938,9 @@ public sealed class FluxMuxRuntimeService
 
 	public LocalReloadRecommendSnapshot? ReadLocalReloadRecommend()
 	{
-		try
-		{
-			if (!File.Exists(_proxyLocalReloadRecommendPath))
-			{
-				return null;
-			}
-			JsonObject root = LoadJson(_proxyLocalReloadRecommendPath);
-			string status = GetString(root, "status");
-			if (string.IsNullOrWhiteSpace(status) || status.Equals("idle", StringComparison.OrdinalIgnoreCase)
-				|| status.Equals("yes", StringComparison.OrdinalIgnoreCase) || status.Equals("no", StringComparison.OrdinalIgnoreCase))
-			{
-				return null;
-			}
-			string reason = FormatStoredLocalReloadReason(root)
-				?? ReplaceOtherAppWording(GetString(root, "reason"));
-			if (string.IsNullOrWhiteSpace(reason) && !status.Equals("pending", StringComparison.OrdinalIgnoreCase))
-			{
-				return null;
-			}
-			return new LocalReloadRecommendSnapshot(
-				status,
-				reason,
-				GetString(root, "model"),
-				GetString(root, "variant"),
-				FirstNonEmpty(LocalReloadRouting.FormatPackLabel(GetString(root, "model"), GetString(root, "variant")), GetString(root, "displayName")),
-				GetString(root, "updatedUtc"),
-				ParseBool(GetString(root, "compactRecommended"), false),
-				ParseBool(GetString(root, "destinationTight"), false),
-				ParseBool(GetString(root, "forward_compact"), false),
-				ParseBool(GetString(root, "cloud_failover"), false),
-				ParseBool(GetString(root, "spillCompact"), false),
-				GetString(root, "documentContextMode").Equals("pending", StringComparison.OrdinalIgnoreCase),
-				ParseInt(GetString(root, "documentContextTokens"), 0),
-				ParseInt(GetString(root, "documentContextTotal"), 0),
-				ParseInt(GetString(root, "spillUrgency"), 0));
-		}
-		catch
-		{
-			return null;
-		}
+		return _supervisor?.ReadLocalReloadRecommend();
 	}
+
 
 	private string? FormatStoredLocalReloadReason(JsonObject root)
 	{
@@ -1743,30 +2049,9 @@ public sealed class FluxMuxRuntimeService
 
 	public void AnswerLocalReloadRecommend(bool loadSuggested, bool enableCompact = false)
 	{
-		lock (_proxyStateLock)
-		{
-			JsonObject jsonObject = (File.Exists(_proxyLocalReloadRecommendPath) ? LoadJson(_proxyLocalReloadRecommendPath) : new JsonObject());
-			long until = DateTimeOffset.UtcNow.AddMinutes(15.0).ToUnixTimeSeconds();
-			jsonObject["status"] = (loadSuggested || enableCompact ? "yes" : "no");
-			jsonObject["allow_until"] = (loadSuggested ? until : 0);
-			jsonObject["suppress_until"] = (loadSuggested || enableCompact ? 0 : until);
-			if (enableCompact)
-			{
-				jsonObject["forward_compact"] = true;
-				jsonObject["compactRecommended"] = false;
-			}
-			else if (!loadSuggested)
-			{
-				jsonObject["forward_compact"] = false;
-			}
-
-			jsonObject["updatedUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
-			File.WriteAllText(_proxyLocalReloadRecommendPath, jsonObject.ToJsonString(new JsonSerializerOptions
-			{
-				WriteIndented = true
-			}));
-		}
+		_supervisor?.AnswerLocalReloadRecommend(loadSuggested, enableCompact);
 	}
+
 
 	/// <summary>
 	/// Answers the document context dialog. The mode is one of:
@@ -1915,29 +2200,9 @@ public sealed class FluxMuxRuntimeService
 
 	public void ClearLocalReloadRecommend()
 	{
-		lock (_proxyStateLock)
-		{
-			if (!File.Exists(_proxyLocalReloadRecommendPath))
-			{
-				return;
-			}
-
-			JsonObject jsonObject = LoadJson(_proxyLocalReloadRecommendPath);
-			string status = GetString(jsonObject, "status");
-			if (string.IsNullOrWhiteSpace(status) || status.Equals("idle", StringComparison.OrdinalIgnoreCase)
-				|| status.Equals("yes", StringComparison.OrdinalIgnoreCase) || status.Equals("no", StringComparison.OrdinalIgnoreCase))
-			{
-				return;
-			}
-
-			jsonObject["status"] = "idle";
-			jsonObject["updatedUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
-			File.WriteAllText(_proxyLocalReloadRecommendPath, jsonObject.ToJsonString(new JsonSerializerOptions
-			{
-				WriteIndented = true
-			}));
-		}
+		_supervisor?.ClearLocalReloadRecommend();
 	}
+
 
 	public Task<RuntimeActionResult> ApplyRequestRoutingAsync(bool enabled, CancellationToken cancellationToken = default(CancellationToken))
 	{
@@ -2960,6 +3225,66 @@ public sealed class FluxMuxRuntimeService
 		});
 	}
 
+	/// <summary>
+	/// Creates a git checkpoint in the workspace. This is the user-facing counterpart to the
+	/// <c>git_checkpoint</c> MCP tool: instead of the model calling the tool, the user clicks a
+	/// button in the UI. The checkpoint is a git commit with a message like
+	/// "fluxmux-checkpoint: &lt;message&gt;" so it's easy to find and reset to later.
+	/// </summary>
+	public async Task<RuntimeActionResult> RunGitCheckpointAsync(string message, string? workDir = null, CancellationToken cancellationToken = default(CancellationToken))
+	{
+		var host = _gatewayHost;
+		if (host is null || host.McpControlPlane is null)
+		{
+			return new RuntimeActionResult
+			{
+				IsSuccess = false,
+				Status = "MCP control plane not available",
+				Details = "The gateway host or MCP control plane is not initialized."
+			};
+		}
+
+		try
+		{
+			// Prefer the explicit override (the folder the user just confirmed in the picker),
+			// falling back to the configured/default checkpoint directory.
+			var targetDir = string.IsNullOrWhiteSpace(workDir) ? GitCheckpointDirectory : workDir.Trim();
+
+			var args = new JsonObject
+			{
+				["message"] = string.IsNullOrWhiteSpace(message) ? "checkpoint" : message,
+				["work_dir"] = targetDir,
+			};
+
+			var body = new JsonObject
+			{
+				["tool"] = "git_checkpoint",
+				["args"] = args
+			};
+
+			var result = host.McpControlPlane.Handle(body);
+			var ok = result["ok"]?.GetValue<bool>() ?? false;
+			var gitMessage = result["message"]?.GetValue<string>() ?? string.Empty;
+			var error = result["error"]?.GetValue<string>() ?? string.Empty;
+
+			return new RuntimeActionResult
+			{
+				IsSuccess = ok,
+				Status = ok ? "Checkpoint created" : "Checkpoint failed",
+				Details = ok ? gitMessage : error
+			};
+		}
+		catch (Exception ex)
+		{
+			return new RuntimeActionResult
+			{
+				IsSuccess = false,
+				Status = "Checkpoint failed",
+				Details = ex.Message
+			};
+		}
+	}
+
 	public async Task<RuntimeActionResult> RestartCloudAsync(string provider, string model, CancellationToken cancellationToken = default(CancellationToken))
 	{
 		await StopCloudAsync();
@@ -3062,7 +3387,7 @@ public sealed class FluxMuxRuntimeService
 		return await TimeShortReadyReplyAsync(probePort, model, "Short reply completed", "The short reply test did not complete.", cancellationToken, 90000);
 	}
 
-	public async Task<LocalGenerationTimingResult> TimeShortLocalReplyThroughPublicEndpointAsync(int publicGatewayPort, string model, CancellationToken cancellationToken = default(CancellationToken), int requestTimeoutMs = 30000)
+	public async Task<LocalGenerationTimingResult> TimeShortLocalReplyThroughPublicEndpointAsync(int publicGatewayPort, string model, CancellationToken cancellationToken = default(CancellationToken), int requestTimeoutMs = 60000)
 	{
 		return await TimeShortReadyReplyAsync(publicGatewayPort, model, "Public endpoint reply completed", "The public endpoint test did not complete.", cancellationToken, requestTimeoutMs, FluxMuxGatewayRouting.Local);
 	}
@@ -3260,17 +3585,13 @@ public sealed class FluxMuxRuntimeService
 	/// </summary>
 	private void StartRamWatchdog()
 	{
-		StopRamWatchdog();
-		_ramWatchdogExceededUtc = DateTime.MinValue;
-		_ramWatchdogTimer = new Timer(OnRamWatchdogTick, null, RamWatchdogIntervalMs, RamWatchdogIntervalMs);
+		_supervisor?.StartRamWatchdog();
 	}
 
 	/// <summary>Stops the RAM-overflow watchdog.</summary>
 	private void StopRamWatchdog()
 	{
-		_ramWatchdogTimer?.Dispose();
-		_ramWatchdogTimer = null;
-		_ramWatchdogExceededUtc = DateTime.MinValue;
+		_supervisor?.StopRamWatchdog();
 	}
 
 	/// <summary>
@@ -3497,6 +3818,25 @@ public sealed class FluxMuxRuntimeService
 				try
 				{
 					previous.Cancel();
+				}
+				catch
+				{
+				}
+				// CRITICAL: cancelling the CTS only stops the previous launch's polling loop.
+				// The llama-server process it started is STILL RUNNING, still loading the model,
+				// and still holding GPU memory. If we don't kill it here, the new launch's
+				// llama-server will compete with the old one for GPU VRAM, and BOTH will load
+				// slowly (the 169s cold-start we saw on 10/15 13:21 was two launches fighting
+				// for the same GPU). Kill the old process so the new launch has the GPU to itself.
+				try
+				{
+					Process? oldProcess = _localServerProcess;
+					if (oldProcess != null && !oldProcess.HasExited)
+					{
+						LogLaunchMonitor($"supersede: killing previous llama-server (PID {oldProcess.Id}) so the new launch has the GPU to itself");
+						oldProcess.Kill(entireProcessTree: true);
+						_localServerProcess = null;
+					}
 				}
 				catch
 				{
@@ -3785,6 +4125,7 @@ public sealed class FluxMuxRuntimeService
 			_managedLocalReasoning = "Off";
 		}
 		string configuredOffload = NormalizeOffloadMode(GetString(profile, "LocalGpuOffloadMode"));
+		_managedLocalGpuOffloadMode = configuredOffload;
 		GpuGuardrailState gpuGuardrail = GetLocalGpuGuardrailState();
 		string effectiveOffload = (gpuGuardrail.UseConservativeLocalLaunch ? "Auto" : configuredOffload);
 		ApplyVisionLaunchOverlay(profile, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge);
@@ -4708,18 +5049,7 @@ public sealed class FluxMuxRuntimeService
 	/// </summary>
 	private void LogLaunchMonitor(string message)
 	{
-		try
-		{
-			string logPath = Path.Combine(_logDirectory, "launch_monitor.log");
-			lock (_proxyStateLock)
-			{
-				File.AppendAllText(logPath, $"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
-			}
-		}
-		catch
-		{
-			// Ignore log write failures.
-		}
+		_supervisor?.LogLaunchMonitor(message);
 	}
 
 	/// <summary>
@@ -4858,6 +5188,72 @@ public sealed class FluxMuxRuntimeService
 		catch
 		{
 			// Best-effort; a failed dismissal record just means the banner may re-appear next startup.
+		}
+	}
+
+	/// <summary>
+	/// Records that the user has acknowledged (dismissed) the memory-guard warning banner.
+	/// This starts the <see cref="MemoryGuardWarningCooldownMinutes"/> cooldown so the banner
+	/// does not re-appear while RAM stays low. The model keeps running; if RAM drops below
+	/// <see cref="MemoryGuardMinAvailableRamGiB"/> the hard-stop will still fire (the warning
+	/// is a heads-up, not a veto).
+	/// </summary>
+	public void AcknowledgeMemoryGuardWarning()
+	{
+		_lastMemoryGuardWarningUtc = DateTime.UtcNow;
+		_memoryGuardWarningObservedUtc = DateTime.MinValue;
+	}
+
+	/// <summary>
+	/// Proactively stops the local llama-server (the same path the memory guard's hard-stop
+	/// uses). Exposed so the UI's "Stop model now" button on the memory-guard warning banner
+	/// can let the user free up RAM on their own terms instead of waiting for the hard-stop.
+	/// Returns true when a stop was performed, false when there was nothing to stop.
+	/// </summary>
+	public async Task<bool> StopLocalModelForMemoryGuardAsync()
+	{
+		if (!IsManagedLocalAlive() && !HasOrphanedLlamaServerProcess())
+		{
+			return false;
+		}
+
+		if (!_idleSession.TryStartUnload(TimeSpan.FromMinutes(1)))
+		{
+			return false;
+		}
+
+		try
+		{
+			await _idleLifecycle.WaitAsync().ConfigureAwait(false);
+			try
+			{
+				if (!IsManagedLocalAlive() && !HasOrphanedLlamaServerProcess())
+				{
+					return true;
+				}
+
+				await StopLocalCoreAsync(preserveParkedForIdleWake: true).ConfigureAwait(false);
+				_localSleepingFromIdle = true;
+				_lastMemoryGuardStopUtc = DateTime.UtcNow;
+				_lastMemoryGuardWarningUtc = DateTime.UtcNow;
+				_memoryGuardWarningObservedUtc = DateTime.MinValue;
+				LogParkedTask(
+					"User-initiated stop from memory-guard warning (free RAM was low)",
+					_managedLocalModel,
+					_managedLocalVariant);
+				IdleTimeoutNotice?.Invoke(
+					"Stopped the local model at your request from the memory-guard warning. "
+					+ "Free up some RAM, then launch the model again (or send a message to auto-reload it).");
+				return true;
+			}
+			finally
+			{
+				_idleLifecycle.Release();
+			}
+		}
+		finally
+		{
+			_idleSession.EndUnload();
 		}
 	}
 
@@ -7811,8 +8207,8 @@ public sealed class FluxMuxRuntimeService
 			{
 				// Best-effort; default to false.
 			}
-			int headroomMs = isLongLoad ? 120000 : 60000;
-			int maxMs = isLongLoad ? 240000 : 180000;
+			int headroomMs = isLongLoad ? 40000 : 60000;
+			int maxMs = isLongLoad ? 120000 : 180000;
 			return Math.Clamp(recordedMs + headroomMs, 60000, maxMs);
 		}
 		catch
@@ -10244,7 +10640,7 @@ private List<GpuProcessUse> CollectGpuProcessUses()
 			try
 			{
 				using var stream = File.OpenRead(modelPath);
-				var buffer = new byte[8 * 1024 * 1024];
+				var buffer = new byte[64 * 1024 * 1024];
 				while (await stream.ReadAsync(buffer.AsMemory()) > 0)
 				{
 				}
@@ -10358,6 +10754,13 @@ private List<GpuProcessUse> CollectGpuProcessUses()
 	public int ManagedLocalVramContext => _managedLocalVramContext;
 
 	/// <summary>
+	/// The GPU offload mode for the currently managed local profile (e.g. "GPU + CPU", "GPU only",
+	/// "CPU only"). Used to detect long-load / RAM-spill profiles for prefill estimation.
+	/// Returns an empty string when no local model is currently managed.
+	/// </summary>
+	public string ManagedLocalGpuOffloadMode => _managedLocalGpuOffloadMode;
+
+	/// <summary>
 	/// The log directory where runtime logs are written.
 	/// </summary>
 	public string LogDirectory => _logDirectory;
@@ -10385,3 +10788,12 @@ private List<GpuProcessUse> CollectGpuProcessUses()
 	}
 
 }
+
+
+
+
+
+
+
+
+

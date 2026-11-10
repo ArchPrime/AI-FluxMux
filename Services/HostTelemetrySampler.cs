@@ -65,7 +65,49 @@ public sealed class HostTelemetrySampler
         {
             return 0.0;
         }
-        return status.ullAvailPhys / BytesPerGiB;
+
+        return ComputeAvailablePhysicalRamGiB(status.ullTotalPhys, status.ullAvailPhys, status.ullAvailExtendedVirtual);
+    }
+
+    /// <summary>
+    /// Computes the "available" physical RAM (GiB) from a <c>GlobalMemoryStatusEx</c> reading.
+    ///
+    /// This deliberately does NOT return <c>ullAvailPhys</c> (strictly free physical RAM) on its
+    /// own. Windows keeps a large share of RAM in the file cache (standby/modified pages) that is
+    /// immediately reclaimable, so <c>ullAvailPhys</c> is routinely very low on a healthy machine
+    /// (e.g. ~1 GiB free on a 32 GB box with ~20 GB "used" in Task Manager). Treating that as
+    /// "available" made the memory guard fire false positives.
+    ///
+    /// The standard "available" figure (the one Task Manager's "Available" column reports) is
+    /// <c>ullTotalPhys - ullAvailExtendedVirtual</c>: <c>ullAvailExtendedVirtual</c> is the amount
+    /// of memory that is truly committed and cannot be reclaimed, so subtracting it from the total
+    /// yields free RAM plus the reclaimable cache. This is clamped to the range
+    /// [<c>ullAvailPhys</c>, <c>ullTotalPhys</c>] so it can never report less than the strictly-free
+    /// amount (which would be wrong) or more than the physical total.
+    /// </summary>
+    public static double ComputeAvailablePhysicalRamGiB(ulong totalPhys, ulong availPhys, ulong availExtendedVirtual)
+    {
+        if (totalPhys == 0)
+        {
+            return 0.0;
+        }
+
+        // totalPhys - availExtendedVirtual is the "available" memory (free + reclaimable cache).
+        // Guard against the (unexpected) case where the committed figure exceeds the total.
+        ulong available = availExtendedVirtual >= totalPhys ? 0UL : totalPhys - availExtendedVirtual;
+
+        // Never report less than the strictly-free amount, and never more than the physical total.
+        if (available < availPhys)
+        {
+            available = availPhys;
+        }
+
+        if (available > totalPhys)
+        {
+            available = totalPhys;
+        }
+
+        return available / BytesPerGiB;
     }
 
     public static (bool Available, string Name, double UsedGiB, double TotalGiB, double UtilizationPercent, double? TemperatureC, double? PowerW)

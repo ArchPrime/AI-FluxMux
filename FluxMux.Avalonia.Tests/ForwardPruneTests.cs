@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json.Nodes;
 using FluxMux.Avalonia.Services;
+using FluxMux.Avalonia.Services.ContextEngine;
 using Xunit;
 
 namespace FluxMux.Avalonia.Tests;
@@ -168,6 +170,106 @@ public sealed class ForwardPruneTests
         Assert.True(stillHasImage, "forward pruning must not strip images");
         // The dedupe still happened (the duplicate user text is gone).
         Assert.Equal(4, payload["messages"]!.AsArray().Count);
+    }
+
+    // ── Step 4: lossless paging via ContextSwapStore ────────────────────────────
+
+    [Fact]
+    public void TruncateOversizedToolResults_with_swap_store_spills_body_and_leaves_pointer()
+    {
+        // Build 9 tool results so the first one is "older" (beyond KeepRecentResults=8) and gets truncated.
+        string bigBody = new string('X', 20000); // ~5000 tokens, exceeds the 1000-token cap
+        var payload = Payload(
+            User("Run the test suite."),
+            AssistantWithCall("call_1", "run_tests", "{}"),
+            ToolResult(bigBody, "call_1"),
+            AssistantWithCall("call_2", "read_file", "{}"),
+            ToolResult("small result 2", "call_2"),
+            AssistantWithCall("call_3", "read_file", "{}"),
+            ToolResult("small result 3", "call_3"),
+            AssistantWithCall("call_4", "read_file", "{}"),
+            ToolResult("small result 4", "call_4"),
+            AssistantWithCall("call_5", "read_file", "{}"),
+            ToolResult("small result 5", "call_5"),
+            AssistantWithCall("call_6", "read_file", "{}"),
+            ToolResult("small result 6", "call_6"),
+            AssistantWithCall("call_7", "read_file", "{}"),
+            ToolResult("small result 7", "call_7"),
+            AssistantWithCall("call_8", "read_file", "{}"),
+            ToolResult("small result 8", "call_8"),
+            AssistantWithCall("call_9", "read_file", "{}"),
+            ToolResult("small result 9", "call_9"),
+            User("Fix the layout bug in MainWindow."));
+
+        // Use a real swap store backed by a temp file.
+        var tempDir = Directory.CreateTempSubdirectory("fluxmux-swap-test");
+        try
+        {
+            var store = new ContextSwapStore(
+                new FileSystemContextIo(),
+                Path.Combine(tempDir.FullName, "context_swap.json"));
+
+            ForwardPrune.PruneTurn(payload, contextTokens: 10, measuredTokens: 100000, swapStore: store);
+
+            // The first tool result (the oversized one) should now contain a swap_id pointer.
+            var toolMsgs = payload["messages"]!.AsArray().Where(m => m is JsonObject o && o["role"]?.ToString() == "tool").ToList();
+            Assert.True(toolMsgs.Count >= 9, $"expected at least 9 tool results, got {toolMsgs.Count}");
+            var firstTool = toolMsgs[0] as JsonObject;
+            string content = firstTool!["content"]?.ToString() ?? string.Empty;
+            Assert.Contains("swap_id", content, StringComparison.Ordinal);
+            Assert.DoesNotContain(bigBody, content, StringComparison.Ordinal);
+
+            // Extract the swap_id from the pointer and verify the full body is on disk.
+            var match = System.Text.RegularExpressions.Regex.Match(content, @"swap_id=([a-z0-9_]+)");
+            Assert.True(match.Success, $"expected a swap_id in the pointer, got: {content}");
+            string swapId = match.Groups[1].Value;
+            var page = store.ReadPage(swapId, 0, 100_000);
+            Assert.Equal(bigBody, page.Text);
+        }
+        finally
+        {
+            tempDir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TruncateOversizedToolResults_without_swap_store_uses_lossy_stub()
+    {
+        // Build 9 tool results so the first one is "older" (beyond KeepRecentResults=8) and gets truncated.
+        string bigBody = new string('Y', 20000); // ~5000 tokens, exceeds the 1000-token cap
+        var payload = Payload(
+            User("Run the test suite."),
+            AssistantWithCall("call_1", "run_tests", "{}"),
+            ToolResult(bigBody, "call_1"),
+            AssistantWithCall("call_2", "read_file", "{}"),
+            ToolResult("small result 2", "call_2"),
+            AssistantWithCall("call_3", "read_file", "{}"),
+            ToolResult("small result 3", "call_3"),
+            AssistantWithCall("call_4", "read_file", "{}"),
+            ToolResult("small result 4", "call_4"),
+            AssistantWithCall("call_5", "read_file", "{}"),
+            ToolResult("small result 5", "call_5"),
+            AssistantWithCall("call_6", "read_file", "{}"),
+            ToolResult("small result 6", "call_6"),
+            AssistantWithCall("call_7", "read_file", "{}"),
+            ToolResult("small result 7", "call_7"),
+            AssistantWithCall("call_8", "read_file", "{}"),
+            ToolResult("small result 8", "call_8"),
+            AssistantWithCall("call_9", "read_file", "{}"),
+            ToolResult("small result 9", "call_9"),
+            User("Fix the layout bug in MainWindow."));
+
+        // No swap store: the lossy head+tail stub is used.
+        ForwardPrune.PruneTurn(payload, contextTokens: 10, measuredTokens: 100000, swapStore: null);
+
+        var toolMsgs = payload["messages"]!.AsArray().Where(m => m is JsonObject o && o["role"]?.ToString() == "tool").ToList();
+        Assert.True(toolMsgs.Count >= 9, $"expected at least 9 tool results, got {toolMsgs.Count}");
+        var firstTool = toolMsgs[0] as JsonObject;
+        string content = firstTool!["content"]?.ToString() ?? string.Empty;
+        // The lossy stub contains the head and tail of the original body, but not the full body.
+        Assert.DoesNotContain(bigBody, content, StringComparison.Ordinal);
+        // The stub should be much shorter than the original.
+        Assert.True(content.Length < bigBody.Length / 2, $"expected stub to be shorter, got {content.Length} chars");
     }
 }
 

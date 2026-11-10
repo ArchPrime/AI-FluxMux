@@ -51,8 +51,17 @@ public static class ForwardPrune
     /// <paramref name="measuredTokens"/> is the model's real prompt-token count when available
     /// (used for the "does it already fit" short-circuit); when null the 4-chars/token estimate
     /// is used.
+    /// <paramref name="swapStore"/> is the paged-context swap store. When non-null (paging on),
+    /// the truncate stage spills each oversized older tool-result body to the store and leaves a
+    /// short <c>swap_id</c> pointer in the prompt (lossless: the model can read it back via
+    /// <c>read_swap_log</c>). When null (paging off), the truncate stage uses today's lossy
+    /// head+tail stub byte-for-byte — so paging-off is identical to the pre-paging behavior.
     /// </summary>
-    public static ForwardPruneResult PruneTurn(JsonObject payload, int contextTokens, int? measuredTokens = null)
+    public static ForwardPruneResult PruneTurn(
+        JsonObject payload,
+        int contextTokens,
+        int? measuredTokens = null,
+        ContextEngine.ContextSwapStore? swapStore = null)
     {
         if (payload is null || payload["messages"] is not JsonArray)
         {
@@ -84,7 +93,7 @@ public static class ForwardPrune
             best = Math.Min(best, ReportAfter(payload, report));
         }
 
-        if (TruncateOversizedToolResults(payload, report))
+        if (TruncateOversizedToolResults(payload, report, swapStore))
         {
             best = Math.Min(best, ReportAfter(payload, report));
         }
@@ -291,8 +300,17 @@ public static class ForwardPrune
     /// Stage 3: truncate oversized older tool-result bodies to <see cref="ToolResultTokenCap"/>
     /// tokens (head + tail with an elision marker). The most recent <see cref="KeepRecentResults"/>
     /// tool results keep their full body.
+    ///
+    /// When <paramref name="swapStore"/> is non-null (paging on), each truncated body is spilled
+    /// to the store and the prompt carries a short <c>swap_id</c> pointer instead of the lossy
+    /// head+tail stub — making the truncation lossless (the model can read the full body back via
+    /// <c>read_swap_log</c>). When null (paging off), the lossy head+tail stub is used
+    /// byte-for-byte, identical to the pre-paging behavior.
     /// </summary>
-    private static bool TruncateOversizedToolResults(JsonObject payload, ForwardPruneReport report)
+    private static bool TruncateOversizedToolResults(
+        JsonObject payload,
+        ForwardPruneReport report,
+        ContextEngine.ContextSwapStore? swapStore = null)
     {
         if (payload["messages"] is not JsonArray messages)
         {
@@ -335,6 +353,20 @@ public static class ForwardPrune
                 continue;
             }
 
+            if (swapStore is not null)
+            {
+                // Paging on: spill the full body to the store and leave a short pointer. The
+                // truncation becomes lossless — the model can read the full body back via
+                // read_swap_log. If the spill fails (returns empty), fall back to the lossy stub.
+                var swapId = swapStore.Spill(text);
+                if (!string.IsNullOrEmpty(swapId))
+                {
+                    result["content"] = BuildSwapPointer(swapId, text.Length);
+                    truncated++;
+                    continue;
+                }
+            }
+
             result["content"] = TruncateHeadTail(text, capChars);
             truncated++;
         }
@@ -350,6 +382,19 @@ public static class ForwardPrune
     }
 
     // ---- helpers (self-contained; mirror the Hail Mary stage helpers) ----
+
+    /// <summary>
+    /// Builds the short pointer that replaces a spilled tool-result body in the prompt. It carries
+    /// the <c>swap_id</c> (so the model can read the full body back via <c>read_swap_log</c>), the
+    /// original byte count, and a hint about how to page through it. Kept deliberately terse so it
+    /// costs almost nothing in tokens.
+    /// </summary>
+    private static string BuildSwapPointer(string swapId, int originalBytes)
+    {
+        return "[Tool result spilled to swap store. swap_id=" + swapId
+            + ", original_bytes=" + originalBytes
+            + ". Read it back with the read_swap_log tool (pass swap_id, page=0 to start).]";
+    }
 
     private static string LoopKey(JsonObject call)
     {

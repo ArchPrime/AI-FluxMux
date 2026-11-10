@@ -279,6 +279,13 @@ public static class PortRulesPostMortem
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
         var limitName = HangLimitName(reason, waitLongerCount, firstByteDeadlineSeconds, live);
         var limitValue = HangLimitValue(limitName, firstByteDeadlineSeconds, live);
+        // The reported limit must be at least the quiet time at which the turn actually stopped.
+        // The first-byte deadline can be extended by wait-longer cycles (ResetForWaitLonger bumps
+        // it to WaitLongerSeconds, and the copy timeout is extended), so the turn may stop at a
+        // quiet time well beyond the original deadline. Reporting the original deadline (e.g.
+        // "hit 897s quiet (the limit is 600)") is misleading; the effective limit is the quiet
+        // time at which the stop fired.
+        var effectiveLimit = Math.Max(limitValue, quietSeconds);
         var isFirstByte = limitName == FirstByteSeconds;
 
         // When Port rules are off, the hang detection is a safety check that runs
@@ -296,7 +303,7 @@ public static class PortRulesPostMortem
                 + " hit "
                 + quietSeconds.ToString(CultureInfo.InvariantCulture) + "s quiet"
                 + " (the limit is "
-                + limitValue.ToString(CultureInfo.InvariantCulture)
+                + effectiveLimit.ToString(CultureInfo.InvariantCulture)
                 + "). "
                 + "This is a safety check that runs even when Port rules are off. "
                 + "If this model thinks before it writes, you can raise "
@@ -315,7 +322,7 @@ public static class PortRulesPostMortem
             + StoppedWhenRuleHit(
                 limitName,
                 quietSeconds.ToString(CultureInfo.InvariantCulture) + "s quiet",
-                limitValue.ToString(CultureInfo.InvariantCulture))
+                effectiveLimit.ToString(CultureInfo.InvariantCulture))
             + " "
             + HangChangeAdvice(limitName, localModelReady)
             + " "

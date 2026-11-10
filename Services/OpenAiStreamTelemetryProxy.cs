@@ -140,7 +140,7 @@ public static class OpenAiStreamTelemetryProxy
             //   over (GotContentToken). It does NOT fire on reasoning tokens, so a long thinking
             //   phase does not prematurely switch the UI to "Generating…" or the hang clock to
             //   the post-first-byte stall window.
-            if (!firstReasoningTokenFired && HasReasoningToken(line))
+            if (!firstReasoningTokenFired && HasReasoningToken(line, localReasoningMode))
             {
                 firstReasoningTokenFired = true;
                 onFirstReasoningToken?.Invoke();
@@ -290,7 +290,7 @@ public static class OpenAiStreamTelemetryProxy
     /// from "Prefilling…" to "Thinking…". Detects <c>reasoning_content</c> / <c>reasoning</c>
     /// fields on the delta, or raw thinking tags in <c>content</c>.
     /// </summary>
-    private static bool HasReasoningToken(string line)
+    private static bool HasReasoningToken(string line, string? localReasoningMode = null)
     {
         if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
         {
@@ -322,6 +322,8 @@ public static class OpenAiStreamTelemetryProxy
             }
 
             // reasoning_content / reasoning fields on the delta (llama-server with --reasoning auto).
+            // These are only emitted when the model is genuinely in a thinking phase, so they are
+            // always a valid "Thinking" signal regardless of the configured reasoning mode.
             if (firstChoice["delta"] is JsonObject delta)
             {
                 if (HasNonEmptyString(delta["reasoning_content"]) || HasNonEmptyString(delta["reasoning"]))
@@ -331,7 +333,19 @@ public static class OpenAiStreamTelemetryProxy
             }
 
             // Raw thinking tags in content (llama-server with --reasoning-format none).
-            if (firstChoice["delta"] is JsonObject delta2 && HasNonEmptyString(delta2["content"]))
+            //
+            // IMPORTANT: when reasoning is configured OFF, llama-server does NOT run a separate
+            // thinking phase. It simply emits the model's raw  tag inline at the very start of
+            // the first content chunk. In that case the  tag and the real content arrive on the
+            // SAME SSE line, so firing "Thinking" here would immediately be overwritten by
+            // "Generating" (the UI never renders the Thinking phase). We therefore only treat a
+            // raw  tag as a genuine thinking signal when reasoning is actually enabled
+            // (On / Auto / a thinking level). When reasoning is Off, the  tag is just markup to
+            // be stripped, not a thinking phase.
+            var reasoningEnabled = !LocalReasoningLaunchPolicy.IsOff(localReasoningMode);
+            if (reasoningEnabled
+                && firstChoice["delta"] is JsonObject delta2
+                && HasNonEmptyString(delta2["content"]))
             {
                 var content = delta2["content"]!.ToString() ?? string.Empty;
                 if (content.Contains("\x3cthink\x3e", StringComparison.Ordinal)

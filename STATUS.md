@@ -2,6 +2,242 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
+## ✅ DONE: Paged-context Step 5 — Tests (11/9)
+
+**What:** Final step of the unified paged-context + `VIBE_STATE.md` strategy (see `PLAN_PAGED_CONTEXT.md`). Added 2 new `ForwardPruneTests` verifying the lossless paging behavior:
+- `TruncateOversizedToolResults_with_swap_store_spills_body_and_leaves_pointer`: when a `ContextSwapStore` is provided, the truncate stage spills the oversized body to the store and leaves a `swap_id` pointer in the prompt. Verified the full body is on disk via `ReadPage`.
+- `TruncateOversizedToolResults_without_swap_store_uses_lossy_stub`: when no swap store is provided, the lossy head+tail stub is used byte-for-byte (identical to pre-paging behavior).
+
+**Files changed:**
+- `FluxMux.Avalonia.Tests/ForwardPruneTests.cs` — +2 tests (swap-store spill + lossy stub).
+
+**Build:** 0 errors (`artifacts\testrun\`). **Tests:** 1802/1802 pass (full suite).
+**Deploy:** NOT deployed (user's action).
+
+**Next:** All 5 steps of `PLAN_PAGED_CONTEXT.md` are complete. The paged-context capability is fully integrated: forward-prune spills oversized bodies to the swap store (lossless), the model can read them back via `read_swap_log`, and the `/mcp` route exposes all three tools. Deploy when ready.
+
+## ✅ DONE: Paged-context Step 0 — DRY refactor (shared atomic-write + `GetProfileBool`) (11/9)
+
+**What:** First step of the unified paged-context + `VIBE_STATE.md` strategy (see `PLAN_PAGED_CONTEXT.md`). A pure, behavior-preserving refactor that creates the two shared seams the new `Services/ContextEngine/` module will build on — no duplicated code.
+
+**Files changed:**
+- `Services/AtomicFile.cs` (NEW) — `public static AtomicFile.WriteAllTextResilient(path, contents)`: the single atomic-write implementation for the app (temp file + retry-while-locked + atomic `File.Move`, never throws).
+- `Services/FluxMuxConfigService.cs` — `WriteAllTextResilient` is now a thin wrapper delegating to `AtomicFile` (existing call site unchanged).
+- `Services/FluxMuxRuntimeService.cs` — added `private bool? GetProfileBool(model, variant, key, fallback)` (the old `GetForwardPruneEnabled` body, parameterized on `key`/`fallback`); `GetForwardPruneEnabled` is now a one-liner over it. Behavior identical (`fallback` replaces the hardcoded `true`).
+
+**Why:** Serves the four locked objectives — max performance/resilience, min brittleness, modularity/multiplatform (god-object breakup), and no code duplication. The two new flags (`LocalVibeStateEnabled`, `LocalContextPagingEnabled`) will be one-liners over `GetProfileBool`; the module's I/O will reuse `AtomicFile`.
+
+**Build:** 0 errors (`artifacts\testrun\`). **Tests:** 1763/1763 pass (full suite).
+**Deploy:** DEPLOYED 11/9 (user: close app → `build-fluxmux.bat clean` → restart).
+
+**Next:** Step 1 — `Services/ContextEngine/` module skeleton (`IContextEngine`, `IContextIo`, `ContextEngine`, `VibeState`). See `PLAN_PAGED_CONTEXT.md`.
+
+## ✅ DONE: Supervisor wired up — launch reliability + accurate prefill estimate/progress (11/8)
+
+**Problem:** The uncommitted refactor introduced `FluxMuxSupervisor` (new file) and moved launch-support logic into it, but `_supervisor` was **declared and never instantiated** in `FluxMuxRuntimeService`. All calls used `?.` so they silently no-opped:
+- `LogLaunchMonitor` → `launch_monitor.log` stopped being written (blind to launch failures)
+- RAM watchdog → dead
+- Prefill-estimate path → unusable
+
+This was the "recent edit that broke reliable launches." The dev source also had uncommitted changes that were never built or deployed — the running app was the Nov 1 backup.
+
+**Fix (Option A — minimal):**
+1. **`Services/FluxMuxRuntimeService.cs`** — wire up the supervisor in the constructor:
+   - Instantiate `_supervisor = new FluxMuxSupervisor(_logDirectory)`
+   - Wire watchdog delegates (`GetLocalServerProcess`, `KillLocalServerProcess`, `RamOverflowNotice`)
+   - Wire prefill-estimate delegates (`SetGatewayPrefillEstimate`, `ClearGatewayPrefillEstimate`)
+   - Call `_supervisor.Start()`
+   - Add public `PredictPrefillSeconds(...)` method that delegates to the supervisor (single source of truth for the estimate)
+2. **`ViewModels/MainViewModel.cs`** — replace the inline duplicate prefill-estimate logic with a single call to `_runtimeService.PredictPrefillSeconds(...)`. This keeps the UI progress bar and the gateway hang-dialog on the same number.
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — constructor wiring + `PredictPrefillSeconds` method
+- `ViewModels/MainViewModel.cs` — prefill-estimate block refactored to use the supervisor
+
+**Build:** 0 errors (separate-output build, `artifacts\testrun\`). **Tests:** 1759/1759 pass (full suite).
+**Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):**
+- `launch_monitor.log` writes again (check `C:\AI_Workbench\Logs\launch_monitor.log`)
+- Prefill progress bar shows an accurate estimate (e.g. "~4 min remaining" for a 236K-token prompt, not "~1-2 min")
+- RAM watchdog fires when free RAM drops below the threshold
+
+## 📋 NEXT: Option B — wire the full ModelScenario for supervisor verdicts (11/8)
+
+**What:** Wire the full 18-field `ModelScenario` from the ViewModel so the supervisor's verdicts (`RamThrashRisk`, `ContextOverflow`, `ReloadRecommended`, `CloudConsentRecommended`) can drive UI.
+
+**Why deferred:** The actionable responses are constrained by the task underway and risk fidelity loss:
+- `RamThrashRisk` → compact / close apps / stop model → **fidelity loss** (compacting prunes context; stopping the model kills the in-flight turn)
+- `ContextOverflow` → compact / switch profile → **fidelity loss** (same, plus a model reload)
+- `ReloadRecommended` → reload the model → **fidelity loss** (KV cache cold, in-flight state lost)
+- `CloudConsentRecommended` → route to cloud → **fidelity loss** (different model, different output)
+
+Every "actionable" warning is really a "sacrifice something" warning. The user is mid-task, the model is mid-prefill, and the only levers are: compact (loses context fidelity), stop/reload (loses in-flight work), cloud (loses model fidelity). That's not a "warning" in the useful sense — it's a **forced tradeoff** the user has to make under time pressure.
+
+**Design needed:**
+- Clear cost/benefit framing ("compacting now saves ~30s but loses the last 2 turns of context")
+- A way to *defer* the decision ("remind me after this turn")
+- Possibly an *automatic* path (auto-compact with a rollback) that doesn't require user input
+
+**Blocked on:** Design that makes warnings actionable without forcing a fidelity tradeoff mid-task. This is a UX design problem, not just a wiring problem.
+
+## ✅ DONE: 503 recovery for in-flight requests when model stops (11/8)
+
+**Problem:** When the memory guard (or idle timeout) stops the local model mid-stream, the in-flight Cline request dies with a connection reset. The gateway caught this and returned a **502** (`proxy_error`), which Cline treats as a terminal error — so the chat gets stuck and can't be resumed.
+
+**Fix:** In `FluxMuxGatewayHost.cs`, the gateway now detects when the model was stopped (memory guard, idle timeout, or user-initiated) and returns a **503 with `Retry-After: 5`** instead of a 502. Cline (and other OpenAI-compatible clients) treat 503 as a transient error and automatically retry after the `Retry-After` delay. The model is reloaded on the next request, so the retry succeeds.
+
+**Files changed:**
+- `Services/FluxMuxGatewayHost.cs` — `HandleChatCompletionsAsync` catch block: detect model-stopped state and return 503 with `Retry-After` instead of 502.
+
+**Build:** 0 errors (separate-output build, `artifacts\testrun\`). **Tests:** 1759/1759 pass (full suite).
+**Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Trigger the memory guard (or manually stop the model) while a chat is in flight. The chat should automatically retry after ~5 seconds and complete successfully (no "stuck" state).
+
+## ✅ DONE: Memory guard thresholds lowered (4→2 GiB hard-stop, 8→4 GiB warning) (11/8)
+
+**Change:** The memory guard was too conservative. Lowered the thresholds:
+- **Hard-stop:** 4 GiB → **2 GiB** (only stops the model when free RAM is critically low)
+- **Warning:** 8 GiB → **4 GiB** (warns the user earlier, giving more time to free RAM)
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — `MemoryGuardMinAvailableRamGiB` (4.0 → 2.0), `MemoryGuardWarningAvailableRamGiB` (8.0 → 4.0)
+
+**Build:** 0 errors (separate-output build, `artifacts\testrun\`). **Tests:** 1759/1759 pass (full suite).
+**Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Note:** The in-flight request problem (Cline can't resume after memory guard stops the model mid-stream) is still open. The gateway currently returns a 503 when the model is stopped, but Cline treats this as a terminal error. A future fix should make the gateway return a 503 with `Retry-After` so Cline can automatically retry.
+
+## ✅ DONE: VRAM→YaRN mid-chat switch no longer times out — probes excluded from the request semaphore (11/8)
+
+**Symptom (user report):** "fluxmux can no longer switch models from vram only to yarn profile mid chat, with context sizes that did not used to be a problem. Previously, without engaging port rules at all, I was free to switch to the yarn model without extreme wait time or timeouts."
+
+**Evidence (Proxy_Context_Events.jsonl, 11/8):**
+- Chat grew to **236,008 tokens** on VRAM-only profile (262,144 ctx) → `local_context_filling` (400).
+- Switched to YaRN profile (393,216 ctx, GPU+CPU). Next two turns both died on **Long-load first-byte**: one at **899s** (limit 899), one at **578s** (limit 600).
+- 899s = 600s default `ThinkingFirstByteSeconds` + one wait-longer cycle (copy-timeout formula `ThinkingFirstByteSeconds + DecisionSeconds + WaitLongerSeconds + DecisionSeconds` = 780s, +165s extend = 899s). 578s = raw 600s default.
+
+**Root cause (confirmed via git):** The **`_localRequestSemaphore` (capacity 1)** was **introduced in commit `d78163c` (Nov 2)** — "Fix slow generation, prefill speed accuracy…" (the "make it accurate" commit the user suspected). It wraps the **entire** `HandleChatCompletionsCoreAsync` (`FluxMuxGatewayHost.cs:511`), which includes the multi-minute YaRN prefill. Probes (`isProbeRequest`, checked at line 574, AFTER the semaphore at 511) ALSO take the semaphore.
+- On a VRAM→YaRN switch, the launch monitor fires probe requests to confirm readiness. The probe + the real Cline turn (~236K tokens) both contend for the single slot. Whichever holds it blocks the other for its full duration. A queued request then waits out the whole prefill and hits the Long-load first-byte watchdog (600s/899s) → killed.
+- Before Nov 2, probes and the real request ran in parallel (llama-server's single slot time-slices them), so the switch "just worked." The semaphore serialized them and turned a slow-but-fine prefill into a hard timeout.
+- `git log -S "_localRequestSemaphore"` confirms it was added only in `d78163c`.
+
+**Fix (applied):** Exclude probe requests from the semaphore. In `FluxMuxGatewayHost.cs:HandleChatCompletionsAsync`, the `isProbeRequest` detection (from `CloudEndpointValidationProbe.ProbeRequestHeader`) now runs BEFORE the semaphore, and the `_localRequestSemaphore.WaitAsync`/`Release` only apply to non-probe requests. Probes no longer queue behind a multi-minute YaRN/RAM-spill prefill, and a prefill no longer blocks a probe — restoring the pre-Nov-2 behavior where the switch "just worked." Two REAL requests still serialize (preserving the 13-min parallel-stall fix from `d78163c`). The redundant inner `isProbeRequest` in `HandleChatCompletionsCoreAsync` (line ~591) is left as-is (same value, minimal diff).
+
+**Files changed:**
+- `Services/FluxMuxGatewayHost.cs` — `HandleChatCompletionsAsync`: probe detection moved before the semaphore; semaphore acquire/release gated on `!isProbeRequest`.
+
+**Build:** 0 errors (separate-output build, `artifacts\testrun\`). **Tests:** 1759/1759 pass (full suite).
+**Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** With port rules OFF, switch from a VRAM-only profile to a YaRN profile mid-chat with a large context. The switch should complete without a Long-load first-byte timeout (no 899s/578s stop). Probes during the launch should no longer serialize behind the prefill.
+
+## ✅ DONE: Memory Guard now prompts user BEFORE stopping the model (11/8)
+
+**Symptom (user report):** "the model should not just exit — user should be prompted to free up RAM first."
+
+**Root cause:** The Memory Guard (`FluxMuxRuntimeService.cs:ConsiderMemoryGuardStopAsync`) was a single-tier guard: when free RAM dropped below 4 GiB it silently stopped llama-server. The user only found out after the fact via a parked-task banner.
+
+**Fix (two-tier guard + UI prompt):**
+1. **Warning tier (new):** when free RAM drops below **8 GiB** and stays there for **60 seconds**, the service raises a new `MemoryGuardWarning` event. The UI shows an amber banner with two buttons:
+   - **"Stop model now"** — proactively stops llama-server (same path as the hard-stop), so the user frees up RAM on their own terms.
+   - **"Dismiss"** — acknowledges the warning, starts a 10-minute cooldown so the banner doesn't flap. The model keeps running.
+2. **Hard-stop tier (unchanged):** when free RAM drops below **4 GiB**, the guard stops llama-server as before. This is the last line of defense; the warning tier gives the user a chance to act first.
+3. **Sustain requirement:** the warning must persist for 60 seconds before firing (avoids transient dips). The hard-stop keeps its existing 5-minute cooldown.
+4. **Reset on recovery:** when RAM recovers above 8 GiB, the observation timer resets. When no model is running, the timer resets.
+
+**Files changed:**
+- `Services/FluxMuxRuntimeService.cs` — new constants (`MemoryGuardWarningAvailableRamGiB=8.0`, `MemoryGuardWarningSustainSeconds=60`, `MemoryGuardWarningCooldownMinutes=10`), new fields (`_memoryGuardWarningObservedUtc`, `_lastMemoryGuardWarningUtc`), new event (`MemoryGuardWarning`), new public methods (`AcknowledgeMemoryGuardWarning`, `StopLocalModelForMemoryGuardAsync`), rewritten `ConsiderMemoryGuardStopAsync` (two-tier logic).
+- `ViewModels/MainViewModel.cs` — new banner properties (`MemoryGuardWarningBannerVisible/Text/Tooltip`), new `ShowMemoryGuardWarningBanner` method, new commands (`DismissMemoryGuardWarningBannerCommand`, `StopModelFromMemoryGuardWarningCommand`), event subscription in constructor.
+- `Views/MainWindow.axaml` — new amber banner Border with "Stop model now" + "Dismiss" buttons, placed just above the existing ParkedTaskBanner.
+
+**Build:** 0 errors (separate-output build, `artifacts\testrun\`). **Tests:** 1746/1746 pass (full suite).
+**Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):**
+- Free RAM < 8 GiB for 60s → amber banner appears with "Stop model now" + "Dismiss" buttons.
+- Click "Dismiss" → banner hides, 10-min cooldown starts.
+- Click "Stop model now" → model stops, parked-task banner appears.
+- Free RAM < 4 GiB → hard-stop fires (as before), parked-task banner appears.
+- Free RAM recovers > 8 GiB → observation timer resets.
+
+## 🔍 DIAGNOSED: Random model exits = Memory Guard firing (11/8)
+
+**Symptom (user report):** "random model exits under fluxmux."
+
+**Root cause (confirmed via `parked_tasks.log` + `FluxMuxRuntimeService.cs`):** The **Memory Guard** is stopping llama-server when free RAM drops below the 4.0 GiB floor. This is *by design* (protects the PC from OOM-crash), but it fires "randomly" because the active variant is RAM-spilling.
+
+**Evidence (2026-11-08 01:35:59):**
+- `parked_tasks.log`: `PARKED: Memory guard (free RAM dropped to 2.3 GiB, below the 4 GiB floor) Model: (unknown model). The local model was unloaded to free memory...`
+- `Local_Runtime_State.json` then shows the model reloaded at 01:39:42 (auto-reload on next chat).
+- `Proxy_Cloud_Recommend.json` (01:38:53): `source=local_hang_abort` — "llama-server was still prefilling a large (RAM-spilled) prompt and did not start a reply in time... Long-load first-byte hit 899s quiet (the limit is 600)."
+- `Proxy_Local_Reload_Recommend.json`: `spillCompact=true, nearLimit=true` — "part of this chat's context has spilled into RAM (slower) — compact now to pull it back onto the graphics card?"
+
+**Why it happens:**
+- Active variant = `YaRN test with vision`, `local_context=393216` (~393K), `local_vram_context=163840` (~160K VRAM), `local_extend_context_into_ram=true`.
+- So ~230K tokens of KV cache live in RAM. llama-server working set = **32 GB** (measured).
+- The 393K context exceeds the model's 262144 training context → YaRN rope scaling is active, and the context is capped at 262144 by llama-server.
+- When free RAM drops below 4 GiB (other apps + the 32 GB llama-server), the Memory Guard (`ConsiderMemoryGuardStopAsync`, `FluxMuxRuntimeService.cs:993`) stops the model. 5-min cooldown prevents flapping.
+- The "randomness" = it fires whenever RAM pressure crosses the threshold, which depends on what else is running + how much context has spilled.
+
+**Memory Guard code:** `FluxMuxRuntimeService.cs:381` (`MemoryGuardMinAvailableRamGiB = 4.0`), `:993` (`ConsiderMemoryGuardStopAsync`), `:373` (`MemoryGuardCooldownMinutes = 5`).
+
+**Fixes (user choice, no code change needed):**
+1. **Lower the context** — switch to a variant with smaller context (e.g. `max VRAM only context 2` = 262144, or `max VRAM only context` = 212992). The 393K YaRN variant is the heaviest.
+2. **Set the profile's RAM cache to a fixed value** instead of Unlimited — the guard's own notice says this.
+3. **Compact the chat** when the spill warning appears — pulls context back onto the GPU, reducing RAM pressure.
+4. **Raise the Memory Guard floor** (code change, `MemoryGuardMinAvailableRamGiB`) — NOT recommended; the 4 GiB floor protects against OOM-crash.
+5. **Free up system RAM** — close other apps that are eating memory.
+
+**Current state:** llama-server running (PID 113220, 32 GB working set, started 01:39:20). Free RAM = 12.7 GiB / 63.4 GiB total. The model is healthy right now; the next exit will happen when free RAM drops below 4 GiB again.
+
+## 📋 PLANNED: FluxMuxSupervisor — structural fix for ad-hoc-fix treadmill (11/8)
+
+**Problem:** 111 fix entries in STATUS.md, 5 recurring themes (prefill ×300, launch ×241, context ×211, RAM ×213, watchdog ×281). Root cause: monitoring/prediction/recommendation logic scattered across 3 god objects (`MainViewModel.cs` 21,862 lines, `FluxMuxRuntimeService.cs` 9,724 lines, `FluxMuxGatewayHost.cs` 4,243 lines). Each fix is a local patch that can't see the global picture.
+
+**Solution:** New `FluxMuxSupervisor.cs` (~1,800 lines) with single responsibility: *monitor health, predict failures, recommend interventions.* Not a new god object — a focused service that reads existing state files, calls existing routing tests, writes one `Supervisor_Health.json`, and owns the RAM watchdog + prefill estimate + reload-recommend lifecycle.
+
+**Key structural change:** `ModelScenario` record makes the scenario *explicit* instead of *implicit* (Cline-like × RAM-spill × YaRN × cold-start × port-rules × routing). Every intervention becomes a function of the scenario, not a patch to a specific `if`.
+
+**5 Phases (each independently deployable + testable):**
+- Phase 1 (ZERO RISK): Read-only correlator. Computes `ModelScenario`, writes `Supervisor_Health.json`. No behavior change.
+- Phase 2: Prefill prediction. Move `SetPrefillEstimate`/`ClearPrefillEstimate` + speed-model selection to supervisor.
+- Phase 3: Reload-recommend + hang watchdog. Move `ReadLocalReloadRecommend`/`AnswerLocalReloadRecommend` + oscillation guard to supervisor.
+- Phase 4: RAM watchdog + launch monitor. Move `StartRamWatchdog`/`OnRamWatchdogTick` + `LogLaunchMonitor` to supervisor.
+- Phase 5: Delete scattered `if`s from god objects. `MainViewModel.cs` → ~20,000 lines, `FluxMuxRuntimeService.cs` → ~8,500 lines.
+
+**Full plan:** `PLAN_SUPERVISOR.md` (219 lines, 12 sections).
+
+**Backup:** `c:\AI_Workbench\Workspace\backups\FluxMux.Avalonia_0.3.4_2026-11-08_0058_source` (2,400 files, 4.3 GB).
+
+**Status:** ALL 5 PHASES DONE (compiled + tested, NOT deployed). FluxMuxSupervisor.cs (484 lines) + FluxMuxSupervisorTests.cs (300 lines, 19 tests). 1759/1759 tests pass. Phase 5: Removed 3 legacy methods from FluxMuxRuntimeService.cs (10590 → 10496 lines). Supervisor now owns: prefill estimate, reload-recommend, RAM watchdog, launch monitor, oscillation guard. Deploy: close app → build-fluxmux.bat clean → restart.
+
+## ✅ DONE: Prefill timeout 897s — stale estimate + watchdog oscillation + misleading post-mortem (11/7)
+
+**Symptom (user report):** "fluxmux still times out during context prefilling stage." The turn was stopped when "Long-load first-byte hit 897s quiet (the limit is 600)." User noted "this was not a feature several versions back."
+
+**Root cause (confirmed via `Proxy_Cloud_Handshake.log` + code):** Three compounding bugs:
+
+1. **Stale prefill estimate (60s) from a previous turn.** `SetPrefillEstimate` is called on `PrefillStartedNotice` but `ClearPrefillEstimate` is only called on launch/abort — NOT on normal completion (`PrefillFirstByteNotice`). So a 60s estimate from a prior turn persisted into the next turn. The watchdog's prefill window used `min(estimate, 120)` = 60s, so the dialog surfaced at 60s instead of the 600s long-load deadline.
+
+2. **Watchdog oscillation.** After the dialog surfaced at 60s, `AskHangWaitAsync` called `StreamRecovered` which returned true (header bytes present + 1800s stall deadline for long-load). This returned "recovered", but the next 250ms tick re-triggered the dialog. This oscillated every 250ms for 897s (818s of log spam: "first_byte after 880s — asking whether to wait longer" / "llama-server is working again; closed the wait prompt"). The turn was never actually aborted by the user; it ran to the 897s copy timeout.
+
+3. **Misleading post-mortem.** `FormatHang` reported "hit 897s quiet (the limit is 600)" — the 600s was the original `FirstByteDeadline`, but the turn actually stopped at 897s quiet (after wait-longer cycles extended the deadline). The message should report the actual quiet time.
+
+4. **Wrong estimate model for long-load profiles.** The 60s estimate came from the VRAM warm speed (23,452 tok/s), but this was a RAM-spill prefill (actual ~1,889 tok/s cold). The `isRamSpill` check (prompt > VRAM context) was false, so the VRAM estimate was used instead of the RAM-spill model. For long-load profiles (YaRN / extended-context / GPU+CPU), the RAM-spill model should be used even when the prompt isn't strictly > VRAM context.
+
+**Fix:**
+- `Services/FluxMuxGatewayHost.cs` (`WatchLocalStreamHangAsync`): Changed the prefill window to `max(estimate, FirstByteDeadline)` so a stale short estimate can't shorten the long-load deadline. Added an oscillation guard: after a wait-longer choice (`WaitLongerCount > 0`), don't re-surface the first-byte dialog every 250ms.
+- `Services/PortRulesPostMortem.cs` (`FormatHang`): Report `effectiveLimit = max(limitValue, quietSeconds)` so the post-mortem shows the actual quiet time at which the turn stopped, not the original deadline.
+- `ViewModels/MainViewModel.cs` (`PrefillFirstByteNotice`): Call `ClearPrefillEstimate()` when prefill completes, so a stale estimate doesn't persist into the next turn.
+- `ViewModels/MainViewModel.cs` (`PrefillStartedNotice`): Use the RAM-spill estimate model for long-load profiles (`isRamSpill || isLongLoadProfile`), not just when the prompt exceeds VRAM context.
+- `Services/FluxMuxRuntimeService.cs`: Added `ManagedLocalGpuOffloadMode` property so the ViewModel can detect long-load profiles.
+
+**Build:** 0 errors. **Tests:** 1740/1740 pass (updated 2 post-mortem tests to expect the actual quiet time). **Deploy:** NOT deployed. Close app → `build-fluxmux.bat clean` → restart.
+
+**Verify (manual):** Start a long YaRN chat and send a message that triggers a large prefill. The prefill estimate should use the RAM-spill model (not the VRAM warm speed). The watchdog should NOT oscillate (no 250ms log spam). If the prefill is genuinely slow, the post-mortem should report the actual quiet time, not "the limit is 600."
+
 ## ✅ DONE: Dialog content off-centre + unnecessarily tall (11/7)
 
 **Symptom (user report):** The environment-tab update buttons ("Check for updates" / "Update now" for AI-FluxMux, llama-server, Harness) invoke confirmation dialogs (`ThemedDialog.Confirm` → `ConfirmDialogWindow`) whose content is not horizontally centred and whose windows are unnecessarily tall relative to the content.
@@ -2583,6 +2819,11 @@ Two files are fully Windows-only (`[SupportedOSPlatform("windows")]`):
 **State:** COMPILED & TESTED — 0 build errors, 1728/1728 tests pass.
 
 **Deploy:** Close the running app → `build-fluxmux.bat clean` → restart.
+
+
+
+
+
 
 
 

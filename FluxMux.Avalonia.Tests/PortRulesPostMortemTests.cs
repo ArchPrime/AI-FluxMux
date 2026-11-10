@@ -141,7 +141,9 @@ public sealed class PortRulesPostMortemTests
         // Names both possibilities instead of assuming a live server that was slow.
         Assert.Contains("Either the model stopped for some reason, or llama-server did not start a reply in time", text);
         Assert.Contains("**First-byte seconds**", text);
-        Assert.Contains("the current setting is 25", text);
+        // The reported limit is the actual quiet time (52s), not the original 25s deadline,
+        // because the turn stopped at 52s quiet (after wait-longer cycles extended the deadline).
+        Assert.Contains("the current setting is 52", text);
         Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
         Assert.Contains("**Max think first-byte**", text);
         // Offers retry / new chat instead of the "will hit the same stop" closer.
@@ -166,8 +168,10 @@ public sealed class PortRulesPostMortemTests
             localModelReady: true,
             portRulesActive: false);
         Assert.Contains("Long-load first-byte", text);
-        // Reports the actual long-load deadline (600s), not the 180 think-budget cap.
-        Assert.Contains("(the limit is 600)", text);
+        // Reports the actual quiet time at which the turn stopped (899s), not the original
+        // 600s deadline. The turn stopped at 899s quiet (after wait-longer cycles extended
+        // the deadline), so the effective limit is 899s.
+        Assert.Contains("(the limit is 899)", text);
         // Names the situation as a slow / RAM-spilled prefill, not a think-budget overrun.
         Assert.Contains("still prefilling a large (RAM-spilled) prompt", text);
         // Must NOT mislabel it as the think-budget cap.
