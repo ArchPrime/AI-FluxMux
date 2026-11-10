@@ -3312,6 +3312,7 @@ public sealed class FluxMuxRuntimeService
 				CreateNoWindow = true,
 			};
 			psi.ArgumentList.Add("log");
+			psi.ArgumentList.Add("--fixed-strings");
 			psi.ArgumentList.Add("--grep");
 			psi.ArgumentList.Add(grepPattern);
 			psi.ArgumentList.Add("--format");
