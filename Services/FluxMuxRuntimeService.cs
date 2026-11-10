@@ -3299,8 +3299,9 @@ public sealed class FluxMuxRuntimeService
 
 			// Filter by the folder name so we only get checkpoints for this project,
 			// not other projects that share the same git repo.
+			// Use a simple prefix match to avoid regex issues with square brackets.
 			var folderName = System.IO.Path.GetFileName(workDir.TrimEnd(System.IO.Path.DirectorySeparatorChar));
-			var grepPattern = $"fluxmux-checkpoint [{folderName}]";
+			var grepPattern = "fluxmux-checkpoint";
 
 			var psi = new System.Diagnostics.ProcessStartInfo
 			{
@@ -3321,8 +3322,20 @@ public sealed class FluxMuxRuntimeService
 			psi.ArgumentList.Add("-20");
 
 			var process = System.Diagnostics.Process.Start(psi);
-			process?.WaitForExit();
-			var output = process?.StandardOutput.ReadToEnd() ?? string.Empty;
+			if (process is null)
+			{
+				return results;
+			}
+			process.WaitForExit();
+			var output = process.StandardOutput.ReadToEnd();
+			var errOutput = process.StandardError.ReadToEnd();
+
+			// If there's an error, log it to the results list as a special entry.
+			if (process.ExitCode != 0 && !string.IsNullOrWhiteSpace(errOutput))
+			{
+				results.Add(("ERROR", errOutput.Trim(), ""));
+				return results;
+			}
 
 			foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
 			{

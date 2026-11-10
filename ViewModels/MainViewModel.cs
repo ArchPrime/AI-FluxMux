@@ -3195,6 +3195,13 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
+        // Check if the first entry is an error.
+        if (checkpoints[0].Hash == "ERROR")
+        {
+            StatusMessage = "Git error: " + checkpoints[0].Message;
+            return;
+        }
+
         // For now, just restore to the most recent checkpoint.
         // A full UI with a list picker can be added later.
         var latest = checkpoints[0];
