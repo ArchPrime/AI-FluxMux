@@ -3114,6 +3114,17 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var chosenPath = folder.Path.LocalPath;
+        // If the user selected the .git folder, go up one level to the actual project folder.
+        var trimmedPath = chosenPath.TrimEnd(System.IO.Path.DirectorySeparatorChar);
+        var folderName = System.IO.Path.GetFileName(trimmedPath);
+        if (string.Equals(folderName, ".git", System.StringComparison.OrdinalIgnoreCase))
+        {
+            var parent = System.IO.Path.GetDirectoryName(trimmedPath);
+            if (!string.IsNullOrWhiteSpace(parent))
+            {
+                chosenPath = parent;
+            }
+        }
         LocalGitCheckpointDirectory = chosenPath;
         SaveCurrentSelections();
 
@@ -3164,6 +3175,17 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var chosenPath = folder.Path.LocalPath;
+        // If the user selected the .git folder, go up one level to the actual project folder.
+        var trimmedPath = chosenPath.TrimEnd(System.IO.Path.DirectorySeparatorChar);
+        var folderName = System.IO.Path.GetFileName(trimmedPath);
+        if (string.Equals(folderName, ".git", System.StringComparison.OrdinalIgnoreCase))
+        {
+            var parent = System.IO.Path.GetDirectoryName(trimmedPath);
+            if (!string.IsNullOrWhiteSpace(parent))
+            {
+                chosenPath = parent;
+            }
+        }
         StatusMessage = "Listing checkpoints…";
 
         var checkpoints = _runtimeService.ListGitCheckpoints(chosenPath);

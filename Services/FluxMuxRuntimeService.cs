@@ -3294,6 +3294,9 @@ public sealed class FluxMuxRuntimeService
 		var results = new List<(string Hash, string Message, string Date)>();
 		try
 		{
+			// If the user selected the .git folder, go up one level to the actual project folder.
+			workDir = NormalizeGitWorkDir(workDir);
+
 			// Filter by the folder name so we only get checkpoints for this project,
 			// not other projects that share the same git repo.
 			var folderName = System.IO.Path.GetFileName(workDir.TrimEnd(System.IO.Path.DirectorySeparatorChar));
@@ -3343,6 +3346,9 @@ public sealed class FluxMuxRuntimeService
 	{
 		try
 		{
+			// If the user selected the .git folder, go up one level to the actual project folder.
+			workDir = NormalizeGitWorkDir(workDir);
+
 			var psi = new System.Diagnostics.ProcessStartInfo
 			{
 				FileName = "git",
@@ -3370,6 +3376,27 @@ public sealed class FluxMuxRuntimeService
 		{
 			return new RuntimeActionResult { IsSuccess = false, Status = "Restore failed", Details = ex.Message };
 		}
+	}
+
+	/// <summary>
+	/// If the given path is a .git folder, returns its parent directory.
+	/// Otherwise returns the path unchanged. This handles the case where the user
+	/// accidentally selects the .git folder instead of the project folder.
+	/// </summary>
+	private static string NormalizeGitWorkDir(string workDir)
+	{
+		if (string.IsNullOrWhiteSpace(workDir)) return workDir;
+		var trimmed = workDir.TrimEnd(System.IO.Path.DirectorySeparatorChar);
+		var folderName = System.IO.Path.GetFileName(trimmed);
+		if (string.Equals(folderName, ".git", System.StringComparison.OrdinalIgnoreCase))
+		{
+			var parent = System.IO.Path.GetDirectoryName(trimmed);
+			if (!string.IsNullOrWhiteSpace(parent))
+			{
+				return parent;
+			}
+		}
+		return workDir;
 	}
 
 	public async Task<RuntimeActionResult> RestartCloudAsync(string provider, string model, CancellationToken cancellationToken = default(CancellationToken))
