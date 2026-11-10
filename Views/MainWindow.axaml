@@ -3500,7 +3500,7 @@
                                 Background="#1A1A1A"
                                 Foreground="White"
                                 BorderBrush="#333333"
-                                Command="{Binding RunGitCheckpointCommand}"
+                                Click="GitCheckpointButton_Click"
                                 ToolTip.Tip="Creates a git checkpoint in the workspace. This is a safety net: if the model goes off the rails, you can reset to this checkpoint.&#10;&#10;The checkpoint is a git commit with a message like 'fluxmux-checkpoint: manual checkpoint' so it's easy to find and reset to later." />
                         <Popup x:Name="HailMaryPickerPopup"
                                 IsOpen="False"

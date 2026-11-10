@@ -55,6 +55,7 @@ public sealed class GitRunner : IGitRunner
             psi2.ArgumentList.Add("commit");
             psi2.ArgumentList.Add("-m");
             psi2.ArgumentList.Add(message);
+            psi2.ArgumentList.Add("--allow-empty");
             var commit = System.Diagnostics.Process.Start(psi2);
             commit?.WaitForExit();
 

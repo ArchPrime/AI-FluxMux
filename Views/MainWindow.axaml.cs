@@ -333,6 +333,14 @@ public partial class MainWindow : Window
         }
     }
 
+    private void GitCheckpointButton_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (DataContext is MainViewModel vm)
+        {
+            _ = vm.RunGitCheckpointCommand.ExecuteAsync(null);
+        }
+    }
+
     /// <summary>
     /// Closes the Hail Mary picker popup after the user arms the prune (the "Armed" button
     /// already ran the command; this just dismisses the popup).
