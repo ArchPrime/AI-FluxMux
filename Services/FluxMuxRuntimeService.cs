@@ -3298,10 +3298,12 @@ public sealed class FluxMuxRuntimeService
 			workDir = NormalizeGitWorkDir(workDir);
 
 			// Filter by the folder name so we only get checkpoints for this project,
-			// not other projects that share the same git repo.
-			// Use a simple prefix match to avoid regex issues with square brackets.
+			// not other projects that share the same git repo. CreateCheckpoint writes
+			// "fluxmux-checkpoint [FolderName]: ...", so grep for that exact prefix.
+			// --fixed-strings is required: the square brackets would otherwise be read as a
+			// regex character class and the match would fail.
 			var folderName = System.IO.Path.GetFileName(workDir.TrimEnd(System.IO.Path.DirectorySeparatorChar));
-			var grepPattern = "fluxmux-checkpoint";
+			var grepPattern = $"fluxmux-checkpoint [{folderName}]";
 
 			var psi = new System.Diagnostics.ProcessStartInfo
 			{
@@ -4287,7 +4289,22 @@ public sealed class FluxMuxRuntimeService
 				_managedLocalVramContext = 0;
 			}
 		}
-		List<string> args = BuildLocalServerArgs(modelPath, localBackendPort, profile, helpText, effectiveOffload, vision.Enabled, vision.ProjectorPath, vision.MaxImageEdge);
+		// Sample VRAM and estimate the model footprint *before* building args so the
+		// cache-strategy advisor can size --ctx-checkpoints to the available headroom.
+		// The measured footprint (from a previous launch) is preferred over the estimate
+		// because it reflects the real VRAM the model consumed, not a heuristic.
+		double modelFileGiB = new FileInfo(modelPath).Length / 1073741824.0;
+		double launchVramBaselineGiB = 0;
+		double launchVramFreeGiB = 0;
+		double launchVramTotalGiB = 0;
+		bool launchVramSampled = LocalGpuVramSample.TryRead(out launchVramBaselineGiB, out launchVramTotalGiB, out launchVramFreeGiB);
+		double launchVramEstimateGiB = LocalVramFootprintEstimate.EstimateGiB(profile, modelFileGiB, vision.Enabled);
+		double launchVramFootprintGiB = GetProfileDouble(profile, "MeasuredVramGiB", 0);
+		if (launchVramFootprintGiB <= 0)
+		{
+			launchVramFootprintGiB = launchVramEstimateGiB;
+		}
+		List<string> args = BuildLocalServerArgs(modelPath, localBackendPort, profile, helpText, effectiveOffload, vision.Enabled, vision.ProjectorPath, vision.MaxImageEdge, launchVramTotalGiB, launchVramFootprintGiB);
 		_managedLocalMaxTokens = ReadIntArg(args, "-n");
 		List<string> multiGpuArgs = BuildMultiGpuArgs(helpText, effectiveOffload, gpuGuardrail.UseConservativeLocalLaunch, profile);
 		if (multiGpuArgs.Count > 0)
@@ -4295,12 +4312,6 @@ public sealed class FluxMuxRuntimeService
 			args.AddRange(multiGpuArgs);
 		}
 		string argString = string.Join(" ", args.Select(QuoteArg));
-		double modelFileGiB = new FileInfo(modelPath).Length / 1073741824.0;
-		double launchVramBaselineGiB = 0;
-		double launchVramFreeGiB = 0;
-		double launchVramTotalGiB = 0;
-		bool launchVramSampled = LocalGpuVramSample.TryRead(out launchVramBaselineGiB, out launchVramTotalGiB, out launchVramFreeGiB);
-		double launchVramEstimateGiB = LocalVramFootprintEstimate.EstimateGiB(profile, modelFileGiB, vision.Enabled);
 		LocalVramPressureAssessment launchVramWarning = LocalVramPressureAdvisor.Assess(
 			launchVramEstimateGiB,
 			launchVramFreeGiB,
@@ -6402,7 +6413,7 @@ public sealed class FluxMuxRuntimeService
 		return 0;
 	}
 
-	private List<string> BuildLocalServerArgs(string modelPath, int port, JsonObject profile, string helpText, string offloadMode, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge)
+	private List<string> BuildLocalServerArgs(string modelPath, int port, JsonObject profile, string helpText, string offloadMode, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, double totalVramGiB = 0, double measuredFootprintGiB = 0)
 	{
 		List<string> list = new List<string>
 		{
@@ -6706,7 +6717,15 @@ public sealed class FluxMuxRuntimeService
 		{
 			list.Add("--no-cache-prompt");
 		}
-		int profileInt9 = GetProfileInt(profile, "LocalCacheReuse", 0);
+		// Derive the optimal cache strategy from the model's attributes (vision, MTP)
+		// and VRAM headroom. An explicit user choice (LocalCacheStrategy != Auto) wins;
+		// otherwise the advisor picks Full (chunk-based reuse) for text models and
+		// PrefixCheckpoints (exact-prefix + --ctx-checkpoints) for vision/MTP models.
+		// This keeps the same hardware optimal across different models, and lets a
+		// future llama-server build that supports cache-reuse with vision be adopted
+		// by simply flipping the strategy (see LocalCacheStrategyAdvisor).
+		var cacheDecision = LocalCacheStrategyAdvisor.Derive(profile, localVisionEnabled, totalVramGiB, measuredFootprintGiB);
+		int profileInt9 = cacheDecision.CacheReuse;
 		if (profileInt9 > 0 && SupportsArg(helpText, "--cache-reuse"))
 		{
 			list.Add("--cache-reuse");
@@ -6822,7 +6841,7 @@ public sealed class FluxMuxRuntimeService
 			list.Add("--image-max-tokens");
 			list.Add(profileInt16.ToString());
 		}
-		int profileInt17 = GetProfileInt(profile, "LocalCtxCheckpoints", 0);
+		int profileInt17 = cacheDecision.CtxCheckpoints;
 		if (profileInt17 > 0 && SupportsArg(helpText, "--ctx-checkpoints"))
 		{
 			list.Add("--ctx-checkpoints");

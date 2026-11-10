@@ -2653,6 +2653,9 @@ public partial class MainViewModel : ViewModelBase
     public partial string LocalVariantCacheReuse { get; set; } = "256";
 
     [ObservableProperty]
+    public partial string LocalVariantCacheStrategy { get; set; } = "Auto";
+
+    [ObservableProperty]
     public partial string LocalVariantCacheRam { get; set; } = "8192";
 
     [ObservableProperty]
@@ -3817,8 +3820,17 @@ public partial class MainViewModel : ViewModelBase
                 ContextGauge.DetailText = promptTokens.ToString("0", CultureInfo.InvariantCulture)
                     + " / " + contextLimit.ToString("0", CultureInfo.InvariantCulture) + " tokens";
                 ContextGauge.Badge = string.IsNullOrEmpty(model) ? string.Empty : model.Length > 18 ? model[..18] + "…" : model;
+                // When the client reinflates its full history (Cline), the operator also sees a
+                // HIGHER token count in the client's own UI. That is not a bug: this gauge measures
+                // what llama-server actually evaluated for the forwarded turn (the KV-cache prefix),
+                // while the client counts its entire reinflated history before forwarding. Label the
+                // two distinctly so they are not read as a contradiction.
+                var reinflateNote = UserClientReinflatesContext
+                    ? " This gauge shows tokens forwarded to llama-server (the KV-cache prefix). The client's own counter is higher because it reinflates the full history before forwarding."
+                    : string.Empty;
                 ContextGauge.Tooltip = "Context fill: " + ContextGauge.DetailText
-                    + " (" + ContextGauge.PercentText + "). Measured by the model's tokenizer each turn.";
+                    + " (" + ContextGauge.PercentText + "). Measured by the model's tokenizer each turn."
+                    + reinflateNote;
                 HailMaryButtonVisible = true;
             }
             else
@@ -5066,6 +5078,11 @@ public partial class MainViewModel : ViewModelBase
         if (UserClientReinflatesContext)
         {
             System.Diagnostics.Debug.WriteLine("[HailMary] Cline-like mode: triggering /smol via keyboard simulation");
+            // Also log to launch_monitor.log so "did Hail Mary fire?" is answerable from disk, not
+            // just the VS Code Debug console. In Cline mode the /smol trigger is fire-and-forget
+            // (keyboard simulation into VS Code), so without this the only trace of an attempt is
+            // the on-screen outcome text. The result line below records success/failure + reason.
+            _runtimeService.Supervisor?.LogLaunchMonitor("Hail Mary (Cline mode): triggering /smol via keyboard simulation");
             HailMaryBannerVisible = false;
             HailMaryQueued = true;
             SetHailMaryOutcome("Triggering Cline's /smol command…");
@@ -5077,6 +5094,10 @@ public partial class MainViewModel : ViewModelBase
             {
                 var result = ClineSmolTrigger.TriggerSmol();
                 System.Diagnostics.Debug.WriteLine("[HailMary] ClineSmolTrigger result: " + result);
+                // Record the outcome to disk too: success, or the specific failure reason (e.g.
+                // "Could not find a VS Code window", "could not bring it to the foreground"). This is
+                // the only durable record of whether the keyboard simulation actually landed.
+                _runtimeService.Supervisor?.LogLaunchMonitor("Hail Mary (Cline mode): /smol trigger " + (result.Success ? "SUCCESS" : "FAILED") + " — " + result.Message);
                 // Update the UI on the main thread.
                 global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                 {
@@ -7676,6 +7697,9 @@ public partial class MainViewModel : ViewModelBase
 
     public ObservableCollection<string> LocalCacheReuseOptions { get; } =
     ["0", "64", "128", "256", "512"];
+
+    public ObservableCollection<string> LocalCacheStrategyOptions { get; } =
+    ["Auto", "Full", "PrefixCheckpoints", "Minimal"];
 
     public ObservableCollection<string> LocalCacheRamOptions { get; } =
     ["Disabled", "4096", "8192", "16384", "Unlimited"];
@@ -14450,6 +14474,8 @@ public partial class MainViewModel : ViewModelBase
         => AcceptLocalComboChange("LocalSpecType", value, restored => LocalVariantSpecType = restored);
     partial void OnLocalVariantCacheReuseChanged(string value)
         => AcceptLocalComboChange("LocalCacheReuse", value, restored => LocalVariantCacheReuse = restored);
+    partial void OnLocalVariantCacheStrategyChanged(string value)
+        => AcceptLocalComboChange("LocalCacheStrategy", value, restored => LocalVariantCacheStrategy = restored);
     partial void OnLocalVariantCacheRamChanged(string value)
         => AcceptLocalComboChange("LocalCacheRam", value, restored => LocalVariantCacheRam = restored);
     partial void OnLocalVariantRopeScalingChanged(string value)
@@ -14740,6 +14766,7 @@ public partial class MainViewModel : ViewModelBase
         Restore("LocalUbatchSize", LocalVariantUbatchSize, value => LocalVariantUbatchSize = value);
         Restore("LocalSpecType", LocalVariantSpecType, value => LocalVariantSpecType = value);
         Restore("LocalCacheReuse", LocalVariantCacheReuse, value => LocalVariantCacheReuse = value);
+        Restore("LocalCacheStrategy", LocalVariantCacheStrategy, value => LocalVariantCacheStrategy = value);
         Restore("LocalCacheRam", LocalVariantCacheRam, value => LocalVariantCacheRam = value);
         Restore("LocalRopeScaling", LocalVariantRopeScaling, value => LocalVariantRopeScaling = value);
         Restore("LocalRopeScale", LocalVariantRopeScale, value => LocalVariantRopeScale = value);
@@ -21301,6 +21328,7 @@ public partial class MainViewModel : ViewModelBase
         settings["LocalUbatchSize"] = LocalVariantUbatchSize;
         settings["LocalSpecType"] = FluxMuxRuntimeService.NormalizeLlamaSpecType(LocalVariantSpecType);
         settings["LocalCacheReuse"] = LocalVariantCacheReuse;
+        settings["LocalCacheStrategy"] = LocalVariantCacheStrategy;
         settings["LocalCacheRam"] = LocalVariantCacheRam;
         settings["LocalRopeScaling"] = LocalVariantRopeScaling;
         settings["LocalRopeScale"] = LocalVariantRopeScale;
@@ -21927,6 +21955,7 @@ public partial class MainViewModel : ViewModelBase
             LocalSpecTypeOptions,
             specFallback);
         LocalVariantCacheReuse = CoerceLocalOption(settings["LocalCacheReuse"]?.ToString(), LocalCacheReuseOptions, "256");
+        LocalVariantCacheStrategy = CoerceLocalOption(settings["LocalCacheStrategy"]?.ToString(), LocalCacheStrategyOptions, "Auto");
         LocalVariantCacheRam = CoerceLocalOption(NormalizeCacheRamOption(settings["LocalCacheRam"]?.ToString() ?? string.Empty), LocalCacheRamOptions, advice.CacheRam);
         LocalVariantRopeScaling = CoerceLocalOption(settings["LocalRopeScaling"]?.ToString(), LocalRopeScalingOptions, "Auto");
         LocalVariantRopeScale = CoerceLocalOption(settings["LocalRopeScale"]?.ToString(), LocalRopeScaleOptions, "Auto");
@@ -22296,6 +22325,7 @@ public partial class MainViewModel : ViewModelBase
             ["LocalUbatchSize"] = LocalVariantUbatchSize,
             ["LocalSpecType"] = LocalVariantSpecType,
             ["LocalCacheReuse"] = LocalVariantCacheReuse,
+            ["LocalCacheStrategy"] = LocalVariantCacheStrategy,
             ["LocalCacheRam"] = LocalVariantCacheRam,
             ["LocalRopeScaling"] = LocalVariantRopeScaling,
             ["LocalRopeScale"] = LocalVariantRopeScale,
@@ -23018,6 +23048,9 @@ public partial class MainViewModel : ViewModelBase
         var reuse = ParseInt(current.GetValueOrDefault("LocalCacheReuse"), 0);
         if (reuse < 256)
             merged["LocalCacheReuse"] = "256";
+        // Cache strategy: default to Auto (advisor-derived) unless explicitly set.
+        if (string.IsNullOrWhiteSpace(current.GetValueOrDefault("LocalCacheStrategy")))
+            merged["LocalCacheStrategy"] = "Auto";
 
         var template = current.GetValueOrDefault("LocalChatTemplate", canonical["LocalChatTemplate"]);
         merged["LocalChatTemplate"] = SanitizeLocalChatTemplate(
@@ -23185,6 +23218,7 @@ public partial class MainViewModel : ViewModelBase
             ["LocalUbatchSize"] = LocalVariantUbatchSize,
             ["LocalSpecType"] = LocalVariantSpecType,
             ["LocalCacheReuse"] = LocalVariantCacheReuse,
+            ["LocalCacheStrategy"] = LocalVariantCacheStrategy,
             ["LocalCacheRam"] = LocalVariantCacheRam,
             ["LocalRopeScaling"] = LocalVariantRopeScaling,
             ["LocalRopeScale"] = LocalVariantRopeScale,
@@ -23249,6 +23283,7 @@ public partial class MainViewModel : ViewModelBase
                 ? advice.SpecType
                 : inferredSpec);
         SetIfMissingOrAuto(settings, "LocalCacheReuse", "256");
+        SetIfMissingOrAuto(settings, "LocalCacheStrategy", "Auto");
         SetIfMissingOrAuto(settings, "LocalCacheRam", advice.CacheRam);
         SetIfMissingOrAuto(settings, "LocalFit", advice.PreferFitEnabled ? "Enabled" : "Disabled");
         SetIfMissingOrAuto(settings, "LocalSwaFull", advice.EnableSwaFull ? "Enabled" : "Disabled");
@@ -23298,6 +23333,7 @@ public partial class MainViewModel : ViewModelBase
             LocalSpecTypeOptions,
             InferSpecTypeFromProfile());
         LocalVariantCacheReuse = settings.GetValueOrDefault("LocalCacheReuse", LocalVariantCacheReuse);
+        LocalVariantCacheStrategy = settings.GetValueOrDefault("LocalCacheStrategy", LocalVariantCacheStrategy);
         LocalVariantCacheRam = settings.GetValueOrDefault("LocalCacheRam", LocalVariantCacheRam);
         LocalVariantRopeScaling = settings.GetValueOrDefault("LocalRopeScaling", LocalVariantRopeScaling);
         LocalVariantRopeScale = settings.GetValueOrDefault("LocalRopeScale", LocalVariantRopeScale);
@@ -23649,6 +23685,7 @@ public partial class MainViewModel : ViewModelBase
             ["LocalUbatchSize"] = LocalVariantUbatchSize,
             ["LocalSpecType"] = LocalVariantSpecType,
             ["LocalCacheReuse"] = LocalVariantCacheReuse,
+            ["LocalCacheStrategy"] = LocalVariantCacheStrategy,
             ["LocalCacheRam"] = LocalVariantCacheRam,
             ["LocalRopeScaling"] = LocalVariantRopeScaling,
             ["LocalRopeScale"] = LocalVariantRopeScale,

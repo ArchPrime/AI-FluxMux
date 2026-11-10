@@ -10,6 +10,15 @@ Do not restructure `MainViewModel.cs` / `FluxMuxRuntimeService.cs` / `MainWindow
 
 When reasoning about a non-trivial problem, lay out **(a) what you've established** (facts confirmed from the code/logs) and **(b) the unresolved dilemmas** (open decisions), then ask the user to decide — **do not cycle/re-derive the same points indefinitely.** If you find yourself re-arguing a point you already made, stop and present the established facts + the specific dilemma instead. This was requested after the agent cycled on the stress-test graph throughput question.
 
+## Documentation (always in effect)
+
+Every code change must be accompanied by a documentation review/update. The reasoning for a non-obvious decision must live in the repo, not only in the chat, because the chat is gone by the time the next maintainer (a stranger, or another AI, possibly long after the author) works on this code.
+
+- **At the decision point:** when you add or change non-obvious logic, add a short comment stating the *why* (the reason / invariant / failure mode it avoids), not just the *what*. Examples of the kind of "why" that must be captured: why `.git` folder paths are normalized to their parent, why `git log --grep` needs `--fixed-strings`, why a commit message embeds the folder name, why Context-Paging and Forward-Prune are gated off for reinflating clients (Cline) while VIBE_STATE stays on (prefix-stable, so it does not invalidate the KV cache).
+- **Keep it current:** if a change alters behaviour that a doc or comment describes, update that doc/comment in the same change. Do not leave a comment that describes the old behaviour.
+- **Scope:** this applies to `Services/`, `ViewModels/`, and the public docs (`AGENTS.md`, `README.md`, `*.md` specs). Trivial renames, generated files, and `.axaml` view layout do not need new prose, but a behaviour change behind them does.
+- **No orphan knowledge:** if you resolve a bug or make a trade-off that is not obvious from the code alone, the resolution must be recorded (comment or doc) so it is not re-litigated or "fixed" back.
+
 ## Product facts
 
 - Public Endpoint URL / **Port**: `http://127.0.0.1:5001` (change only if Endpoint settings use another port). That is what Client apps call. Several can be active at once (Cline and Harness together) if they all use this Port.
@@ -82,8 +91,22 @@ Machine paths, API keys, and live profile JSON stay on the operator’s PC. They
 | Client-app settings sync | `Services/EndpointSettingsSync.cs` (Cline 4.x + Harness yaml + optional `json-merge`), `ClineContextSync.cs`, `HarnessEndpointAdapter.cs` |
 | Endpoint adapters export/import | `Services/EndpointAdapterPack.cs` (Port + `EndpointAdapters` only; no secrets or profiles) |
 | Model profile export/import | `Services/ModelProfilePack.cs` (temporary pack; patches live profiles only; no secrets; skips conflicts) |
+| Cache strategy (Auto/Full/PrefixCheckpoints/Minimal) | `Services/LocalCacheStrategyAdvisor.cs` (derives `--cache-reuse` / `--ctx-checkpoints` from model attributes: vision/MTP → PrefixCheckpoints, text → Full) |
+| Cline `/smol` trigger (Hail Mary in reinflate mode) | `Services/ClineSmolTrigger.cs` (Win32 keyboard simulation into VS Code) |
+| Tool-result clearing / forward-prune / compaction gating | `Services/FluxMuxGatewayHost.cs` (all gated off when the client reinflates context, e.g. Cline) |
 
 Settled helpers already extracted: Compact (`LocalHistoryCompaction`), idle (`IdleTimeoutPolicy`, `IdleSessionCoordinator`), vision images (`LocalChatImageNormalizer`), fingerprints, priority/AutoTune preserve (`LocalPrioritySettingsCalculator`), template guard, reload routing, Endpoint settings sync.
+
+## Cline reinflate + KV-cache architecture (do not "fix" back)
+
+Cline reinflates the **full** chat history on every turn. That single fact drives the cache strategy:
+
+- **Exact-prefix KV cache is the goal.** llama-server's cache hits only when the prompt prefix is byte-identical to the previous turn. Anything that rewrites the forwarded prompt between turns breaks the prefix → LCP similarity drops (0.70–0.78 observed) and prefill costs 8–13 s of cache misses.
+- **All four prompt-modifying systems are gated OFF in reinflate mode (Cline):** Session Artifacts, Tool Result Clearing (`LocalToolResultClearing`), Forward Prune, and History Compaction. This is done in `FluxMuxGatewayHost.cs`. Do not re-enable any of them for a client that reinflates — FluxMux-side trimming is defeated by Cline's reinflation anyway, and the rewrite is what broke the prefix.
+- **VIBE_STATE stays ON** because it is prefix-stable (appended, not rewritten), so it does not invalidate the KV cache.
+- **Hail Mary in reinflate mode** does not compact on the FluxMux side. Instead it triggers Cline's own `/smol` compaction via `ClineSmolTrigger.cs` (Win32 keyboard simulation into the VS Code window), because only Cline can shrink the history it reinflates.
+- **Cache strategy is model-attribute-driven** (`LocalCacheStrategyAdvisor.cs`): vision/MTP models → `PrefixCheckpoints` (`--ctx-checkpoints`, e.g. 32, `--cache-reuse 0`); text-only → `Full` (`--cache-reuse`). The active vision profile in `fluxmux_config.json` uses `LocalCacheReuse: 0` + `LocalCtxCheckpoints: 32`. The Model Profile editor exposes a **Cache Strategy** dropdown (Auto / Full / PrefixCheckpoints / Minimal).
+- **Verification signal:** in `llama_server_output.log`, a healthy Cline session shows LCP similarity ≈ 1.0 and prefill < 1 s. A drop to 0.7–0.78 with 8–13 s prefill means a prompt-modifying system leaked back on.
 
 `Help.html` is **UTF-16 with a byte-order mark**, because Word saves it that way and declares `charset=unicode` inside it. A text edit that rewrites the file without that mark leaves the bytes NUL-separated, `File.ReadAllText` decodes them as UTF-8, and every topic and UI note silently disappears. After editing this file with anything other than Word, put the mark back and confirm it decodes (`Shipped_help_html_decodes_the_way_the_app_reads_it`). Do not "fix" it to UTF-8 without also changing that charset declaration, or Word mis-reads it on the next open.
 

@@ -67,6 +67,7 @@ public sealed record PortForwardingRules
     public int CompactPreservedUserChars { get; init; } = LocalHistoryCompaction.PreservedUserChars;
 
     public int KeepRecentResults { get; init; } = LocalToolResultClearing.KeepRecentResults;
+    public bool ToolResultClearingEnabled { get; init; } = true;
     public int PinLatestShellResults { get; init; } = LocalToolResultClearing.PinLatestShellResults;
     public int RunawayOmittedResults { get; init; } = LocalToolResultClearing.RunawayOmittedResults;
     public int ClosedLoopRunawayOmittedResults { get; init; } = LocalToolResultClearing.ClosedLoopRunawayOmittedResults;

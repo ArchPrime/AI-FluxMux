@@ -95,6 +95,9 @@ public partial class PortForwardingRulesViewModel : ObservableObject
     public partial decimal KeepRecentResults { get; set; } = LocalToolResultClearing.KeepRecentResults;
 
     [ObservableProperty]
+    public partial bool ToolResultClearingEnabled { get; set; } = true;
+
+    [ObservableProperty]
     public partial decimal PinLatestShellResults { get; set; } = LocalToolResultClearing.PinLatestShellResults;
 
     [ObservableProperty]
@@ -239,6 +242,7 @@ public partial class PortForwardingRulesViewModel : ObservableObject
             CompactHeadroom = (int)CompactHeadroom,
             CompactPreservedUserChars = (int)CompactPreservedUserChars,
             KeepRecentResults = (int)KeepRecentResults,
+            ToolResultClearingEnabled = ToolResultClearingEnabled,
             PinLatestShellResults = (int)PinLatestShellResults,
             RunawayOmittedResults = (int)RunawayOmittedResults,
             ClosedLoopRunawayOmittedResults = (int)ClosedLoopRunawayOmittedResults,
@@ -347,6 +351,7 @@ public partial class PortForwardingRulesViewModel : ObservableObject
         CompactHeadroom = live.CompactHeadroom;
         CompactPreservedUserChars = live.CompactPreservedUserChars;
         KeepRecentResults = live.KeepRecentResults;
+        ToolResultClearingEnabled = live.ToolResultClearingEnabled;
         PinLatestShellResults = live.PinLatestShellResults;
         RunawayOmittedResults = live.RunawayOmittedResults;
         ClosedLoopRunawayOmittedResults = live.ClosedLoopRunawayOmittedResults;

@@ -35,6 +35,17 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private readonly object _logLock = new();
     public static int SharedTurnCounter = 0;
 
+    // KV-cache reuse diagnostic: tracks the previous turn's measured prompt-token count so we
+    // can compute the DELTA in prompt size between consecutive turns. If the llama-server KV
+    // cache is being reused across turns, the prefill time for turn N+1 should scale with the
+    // DELTA (only the new tokens need prefilling), not with the TOTAL prompt size. If prefill
+    // time scales with the total every turn, the cache is NOT being reused and the model is
+    // re-reading the entire context from scratch each turn — the root cause of the "slow
+    // responses" complaint. The delta is logged alongside the prefill duration in
+    // onFirstContentToken so the operator can eyeball the relationship.
+    private int _prevTurnPromptTokens = 0;
+    private readonly object _prevTurnPromptTokensLock = new();
+
     private HttpListener? _listener;
     private CancellationTokenSource? _loopCts;
     // Generation-based, one-shot supersede cancellation. The old design used a single shared
@@ -683,7 +694,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         var portRules = CurrentRules();
-        var clearedResults = LocalToolResultClearing.ClearOlderResults(payload, portRules);
+        int clearedResults = 0;
+        // If the client reinflates the context (e.g., Cline), skip tool-result-clearing too.
+        // The client resends the full history each turn, so clearing results here would modify
+        // the prompt and prevent KV cache reuse — the same reasoning as the session-artifact skip above.
+        if (portRules.ToolResultClearingEnabled && GetUserClientReinflatesContext?.Invoke() != true)
+        {
+            clearedResults = LocalToolResultClearing.ClearOlderResults(payload, portRules);
+        }
         if (clearedResults > 0)
         {
             Log("local chat: omitted "
@@ -943,13 +961,21 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // per-profile "LocalForwardPruneEnabled" toggle (default on) so it can be turned off
             // mid-chat without a reload. Uses the model's measured token count when available.
             //
+            // IMPORTANT: forward pruning modifies the prompt (dedupe, loop-collapse, tool-result
+            // truncation), so it breaks the exact-prefix KV cache. If the client reinflates the
+            // context (e.g., Cline, which resends the full history each turn), skip it entirely —
+            // the same reasoning as the session-artifact and tool-result-clearing skips above.
+            // Otherwise every pruned turn is a cache miss.
+            //
             // NOTE: this does NOT re-measure the prompt after pruning. Re-measuring is a network
             // round-trip to llama-server (LocalPromptTokenCounter.CountAsync → POST
             // /input_tokens), and doing it on every pruned turn would add a full extra call to the
             // model per turn — a significant speed hit. The prune itself is a cheap in-memory JSON
             // edit; the gauge refresh is not worth an extra llama-server call each turn. The next
             // turn's own measurement will reflect the pruned history anyway.
-            if (!isProbeRequest && hotContext > 0 && GetForwardPruneEnabled?.Invoke(model, Str(state, "local_variant")) == true)
+            if (!isProbeRequest && hotContext > 0
+                && GetUserClientReinflatesContext?.Invoke() != true
+                && GetForwardPruneEnabled?.Invoke(model, Str(state, "local_variant")) == true)
             {
                 // Paged context: when the context engine is wired up and paging is enabled, use
                 // its PageContext (which passes the swap store so the truncate stage spills
@@ -2014,14 +2040,38 @@ public sealed class FluxMuxGatewayHost : IDisposable
                             // the true end of the prefill/thinking window: the model has finished
                             // thinking and started generating the actual reply. Tell the UI to
                             // switch to the generation phase NOW.
-                            Log("ttfb: first content token after " + ttfbStopwatch.ElapsedMilliseconds + " ms (model=" + model + ")");
+                            var prefillMs = ttfbStopwatch.ElapsedMilliseconds;
+                            Log("ttfb: first content token after " + prefillMs + " ms (model=" + model + ")");
+                            // KV-cache reuse diagnostic: log the prompt-token delta vs. the previous
+                            // turn alongside the prefill duration. If the llama-server KV cache is
+                            // reused, prefill time should track the DELTA (new tokens only). If it
+                            // tracks the TOTAL, the cache is not reused and the model re-reads the
+                            // whole context each turn.
+                            if (measuredPromptTokens is not null)
+                            {
+                                int prevTokens;
+                                int deltaTokens;
+                                lock (_prevTurnPromptTokensLock)
+                                {
+                                    prevTokens = _prevTurnPromptTokens;
+                                    deltaTokens = measuredPromptTokens.Value - prevTokens;
+                                    _prevTurnPromptTokens = measuredPromptTokens.Value;
+                                }
+                                var prefillThroughput = prefillMs > 0
+                                    ? (deltaTokens / (prefillMs / 1000.0)).ToString("0.#", CultureInfo.InvariantCulture)
+                                    : "n/a";
+                                Log("kv-cache: prompt=" + measuredPromptTokens.Value
+                                    + " delta=" + deltaTokens
+                                    + " prefillMs=" + prefillMs
+                                    + " prefillThroughput=" + prefillThroughput + " tok/s (model=" + model + ")");
+                            }
                             // Signal the hang watchdog that the first content token has arrived.
                             // Until this point the stream is in the "prefill / first token" window
                             // (even if header bytes already arrived), so the watchdog keeps the
                             // capped prefill-estimate deadline in effect. After this, the normal
                             // post-first-byte stall deadline governs.
                             hangClock?.NoteContentToken();
-                            ReportPrefillFirstByte?.Invoke(ttfbStopwatch.ElapsedMilliseconds);
+                            ReportPrefillFirstByte?.Invoke(prefillMs);
                         },
                         onFirstReasoningToken: () =>
                         {

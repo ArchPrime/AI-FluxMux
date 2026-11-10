@@ -575,6 +575,8 @@
                                                                                   IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                   Content="On"
                                                                                   ToolTip.Tip="On: when Context is filling, AI-FluxMux may shorten older turns it forwards to llama-server. The Client app still keeps the full chat. Off: never auto-compact forwarded history." />
+                                                                         <TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Cache strategy" />
+                                                                         <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding LocalCacheStrategyOptions}" SelectedItem="{Binding LocalVariantCacheStrategy}" ToolTip.Tip="Auto: picks the optimal cache strategy from the model's attributes (vision, speculative). Full: chunk-based reuse (fastest for text-only models). PrefixCheckpoints: exact-prefix cache + checkpoints (used when vision/speculative disables chunk-reuse). Minimal: no cache args (debug). Leave on Auto." />
                                                                             </Grid>
                                                                         </StackPanel>
                                                                     </Border>
@@ -1615,6 +1617,11 @@
                                                             <NumericUpDown Grid.Row="0" Grid.Column="5" Minimum="80" Maximum="2000"
                                                                            Value="{Binding PortRules.MinResultCharsToClear}" 
                                                                                   ToolTip.Tip="Tool bodies shorter than this stay forwarded." />
+                                                             <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Tool result clearing"
+                                                                        ToolTip.Tip="When enabled, older tool results are stubbed to keep the context small. When disabled, all tool results are kept, which improves cache hits but grows the context." />
+                                                             <CheckBox Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
+                                                                       IsChecked="{Binding PortRules.ToolResultClearingEnabled}"
+                                                                       ToolTip.Tip="On: older tool results are stubbed. Off: all tool results are kept (better cache hits, larger context)." />
                                                         </Grid>
                                                     </StackPanel>
                                                 </Border>
