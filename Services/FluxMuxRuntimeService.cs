@@ -3285,6 +3285,93 @@ public sealed class FluxMuxRuntimeService
 		}
 	}
 
+	/// <summary>
+	/// Lists recent fluxmux-checkpoint commits in the given work directory, filtered to
+	/// the current project (folder name). Returns a list of (hash, message, date) tuples.
+	/// </summary>
+	public List<(string Hash, string Message, string Date)> ListGitCheckpoints(string workDir)
+	{
+		var results = new List<(string Hash, string Message, string Date)>();
+		try
+		{
+			// Filter by the folder name so we only get checkpoints for this project,
+			// not other projects that share the same git repo.
+			var folderName = System.IO.Path.GetFileName(workDir.TrimEnd(System.IO.Path.DirectorySeparatorChar));
+			var grepPattern = $"fluxmux-checkpoint [{folderName}]";
+
+			var psi = new System.Diagnostics.ProcessStartInfo
+			{
+				FileName = "git",
+				WorkingDirectory = workDir,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				UseShellExecute = false,
+				CreateNoWindow = true,
+			};
+			psi.ArgumentList.Add("log");
+			psi.ArgumentList.Add("--grep");
+			psi.ArgumentList.Add(grepPattern);
+			psi.ArgumentList.Add("--format");
+			psi.ArgumentList.Add("%h|%s|%ad");
+			psi.ArgumentList.Add("--date=short");
+			psi.ArgumentList.Add("-20");
+
+			var process = System.Diagnostics.Process.Start(psi);
+			process?.WaitForExit();
+			var output = process?.StandardOutput.ReadToEnd() ?? string.Empty;
+
+			foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+			{
+				var parts = line.Trim().Split('|', 3);
+				if (parts.Length >= 2)
+				{
+					results.Add((parts[0], parts[1], parts.Length > 2 ? parts[2] : string.Empty));
+				}
+			}
+		}
+		catch
+		{
+			// Return empty list on error
+		}
+		return results;
+	}
+
+	/// <summary>
+	/// Restores the workspace to the specified git commit hash.
+	/// </summary>
+	public RuntimeActionResult RestoreGitCheckpoint(string commitHash, string workDir)
+	{
+		try
+		{
+			var psi = new System.Diagnostics.ProcessStartInfo
+			{
+				FileName = "git",
+				WorkingDirectory = workDir,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				UseShellExecute = false,
+				CreateNoWindow = true,
+			};
+			psi.ArgumentList.Add("checkout");
+			psi.ArgumentList.Add(commitHash);
+
+			var process = System.Diagnostics.Process.Start(psi);
+			process?.WaitForExit();
+
+			var exit = process?.ExitCode ?? -1;
+			var err = process?.StandardError.ReadToEnd() ?? string.Empty;
+			var outStr = process?.StandardOutput.ReadToEnd() ?? string.Empty;
+
+			return exit == 0
+				? new RuntimeActionResult { IsSuccess = true, Status = "Restored", Details = $"Restored to {commitHash} in {workDir}" }
+				: new RuntimeActionResult { IsSuccess = false, Status = "Restore failed", Details = string.IsNullOrWhiteSpace(err) ? outStr.Trim() : err.Trim() };
+		}
+		catch (Exception ex)
+		{
+			return new RuntimeActionResult { IsSuccess = false, Status = "Restore failed", Details = ex.Message };
+		}
+	}
+
 	public async Task<RuntimeActionResult> RestartCloudAsync(string provider, string model, CancellationToken cancellationToken = default(CancellationToken))
 	{
 		await StopCloudAsync();

@@ -29,6 +29,11 @@ public sealed class GitRunner : IGitRunner
     {
         try
         {
+            // Include the folder name in the commit message so we can filter checkpoints
+            // by project when multiple projects share the same git repo.
+            var folderName = System.IO.Path.GetFileName(workDir.TrimEnd(System.IO.Path.DirectorySeparatorChar));
+            var fullMessage = $"fluxmux-checkpoint [{folderName}]: {message}";
+
             var psi = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = "git",
@@ -54,7 +59,7 @@ public sealed class GitRunner : IGitRunner
             };
             psi2.ArgumentList.Add("commit");
             psi2.ArgumentList.Add("-m");
-            psi2.ArgumentList.Add(message);
+            psi2.ArgumentList.Add(fullMessage);
             psi2.ArgumentList.Add("--allow-empty");
             var commit = System.Diagnostics.Process.Start(psi2);
             commit?.WaitForExit();
@@ -62,7 +67,7 @@ public sealed class GitRunner : IGitRunner
             var exit = commit?.ExitCode ?? -1;
             var err = commit?.StandardError.ReadToEnd() ?? string.Empty;
             return exit == 0
-                ? (true, "checkpoint created")
+                ? (true, $"checkpoint created in {workDir}")
                 : (false, string.IsNullOrWhiteSpace(err) ? "git commit failed" : err.Trim());
         }
         catch (Exception ex)

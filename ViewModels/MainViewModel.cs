@@ -3125,6 +3125,84 @@ public partial class MainViewModel : ViewModelBase
     }
 
     [RelayCommand]
+    private async Task RestoreGitCheckpoint()
+    {
+        var owner = GetMainWindowStorageProvider();
+        if (owner is null)
+        {
+            StatusMessage = "Folder picker unavailable in current session.";
+            return;
+        }
+
+        IStorageFolder? startLocation = null;
+        try
+        {
+            var startDir = !string.IsNullOrWhiteSpace(LocalGitCheckpointDirectory)
+                ? LocalGitCheckpointDirectory
+                : GitCheckpointDefaultDirectory;
+            if (!string.IsNullOrWhiteSpace(startDir) && Directory.Exists(startDir))
+            {
+                startLocation = await owner.TryGetFolderFromPathAsync(startDir);
+            }
+        }
+        catch
+        {
+            startLocation = null;
+        }
+
+        var selected = await owner.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = "Select checkpoint folder to restore",
+            SuggestedStartLocation = startLocation,
+            AllowMultiple = false,
+        });
+
+        var folder = selected.FirstOrDefault();
+        if (folder is null)
+        {
+            return;
+        }
+
+        var chosenPath = folder.Path.LocalPath;
+        StatusMessage = "Listing checkpoints…";
+
+        var checkpoints = _runtimeService.ListGitCheckpoints(chosenPath);
+        if (checkpoints.Count == 0)
+        {
+            StatusMessage = "No fluxmux-checkpoint commits found in " + chosenPath;
+            return;
+        }
+
+        // For now, just restore to the most recent checkpoint.
+        // A full UI with a list picker can be added later.
+        var latest = checkpoints[0];
+
+        var confirmed = Views.ThemedDialog.Confirm(
+            "Restore to checkpoint?",
+            "This will run 'git checkout " + latest.Hash + "' in:\n" + chosenPath + "\n\n"
+            + "The workspace will be restored to the state at:\n"
+            + "  " + latest.Message + " (" + latest.Date + ")\n\n"
+            + "Any uncommitted changes will be lost. You may want to create a new checkpoint first "
+            + "(📌 Checkpoint button) to back up the current state.\n\n"
+            + "Continue?",
+            confirmLabel: "Restore",
+            cancelLabel: "Cancel");
+
+        if (!confirmed)
+        {
+            StatusMessage = "Restore cancelled.";
+            return;
+        }
+
+        StatusMessage = $"Restoring to {latest.Hash} ({latest.Message})…";
+
+        var result = _runtimeService.RestoreGitCheckpoint(latest.Hash, chosenPath);
+        StatusMessage = result.IsSuccess
+            ? "Restored: " + result.Details
+            : "Restore failed: " + result.Details;
+    }
+
+    [RelayCommand]
     private async Task BrowseGitCheckpointDirectory()
     {
         var desktop = Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime;

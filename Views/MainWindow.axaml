@@ -3095,6 +3095,16 @@
                                     <TextBlock VerticalAlignment="Center" FontSize="10" Foreground="Gray"
                                                Text="{Binding GitCheckpointDefaultDirectory, StringFormat='(default: {0})'}" />
                                 </StackPanel>
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <TextBlock Text="Restore" VerticalAlignment="Center"
+                                               FontSize="11" FontWeight="SemiBold" />
+                                    <Button Content="Restore to latest checkpoint"
+                                            Command="{Binding RestoreGitCheckpointCommand}"
+                                            VerticalAlignment="Center"
+                                            ToolTip.Tip="Restores the workspace to the most recent fluxmux-checkpoint commit. This runs 'git checkout &lt;hash&gt;' in the checkpoint folder. Use with caution — any uncommitted changes will be lost." />
+                                    <TextBlock VerticalAlignment="Center" FontSize="10" Foreground="Gray"
+                                               Text="Restores to the most recent checkpoint commit." />
+                                </StackPanel>
                             </StackPanel>
                         </GroupBox>
                     </StackPanel>
