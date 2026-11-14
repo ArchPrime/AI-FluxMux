@@ -469,7 +469,7 @@ public partial class MainViewModel : ViewModelBase
             SafeUiInvoke(() =>
             {
                 HailMaryQueued = false;
-                SetHailMaryOutcome("Rear-context prune applied — context gauge updated");
+                SetHailMaryOutcome("Prune applied");
             });
         };
         // Surface every gateway log line (Hail Mary results, forward-prune results, context
@@ -4462,6 +4462,11 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial string HailMaryOutcome { get; set; } = string.Empty;
 
+    /// <summary>
+    /// True when <see cref="HailMaryOutcome"/> has text (used to open/close the outcome Popup).
+    /// </summary>
+    public bool HailMaryOutcomeVisible => !string.IsNullOrEmpty(HailMaryOutcome);
+
     private System.Threading.Timer? _hailMaryOutcomeTimer;
 
     /// <summary>
@@ -4508,7 +4513,7 @@ public partial class MainViewModel : ViewModelBase
     // automatically re-queried when the observable property changes.
     partial void OnHailMaryButtonVisibleChanged(bool value)
     {
-        if (value)
+        if (value && !HailMaryRescuePending)
         {
             ResetHailMaryPicker();
         }
@@ -5073,48 +5078,13 @@ public partial class MainViewModel : ViewModelBase
     {
         // When the user's client reinflates the context (e.g. Cline), a middle-cut is
         // defeated: Cline sends the full history again on the next turn, undoing the cut
-        // and breaking the KV cache prefix. Instead, trigger Cline's own /smol command,
-        // which writes a .compaction.json file that Cline reads on subsequent turns.
+        // and breaking the KV cache prefix. Instead, run a Cline-aware compaction strategy.
+        // Stage 0 = WaitForCline (trigger Cline's own /smol). Stage 1 = ExternalRescue (write a
+        // .compaction.json ourselves when Cline is non-responsive). The strategy is selected in
+        // the picker; the default is WaitForCline (the existing behavior).
         if (UserClientReinflatesContext)
         {
-            System.Diagnostics.Debug.WriteLine("[HailMary] Cline-like mode: triggering /smol via keyboard simulation");
-            // Also log to launch_monitor.log so "did Hail Mary fire?" is answerable from disk, not
-            // just the VS Code Debug console. In Cline mode the /smol trigger is fire-and-forget
-            // (keyboard simulation into VS Code), so without this the only trace of an attempt is
-            // the on-screen outcome text. The result line below records success/failure + reason.
-            _runtimeService.Supervisor?.LogLaunchMonitor("Hail Mary (Cline mode): triggering /smol via keyboard simulation");
-            HailMaryBannerVisible = false;
-            HailMaryQueued = true;
-            SetHailMaryOutcome("Triggering Cline's /smol command…");
-            StatusMessage = "Triggering Cline's /smol (compact) command. Focus will shift to VS Code briefly.";
-
-            // Run on a background thread so the UI doesn't freeze during the keyboard
-            // simulation (which includes Thread.Sleep calls).
-            _ = System.Threading.Tasks.Task.Run(() =>
-            {
-                var result = ClineSmolTrigger.TriggerSmol();
-                System.Diagnostics.Debug.WriteLine("[HailMary] ClineSmolTrigger result: " + result);
-                // Record the outcome to disk too: success, or the specific failure reason (e.g.
-                // "Could not find a VS Code window", "could not bring it to the foreground"). This is
-                // the only durable record of whether the keyboard simulation actually landed.
-                _runtimeService.Supervisor?.LogLaunchMonitor("Hail Mary (Cline mode): /smol trigger " + (result.Success ? "SUCCESS" : "FAILED") + " — " + result.Message);
-                // Update the UI on the main thread.
-                global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                {
-                    if (result.Success)
-                    {
-                        SetHailMaryOutcome("Cline's /smol triggered. Cline should now be compacting the conversation.");
-                        StatusMessage = "Cline's /smol command was triggered. Cline should now be compacting the conversation. If nothing happens, type /smol manually in Cline's chat input.";
-                    }
-                    else
-                    {
-                        SetHailMaryOutcome("Failed to trigger Cline's /smol: " + result.Message);
-                        StatusMessage = "Failed to trigger Cline's /smol automatically. Please type /smol manually in Cline's chat input.";
-                    }
-                    HailMaryQueued = false;
-                    ResetHailMaryPicker();
-                });
-            });
+            RunClineCompactionStrategy();
             return;
         }
 
@@ -5133,13 +5103,192 @@ public partial class MainViewModel : ViewModelBase
             _ => "Balanced"
         };
         var imgBit = HailMaryStripImages ? ", strip older images" : string.Empty;
-        SetHailMaryOutcome("Armed (" + stopName + imgBit + ") — will prune on the next turn you send");
+        SetHailMaryOutcome("Armed — prunes next turn");
         StatusMessage = "Hail Mary Context Trim armed (" + stopName + imgBit + "): the next turn you send will have its older history trimmed to make room. Send your reply now.";
         _runtimeService.RequestHailMaryMiddleCut(HailMaryAggressionStop, HailMaryStripImages);
         ResetHailMaryPicker();
     }
 
     private bool CanHailMaryShrinkTurn => HailMaryButtonVisible;
+
+    // ── Hail Mary Cline compaction strategies (Stage 0 = wait-for-cline, Stage 1 = external rescue) ──
+
+    /// <summary>
+    /// The Cline compaction strategy selected in the Hail Mary picker. Default is WaitForCline
+    /// (the existing /smol behavior). Stage 1 adds ExternalRescue. Not persisted — resets each
+    /// time the picker opens.
+    /// </summary>
+    [ObservableProperty]
+    public partial global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy HailMarySelectedStrategy { get; set; }
+        = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Default;
+
+    /// <summary>True when the external-rescue option should be offered (Cline-like client).</summary>
+    public bool HailMaryRescueAvailable => UserClientReinflatesContext;
+
+    /// <summary>
+    /// True when a rescue compaction has been prepared and is awaiting user confirmation. While
+    /// true, the picker shows the summary preview + Confirm/Cancel instead of the strategy radios.
+    /// </summary>
+    [ObservableProperty]
+    public partial bool HailMaryRescuePending { get; set; }
+
+    /// <summary>The prepared rescue summary, shown in the confirmation preview. Null when not pending.</summary>
+    [ObservableProperty]
+    public partial string HailMaryRescuePreview { get; set; } = string.Empty;
+
+    /// <summary>The prepared rescue result (carries the summary + session), held until commit or cancel.</summary>
+    private global::FluxMux.Avalonia.Services.HailMary.CompactionResult _pendingRescue;
+
+    /// <summary>
+    /// The Hail Mary rescue "make headroom" preference (default Balanced). Controls how much free
+    /// context the external compaction leaves. Not persisted — resets each time the picker opens.
+    /// </summary>
+    [ObservableProperty]
+    public partial global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroom HailMaryHeadroom { get; set; }
+        = global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroomPolicy.Default;
+
+    /// <summary>The headroom estimate text shown in the rescue confirmation preview.</summary>
+    [ObservableProperty]
+    public partial string HailMaryRescueHeadroom { get; set; } = string.Empty;
+
+    /// <summary>
+    /// A non-fatal warning shown in the rescue confirmation preview (e.g. "you already have the
+    /// requested free headroom, so compaction may be counterproductive"). Empty when there is none.
+    /// </summary>
+    [ObservableProperty]
+    public partial string HailMaryRescueWarning { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Dispatches the selected Cline compaction strategy. WaitForCline runs to completion
+    /// (fire-and-forget, like the old /smol path). ExternalRescue PREPARES a summary and shows a
+    /// confirmation; the user then calls ConfirmHailMaryRescue to actually write the file.
+    /// </summary>
+    private async void RunClineCompactionStrategy()
+    {
+        var strategy = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Resolve(HailMarySelectedStrategy);
+
+        // Read the live context fill so the rescue path can bound the summary to the chosen headroom.
+        var (promptTokens, contextLimit, _) = _runtimeService.ReadLocalContextUsage();
+
+        var ctx = new global::FluxMux.Avalonia.Services.HailMary.CompactionContext
+        {
+            VibeStatePath = _runtimeService.VibeStatePath,
+            Log = line => _runtimeService.Supervisor?.LogLaunchMonitor(line),
+            TargetFreeFraction = global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroomPolicy.TargetFreeFraction(HailMaryHeadroom),
+            PromptTokens = promptTokens,
+            ContextLimit = contextLimit,
+        };
+
+        HailMaryBannerVisible = false;
+        HailMaryQueued = true;
+
+        if (strategy is global::FluxMux.Avalonia.Services.HailMary.ExternalRescueStrategy)
+        {
+            // Rescue path: prepare first, then ask for confirmation before writing anything.
+            SetHailMaryOutcome("Preparing external compaction…");
+            StatusMessage = "Hail Mary: preparing an external Cline compaction (from VIBE_STATE + Cline history). Review the preview, then confirm.";
+            var prepared = await strategy.ExecuteAsync(ctx);
+            if (!prepared.Success || string.IsNullOrWhiteSpace(prepared.SummaryPreview))
+            {
+                SetHailMaryOutcome("External compaction failed");
+                StatusMessage = prepared.Message;
+                HailMaryQueued = false;
+                ResetHailMaryPicker();
+                return;
+            }
+
+            _pendingRescue = prepared;
+            HailMaryRescuePreview = prepared.SummaryPreview;
+            HailMaryRescueHeadroom = prepared.Message;
+
+            // Surface a non-fatal warning (e.g. "you already have the requested headroom") in a
+            // distinct style so the user sees it before confirming.
+            HailMaryRescueWarning = prepared.Warning ?? string.Empty;
+            HailMaryRescuePending = true;
+            SetHailMaryOutcome("Review & confirm");
+            StatusMessage = string.IsNullOrWhiteSpace(prepared.Warning)
+                ? "Hail Mary: review the external compaction preview, then confirm to write it. Cline will read it on its next turn."
+                : "Hail Mary: review the preview — note the warning above — then confirm to write it. Cline will read it on its next turn.";
+            return;
+        }
+
+        // Wait-for-cline path (default): run to completion, as before.
+        SetHailMaryOutcome("Waiting for Cline idle…");
+        StatusMessage = "Hail Mary: waiting for Cline to finish its current turn, then it will send /smol automatically (up to 90s). Focus will shift to VS Code briefly.";
+        var result = await strategy.ExecuteAsync(ctx);
+        global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            if (result.Success)
+            {
+                SetHailMaryOutcome("/smol sent — compacting");
+                StatusMessage = "Cline's /smol command was triggered. Cline should now be compacting the conversation. If nothing happens, type /smol manually in Cline's chat input.";
+            }
+            else
+            {
+                SetHailMaryOutcome("/smol failed — type manually");
+                StatusMessage = "Failed to trigger Cline's /smol automatically. Please type /smol manually in Cline's chat input.";
+            }
+            HailMaryQueued = false;
+            ResetHailMaryPicker();
+        });
+    }
+
+    /// <summary>
+    /// Confirms a prepared external-rescue compaction: writes the .compaction.json and reports the
+    /// outcome. Called from the picker's "Confirm write" button.
+    /// </summary>
+    [RelayCommand]
+    private async Task ConfirmHailMaryRescue()
+    {
+        if (!_pendingRescue.Success)
+        {
+            HailMaryRescuePending = false;
+            HailMaryQueued = false;
+            ResetHailMaryPicker();
+            return;
+        }
+
+        var strategy = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Resolve(
+            global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue);
+        var ctx = new global::FluxMux.Avalonia.Services.HailMary.CompactionContext
+        {
+            VibeStatePath = _runtimeService.VibeStatePath,
+            Log = line => _runtimeService.Supervisor?.LogLaunchMonitor(line),
+        };
+
+        SetHailMaryOutcome("Writing compaction…");
+        var committed = await strategy.CommitAsync(ctx, _pendingRescue);
+        global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            HailMaryRescuePending = false;
+            if (committed.Success)
+            {
+                SetHailMaryOutcome("Compaction written — Cline will resume compacted");
+                StatusMessage = "External Cline compaction written. Cline will read it on its next turn and resume with the compacted context.";
+            }
+            else
+            {
+                SetHailMaryOutcome("Compaction failed — type /smol manually");
+                StatusMessage = committed.Message;
+            }
+            HailMaryQueued = false;
+            ResetHailMaryPicker();
+        });
+    }
+
+    /// <summary>
+    /// Cancels a prepared external-rescue compaction without writing anything.
+    /// </summary>
+    [RelayCommand]
+    private void CancelHailMaryRescue()
+    {
+        HailMaryRescuePending = false;
+        HailMaryRescuePreview = string.Empty;
+        SetHailMaryOutcome("Cancelled");
+        StatusMessage = "External Cline compaction cancelled. Nothing was written.";
+        HailMaryQueued = false;
+        ResetHailMaryPicker();
+    }
 
     /// <summary>
     /// One-off Hail Mary aggression stop chosen on the button (default Balanced). Not
@@ -5163,6 +5312,12 @@ public partial class MainViewModel : ViewModelBase
     {
         HailMaryAggressionStop = HailMaryCompaction.HailMaryAggression.Balanced;
         HailMaryStripImages = false;
+        HailMarySelectedStrategy = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Default;
+        HailMaryHeadroom = global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroomPolicy.Default;
+        HailMaryRescuePending = false;
+        HailMaryRescuePreview = string.Empty;
+        HailMaryRescueHeadroom = string.Empty;
+        HailMaryRescueWarning = string.Empty;
     }
 
     /// <summary>
@@ -5173,11 +5328,16 @@ public partial class MainViewModel : ViewModelBase
     private void SetHailMaryOutcome(string text)
     {
         HailMaryOutcome = text;
+        OnPropertyChanged(nameof(HailMaryOutcomeVisible));
         _hailMaryOutcomeTimer?.Dispose();
         _hailMaryOutcomeTimer = new System.Threading.Timer(_ =>
         {
-            SafeUiInvoke(() => HailMaryOutcome = string.Empty);
-        }, null, TimeSpan.FromSeconds(8), System.Threading.Timeout.InfiniteTimeSpan);
+            SafeUiInvoke(() =>
+            {
+                HailMaryOutcome = string.Empty;
+                OnPropertyChanged(nameof(HailMaryOutcomeVisible));
+            });
+        }, null, TimeSpan.FromSeconds(15), System.Threading.Timeout.InfiniteTimeSpan);
     }
 
     [RelayCommand]
@@ -15881,7 +16041,7 @@ public partial class MainViewModel : ViewModelBase
         HailMaryBannerVisible = true;
         ResetHailMaryPicker(); // one-off: each emergency choice starts fresh
         HailMaryQueued = false; // the queued attempt is over; show the result instead
-        SetHailMaryOutcome(text);
+        SetHailMaryOutcome("Hail Mary offered");
         AppendDiagnosticEntry("HAIL-MARY", text, "AI-FluxMux");
     }
 

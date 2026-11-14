@@ -270,6 +270,12 @@ public sealed class FluxMuxRuntimeService
 	/// </summary>
 	public string WorkspaceRoot => _workspaceRoot;
 
+	/// <summary> 
+	/// Path to the session's <c>VIBE_STATE.md</c>. Exposed so the Hail Mary rescue path can read the 
+	/// maintained task/state/next/files digest when compacting a non-responsive Cline session. 
+	/// </summary> 
+	public string VibeStatePath => _vibeStatePath;
+
 	/// <summary>
 	/// The directory that git checkpoints commit to. Defaults to the workspace root; the user can
 	/// override it via the "LocalGitCheckpointDirectory" setting (a top-level config key, since the

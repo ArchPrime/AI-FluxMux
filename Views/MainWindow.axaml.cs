@@ -343,11 +343,23 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Closes the Hail Mary picker popup after the user arms the prune (the "Armed" button
-    /// already ran the command; this just dismisses the popup).
+    /// already ran the command; this just dismisses the popup). For the external-rescue strategy
+    /// the command is async and shows a confirmation preview inside the popup, so the popup must
+    /// STAY OPEN — only close it for the wait-for-cline / non-Cline paths.
     /// </summary>
     private void HailMaryPickerArm_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (HailMaryPickerPopup is not null)
+        if (HailMaryPickerPopup is null)
+        {
+            return;
+        }
+
+        var vm = DataContext as MainViewModel;
+        var isRescue = vm is not null
+            && vm.HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue;
+
+        // Keep the popup open for the rescue path so the confirmation preview can be shown.
+        if (!isRescue)
         {
             HailMaryPickerPopup.IsOpen = false;
         }

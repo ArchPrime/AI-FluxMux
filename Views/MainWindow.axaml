@@ -25,6 +25,8 @@
     <Window.Resources>
         <vm:StringToVisibilityConverter x:Key="StringToVisibility" />
         <vm:HailMaryStopToBoolConverter x:Key="HailMaryStopToBool" />
+        <vm:HailMaryStrategyToBoolConverter x:Key="HailMaryStrategyToBool" />
+        <vm:HailMaryHeadroomToBoolConverter x:Key="HailMaryHeadroomToBool" />
         <x:String x:Key="IdleTimeoutTooltip">Set how many idle minutes before AI-FluxMux stops the local model. This saves power, and frees VRAM for other apps. A reply that is still being prepared does not count as idle, even if that turn takes a long time. While a reply is being worked on, AI-FluxMux asks Windows to stay awake so the turn can finish. Note however that if using a laptop, closing the lid can still trigger sleep. Windows can also sleep when no reply is in progress. After the PC wakes, idle time includes the time spent asleep. After an idle timeout, when you send the next chat, the local model must reload and rebuild the context from the chat history, which is slower and risks reduced model understanding of what was most pertinent. Leave the idle timeout setting off to keep the local model loaded and ready in memory.</x:String>
         <DataTemplate x:Key="CloudProviderOptionTemplate" x:DataType="x:String">
             <TextBlock Text="{Binding Converter={x:Static vm:CloudProviderDisplayConverter.Instance}}" />
@@ -3447,7 +3449,7 @@
 
                 <!-- Row 1: Diagnostics label + controls -->
                 <StackPanel Grid.Row="1" Spacing="4">
-                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto" ColumnSpacing="6" ClipToBounds="False">
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="6" ClipToBounds="False" VerticalAlignment="Top">
                         <TextBlock Grid.Column="0" VerticalAlignment="Center" FontWeight="SemiBold" Text="Diagnostics" />
                         <shapes:Ellipse Grid.Column="1"
                                         Width="14"
@@ -3489,13 +3491,13 @@
                                        Margin="0,0,0,-14"
                                        Opacity="0.7" />
                         </Grid>
-                        <Button Grid.Column="4"
+                        <Button Grid.Row="0" Grid.Column="4"
                                 x:Name="HailMaryButton"
                                 Classes="hailMary"
                                 IsEnabled="{Binding HailMaryButtonEnabled}"
                                 MinWidth="180"
                                 Height="32"
-                                VerticalAlignment="Center"
+                                VerticalAlignment="Top"
                                 VerticalContentAlignment="Center"
                                 FontFamily="Segoe UI Emoji, Segoe UI, Arial"
                                 FontSize="12"
@@ -3505,7 +3507,19 @@
                                 BorderBrush="#333333"
                                 Click="HailMaryButton_Click"
                                 ToolTip.Tip="When the current turn lacks sufficient context space to complete, and your normal auto-compact didn&#39;t activate in time.&#10;&#10;For most clients: prunes older turns from the forwarded chat (recent turns and your last task are kept). The model forgets the pruned turns, so it may repeat work or lose track of early decisions.&#10;&#10;For Cline-like clients (reinflating): triggers Cline&#39;s own /smol (compact) command via keyboard simulation. This writes a .compaction.json that Cline reads on subsequent turns, actually reducing the context. Focus shifts to VS Code briefly.&#10;&#10;Warning: use this when you really want to keep this chat going on a local model and don&#39;t have a suitable bigger-context model to switch to. This may buy you time at the expense of fidelity." />
-                        <Button Grid.Column="5"
+                        <TextBlock Grid.Row="1" Grid.Column="4"
+                                   IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
+                                   HorizontalAlignment="Center"
+                                   Margin="0,2,0,0"
+                                   FontSize="10"
+                                   Foreground="#E5E7EB"
+                                   Opacity="0.9"
+                                   MaxWidth="180"
+                                   TextWrapping="NoWrap"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip.Tip="{Binding HailMaryOutcome}"
+                                   Text="{Binding HailMaryOutcome}" />
+                        <Button Grid.Row="0" Grid.Column="5"
                                 x:Name="GitCheckpointButton"
                                 MinWidth="100"
                                 Height="32"
@@ -3519,7 +3533,7 @@
                                 BorderBrush="#333333"
                                 Click="GitCheckpointButton_Click"
                                 ToolTip.Tip="Creates a git checkpoint in the workspace. This is a safety net: if the model goes off the rails, you can reset to this checkpoint.&#10;&#10;The checkpoint is a git commit with a message like 'fluxmux-checkpoint: manual checkpoint' so it's easy to find and reset to later." />
-                        <Popup x:Name="HailMaryPickerPopup"
+                        <Popup Grid.Row="0" x:Name="HailMaryPickerPopup"
                                 IsOpen="False"
                                 PlacementTarget="{Binding ElementName=HailMaryButton}"
                                 Placement="Bottom"
@@ -3531,29 +3545,99 @@
                                     Padding="0">
                                 <StackPanel Spacing="8" Margin="8" MinWidth="240">
                                 <TextBlock Text="Hail Mary Context Trim" FontWeight="SemiBold" FontSize="12" />
-                                <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.85"
-                                           Text="Drop older turns so the reply has room to complete. The system prompt, your last task, and the active tool-pair are always kept." />
-                                <StackPanel Spacing="2">
-                                    <TextBlock Text="Prune strength:" FontSize="11" FontWeight="SemiBold" />
-                                    <RadioButton Content="Gentle — keep ~8 recent turns, just fit"
-                                                 GroupName="HailMaryDiagStop"
-                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Gentle}"
-                                                 FontSize="11" />
-                                    <RadioButton Content="Balanced — keep ~4 recent turns, ~20% room"
-                                                 GroupName="HailMaryDiagStop"
-                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Balanced}"
-                                                 FontSize="11" />
-                                    <RadioButton Content="Aggressive — keep ~2 recent turns, ~40% room"
-                                                 GroupName="HailMaryDiagStop"
-                                                 IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Aggressive}"
-                                                 FontSize="11" />
+
+                                <!-- ── Confirmation view (rescue prepared, awaiting confirm) ── -->
+                                <StackPanel Spacing="6" MaxWidth="360" IsVisible="{Binding HailMaryRescuePending}">
+                                    <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.9"
+                                               Text="This will write an external Cline compaction (.compaction.json) seeded from VIBE_STATE + the recent Cline history. Cline will read it on its next turn and resume compacted. Review the preview:" />
+                                    <Border Background="#F5F3FF" BorderBrush="#DDD6FE" BorderThickness="1" CornerRadius="3" Padding="6" MaxHeight="220">
+                                        <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+                                            <TextBlock Text="{Binding HailMaryRescuePreview}" TextWrapping="Wrap" FontSize="10" FontFamily="Consolas, monospace" />
+                                        </ScrollViewer>
+                                    </Border>
+                                    <Border Background="#FEF3C7" BorderBrush="#F59E0B" BorderThickness="1" CornerRadius="3" Padding="6"
+                                            IsVisible="{Binding HailMaryRescueWarning, Converter={StaticResource StringToVisibility}}">
+                                        <TextBlock Text="{Binding HailMaryRescueWarning}" TextWrapping="Wrap" FontSize="10"
+                                                   Foreground="#92400E" FontWeight="SemiBold" />
+                                    </Border>
+                                    <TextBlock Text="{Binding HailMaryRescueHeadroom}" TextWrapping="Wrap" FontSize="10"
+                                               Foreground="#5B21B6" Opacity="0.9"
+                                               IsVisible="{Binding HailMaryRescueHeadroom, Converter={StaticResource StringToVisibility}}" />
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <Button Content="Confirm write"
+                                                Command="{Binding ConfirmHailMaryRescueCommand}"
+                                                FontSize="11" Padding="10,4" />
+                                        <Button Content="Cancel"
+                                                Command="{Binding CancelHailMaryRescueCommand}"
+                                                FontSize="11" Padding="10,4" />
+                                    </StackPanel>
                                 </StackPanel>
-                                <CheckBox Content="Also strip older embedded images"
-                                          IsChecked="{Binding HailMaryStripImages}"
-                                          FontSize="11"
-                                          ToolTip.Tip="Independent of the prune strength. Keeps the most recent image." />
+
+                                <!-- ── Strategy / prune view (not yet pending) ── -->
+                                <StackPanel Spacing="6"
+                                           IsVisible="{Binding HailMaryRescuePending, Converter={x:Static vm:InvertedBoolConverter.Instance}}">
+                                <!-- Cline strategy options (only for Cline-like clients) -->
+                                <StackPanel Spacing="2" IsVisible="{Binding HailMaryRescueAvailable}">
+                                    <TextBlock Text="Cline compaction strategy:" FontSize="11" FontWeight="SemiBold" />
+                                    <RadioButton Content="Wait for Cline to become ready, then send /smol"
+                                                 GroupName="HailMaryStrategy"
+                                                 IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=WaitForCline}"
+                                                 FontSize="11"
+                                                 ToolTip.Tip="Default. Waits for Cline to finish its current turn, then triggers Cline's own /smol command via UI Automation. Focus shifts to VS Code briefly." />
+                                    <RadioButton Content="Cline can't continue — compact externally &amp; resurrect"
+                                                 GroupName="HailMaryStrategy"
+                                                 IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}"
+                                                 FontSize="11"
+                                                 ToolTip.Tip="Use when Cline is non-responsive and cannot run /smol itself. Writes a .compaction.json seeded from VIBE_STATE + the recent Cline history, so Cline resumes compacted on its next turn. You will review a preview before anything is written." />
+                                    <!-- Headroom slider (only when the rescue strategy is selected) -->
+                                    <StackPanel Spacing="2" Margin="0,4,0,0"
+                                               IsVisible="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}">
+                                        <TextBlock Text="Make headroom (how much free context to leave):" FontSize="11" FontWeight="SemiBold" />
+                                        <RadioButton Content="Preserve more nuance (leave ~20% room)"
+                                                     GroupName="HailMaryHeadroom"
+                                                     IsChecked="{Binding HailMaryHeadroom, Converter={StaticResource HailMaryHeadroomToBool}, ConverterParameter=PreserveMore}"
+                                                     FontSize="11"
+                                                     ToolTip.Tip="Maximizes the nuance preserved in the summary. Riskier: less free context to resume the chat." />
+                                        <RadioButton Content="Balanced (~40% free)"
+                                                     GroupName="HailMaryHeadroom"
+                                                     IsChecked="{Binding HailMaryHeadroom, Converter={StaticResource HailMaryHeadroomToBool}, ConverterParameter=Balanced}"
+                                                     FontSize="11"
+                                                     ToolTip.Tip="The 'just enough' default: preserves essence &amp; nuance while leaving room to resume." />
+                                        <RadioButton Content="Leave more room (drop nuance first, ~60% free)"
+                                                     GroupName="HailMaryHeadroom"
+                                                     IsChecked="{Binding HailMaryHeadroom, Converter={StaticResource HailMaryHeadroomToBool}, ConverterParameter=LeaveMoreRoom}"
+                                                     FontSize="11"
+                                                     ToolTip.Tip="Safest: leaves the most free context. Drops nuance (recent turns, dead ends) first." />
+                                    </StackPanel>
+                                </StackPanel>
+
+                                <!-- Non-Cline prune options (only when not a Cline-like client) -->
+                                <StackPanel Spacing="6"
+                                           IsVisible="{Binding HailMaryRescueAvailable, Converter={x:Static vm:InvertedBoolConverter.Instance}}">
+                                    <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.85"
+                                               Text="Drop older turns so the reply has room to complete. The system prompt, your last task, and the active tool-pair are always kept." />
+                                    <StackPanel Spacing="2">
+                                        <TextBlock Text="Prune strength:" FontSize="11" FontWeight="SemiBold" />
+                                        <RadioButton Content="Gentle — keep ~8 recent turns, just fit"
+                                                     GroupName="HailMaryDiagStop"
+                                                     IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Gentle}"
+                                                     FontSize="11" />
+                                        <RadioButton Content="Balanced — keep ~4 recent turns, ~20% room"
+                                                     GroupName="HailMaryDiagStop"
+                                                     IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Balanced}"
+                                                     FontSize="11" />
+                                        <RadioButton Content="Aggressive — keep ~2 recent turns, ~40% room"
+                                                     GroupName="HailMaryDiagStop"
+                                                     IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Aggressive}"
+                                                     FontSize="11" />
+                                    </StackPanel>
+                                    <CheckBox Content="Also strip older embedded images"
+                                              IsChecked="{Binding HailMaryStripImages}"
+                                              FontSize="11"
+                                              ToolTip.Tip="Independent of the prune strength. Keeps the most recent image." />
+                                </StackPanel>
                                 <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button Content="Armed — prune on next turn"
+                                    <Button Content="Armed"
                                             Command="{Binding HailMaryShrinkTurnCommand}"
                                             FontSize="11" Padding="10,4"
                                             Click="HailMaryPickerArm_Click" />
@@ -3562,16 +3646,9 @@
                                             FontSize="11" Padding="10,4" />
                                 </StackPanel>
                             </StackPanel>
+                            </StackPanel>
                             </Border>
                         </Popup>
-                        <TextBlock Grid.Column="4"
-                                   IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
-                                   VerticalAlignment="Center"
-                                   FontSize="10"
-                                   Foreground="#7C3AED"
-                                   HorizontalAlignment="Left"
-                                   Opacity="0.9"
-                                   Text="{Binding HailMaryOutcome}" />
                         </Grid>
                     <TextBlock FontSize="11"
                                Opacity="0.78"
@@ -4308,5 +4385,6 @@
     </Panel>
 
 </Window>
+
 
 
