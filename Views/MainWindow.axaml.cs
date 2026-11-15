@@ -321,6 +321,24 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// Opens the Hail Mary picker popup when the user clicks the banner's "shrink this turn"
+    /// button in Cline mode. The banner button and the picker's "Armed" button both run
+    /// HailMaryShrinkTurnCommand; for Cline that command prepares an external rescue whose
+    /// confirmation preview lives INSIDE the picker popup. Without opening the popup here, the
+    /// user sees the banner disappear but has no way to reach the "Confirm write" button — the
+    /// next context-overflow offer re-shows the banner and the flow loops with no exit.
+    /// For the non-Cline (middle-cut) path the command arms a one-off prune and needs no popup.
+    /// </summary>
+    private void HailMaryBannerShrink_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var vm = DataContext as MainViewModel;
+        if (vm is not null && vm.UserClientReinflatesContext && HailMaryPickerPopup is not null)
+        {
+            HailMaryPickerPopup.IsOpen = true;
+        }
+    }
+
+    /// <summary>
     /// Toggles the Hail Mary picker popup on the Diagnostics bar. Clicking the button opens
     /// the picker (if closed) or closes it (if open). The picker's radio buttons / checkbox
     /// update the ViewModel bindings; arming only happens on the "Armed" button.
@@ -355,11 +373,37 @@ public partial class MainWindow : Window
         }
 
         var vm = DataContext as MainViewModel;
-        var isRescue = vm is not null
-            && vm.HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue;
 
-        // Keep the popup open for the rescue path so the confirmation preview can be shown.
-        if (!isRescue)
+        // Keep the popup open for Cline mode: both the ExternalRescue strategy AND the
+        // 80%-threshold / fall-through paths can show a confirmation preview inside the
+        // popup. Only close it for the non-Cline (middle-cut) path.
+        if (vm is not null && vm.UserClientReinflatesContext)
+        {
+            return;
+        }
+
+        HailMaryPickerPopup.IsOpen = false;
+    }
+
+    /// <summary>
+    /// Closes the Hail Mary picker popup after the user confirms the external-rescue compaction.
+    /// The ConfirmHailMaryRescueCommand is async (writes the .compaction.json), so we close the
+    /// popup immediately — the outcome is shown in the HailMaryOutcome tooltip.
+    /// </summary>
+    private void HailMaryPickerConfirm_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (HailMaryPickerPopup is not null)
+        {
+            HailMaryPickerPopup.IsOpen = false;
+        }
+    }
+
+    /// <summary>
+    /// Closes the Hail Mary picker popup when the user cancels the external-rescue confirmation.
+    /// </summary>
+    private void HailMaryPickerCancelRescue_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        if (HailMaryPickerPopup is not null)
         {
             HailMaryPickerPopup.IsOpen = false;
         }

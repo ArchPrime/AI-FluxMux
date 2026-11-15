@@ -176,10 +176,32 @@ public sealed class FluxMuxGatewayHost : IDisposable
     public FluxMux.Avalonia.Services.ContextEngine.ContextSwapStore? SwapStore { get; set; }
 
     /// <summary>
+    /// The durable essence log (the session's "meaning": current task/state/next/files + goal
+    /// evolution + decisions + dead ends). Injected by the runtime service; null when not wired
+    /// up. This is the source of truth re-asserted after compaction / cold resume.
+    /// </summary>
+    public FluxMux.Avalonia.Services.ContextEngine.EssenceLog? EssenceLog { get; set; }
+
+    /// <summary>
+    /// Re-asserts the durable essence after a compaction edge / cold resume (rewrites the Cline
+    /// compaction file and/or builds the local re-injection block). Injected by the runtime
+    /// service; null when not wired up.
+    /// </summary>
+    public FluxMux.Avalonia.Services.ContextEngine.EssenceReasserter? EssenceReasserter { get; set; }
+
+    /// <summary>
     /// The MCP control plane (update_vibe_state, read_swap_log, git_checkpoint). Injected by the
     /// runtime service; null when not wired up. Handles <c>POST /mcp</c> requests.
     /// </summary>
     public FluxMux.Avalonia.Services.ContextEngine.McpControlPlane? McpControlPlane { get; set; }
+
+    /// <summary>
+    /// Per-process compaction-edge detector for essence preservation. Fires on a sharp token drop
+    /// (compaction), a new session key (resumed chat), the first turn since start (cold resume),
+    /// or a context-limit jump (profile/model reset).
+    /// </summary>
+    private readonly FluxMux.Avalonia.Services.ContextEngine.CompactionEdgeDetector _essenceEdgeDetector
+        = new();
 
     /// <summary>
     /// Raised when the armed Hail Mary rear-prune is actually consumed on a turn (success or
@@ -940,6 +962,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         measuredPromptTokens.Value,
                         hotContext,
                         Str(state, "local_preferred_model"));
+
+                    // Essence preservation: detect a compaction/restart edge and re-assert the
+                    // durable essence so it survives the context reset. Never throws; no-op when
+                    // the reasserter is not wired up or there is no essence.
+                    ObserveEssenceEdge(payload, state, measuredPromptTokens.Value, hotContext);
                 }
             }
 
@@ -3770,6 +3797,116 @@ public sealed class FluxMuxGatewayHost : IDisposable
     }
 
     /// <summary>
+    /// Essence preservation: observes the turn's measured prompt-token count and, when a
+    /// compaction/restart edge is detected, re-asserts the durable essence so it survives the
+    /// context reset. For Cline-like clients it rewrites the session's .compaction.json (rich
+    /// format: essence summary + recent tail) AND injects the essence block for the immediate
+    /// turn (belt-and-suspenders). For local clients it injects the essence block for this turn
+    /// (the next turn carries it forward; no per-turn re-add). Never throws; no-op when the
+    /// reasserter is not wired up.
+    /// </summary>
+    private void ObserveEssenceEdge(JsonObject payload, JsonObject state, int promptTokens, int contextLimit)
+    {
+        var reasserter = EssenceReasserter;
+        if (reasserter is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // Resolve a stable session key: the Cline session id when this is a Cline-like client,
+            // else the local model identity (so different local sessions don't cross-trigger).
+            var isClineLike = GetUserClientReinflatesContext?.Invoke() == true;
+            var sessionKey = isClineLike
+                ? (ClineCompactionWriter.GetMostRecentSessionId() ?? "_cline")
+                : ("local:" + Str(state, "local_preferred_model"));
+
+            var edge = _essenceEdgeDetector.Observe(
+                promptTokens, contextLimit, sessionKey, Str(state, "local_preferred_model"));
+            if (!edge)
+            {
+                return;
+            }
+
+            Log("essence: compaction/restart edge detected (session=" + sessionKey
+                + ", tokens=" + promptTokens + ", limit=" + contextLimit + ")");
+
+            if (isClineLike)
+            {
+                // Cline: rewrite the compaction file with the essence (rich format) so Cline
+                // assimilates it on its next turn.
+                var sessionId = ClineCompactionWriter.GetMostRecentSessionId();
+                if (!string.IsNullOrEmpty(sessionId))
+                {
+                    var messagesPath = Path.Combine(
+                        ClineCompactionWriter.GetSessionDir(sessionId),
+                        sessionId + ".messages.json");
+                    var written = reasserter.ReassertClineCompaction(sessionId, messagesPath);
+                    if (written is not null)
+                    {
+                        Log("essence: re-asserted Cline compaction file at " + written);
+                    }
+                }
+
+                // Also inject for the immediate turn (in case Cline reads its own context before
+                // the file is re-read).
+                var block = reasserter.BuildLocalInjectionBlock();
+                if (!string.IsNullOrWhiteSpace(block))
+                {
+                    InjectEssenceBlock(payload, block);
+                }
+            }
+            else
+            {
+                // Local endpoint: inject the essence block for this turn (the next turn carries it).
+                var block = reasserter.BuildLocalInjectionBlock();
+                if (!string.IsNullOrWhiteSpace(block))
+                {
+                    InjectEssenceBlock(payload, block);
+                    Log("essence: re-injected " + block.Length + " chars into the system prompt (edge)");
+                }
+            }
+        }
+        catch
+        {
+            // An essence re-assert failure must never break a turn.
+        }
+    }
+
+    /// <summary>
+    /// Injects an essence block into the payload's system message (appended to the existing system
+    /// message, or inserted at the front if none exists — prefix-safe). Used by the essence
+    /// re-asserter on a compaction edge.
+    /// </summary>
+    private void InjectEssenceBlock(JsonObject payload, string block)
+    {
+        var messages = payload["messages"] as JsonArray;
+        if (messages is null || messages.Count == 0)
+        {
+            return;
+        }
+
+        for (var i = 0; i < messages.Count; i++)
+        {
+            if (messages[i] is not JsonObject msg)
+            {
+                continue;
+            }
+
+            var role = Str(msg, "role").Trim().ToLowerInvariant();
+            if (role is "system" or "developer")
+            {
+                var existing = MessageText(msg);
+                msg["content"] = existing.Length > 0 ? existing + "\n\n" + block : block;
+                return;
+            }
+        }
+
+        messages.Insert(0, new JsonObject { ["role"] = "system", ["content"] = block });
+    }
+
+    /// <summary>
     /// Stage-0 VIBE_STATE re-injection: when the per-profile toggle is on and a
     /// <c>VIBE_STATE.md</c> exists, prepends the session's persistent task/state/next to the
     /// system prompt so the model always knows "where we are" even after the working context has
@@ -3898,10 +4035,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 return;
             }
 
-            // Find the last user message (the task) and the last assistant message (the state).
+            // Find the first user message (the original ask → stable task), the last user message
+            // (the current intent → pivot detection), and the last assistant message (the state).
+            string firstUser = string.Empty;
             string lastUser = string.Empty;
             string lastAssistant = string.Empty;
-            for (var i = messages.Count - 1; i >= 0; i--)
+            for (var i = 0; i < messages.Count; i++)
             {
                 if (messages[i] is not JsonObject msg)
                 {
@@ -3909,18 +4048,26 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 }
 
                 var role = Str(msg, "role").Trim().ToLowerInvariant();
-                if (role == "user" && string.IsNullOrEmpty(lastUser))
+                if (role == "user")
                 {
-                    lastUser = MessageText(msg);
-                }
-                else if (role == "assistant" && string.IsNullOrEmpty(lastAssistant))
-                {
-                    lastAssistant = MessageText(msg);
-                }
+                    var text = MessageText(msg);
+                    if (string.IsNullOrEmpty(firstUser) && !string.IsNullOrWhiteSpace(text))
+                    {
+                        firstUser = text;
+                    }
 
-                if (!string.IsNullOrEmpty(lastUser) && !string.IsNullOrEmpty(lastAssistant))
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        lastUser = text;
+                    }
+                }
+                else if (role == "assistant")
                 {
-                    break;
+                    var text = MessageText(msg);
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        lastAssistant = text;
+                    }
                 }
             }
 
@@ -3929,27 +4076,171 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 return;
             }
 
-            // Load the existing state and update it with the new task/state.
             var existing = engine.LoadVibeState(VibeStatePath);
+            var essence = EssenceLog;
+
+            // Goal-pivot detection: if the last user message diverges from the stored task, record
+            // an evolution entry (the "changing goals" capture) so the essence survives compaction.
+            // The stable task is the original ask (existing.Task, or firstUser on the very first
+            // turn) unless a pivot is detected.
+            var pivoted = !string.IsNullOrWhiteSpace(existing.Task) && LooksLikePivot(existing.Task, lastUser);
+            string task;
+            if (!string.IsNullOrWhiteSpace(existing.Task) && !pivoted)
+            {
+                task = existing.Task; // keep the stable task
+            }
+            else if (string.IsNullOrWhiteSpace(existing.Task))
+            {
+                // First turn: seed the stable task from the original ask (first user message).
+                var seed = !string.IsNullOrWhiteSpace(firstUser) ? firstUser : lastUser;
+                task = seed.Length > 160 ? seed[..160] + "…" : seed;
+            }
+            else
+            {
+                // Pivot detected: the new intent becomes the task.
+                task = lastUser.Length > 160 ? lastUser[..160] + "…" : lastUser;
+            }
+
+            if (essence is not null && pivoted)
+            {
+                essence.RecordEvolution(existing.Task, task, "user pivoted");
+                Log("vibe-state: goal pivot detected (task updated via essence log)");
+            }
+
+            // Build a proper digest (not raw truncations): prefer explicit markers, else a bounded
+            // tail of the last assistant message.
+            var state = ExtractStateDigest(lastAssistant);
+            var next = ExtractNextMarker(lastAssistant, existing.Next);
+
             var newState = new VibeState
             {
-                Task = lastUser.Length > 120 ? lastUser[..120] + "…" : lastUser,
-                State = lastAssistant.Length > 200 ? lastAssistant[..200] + "…" : lastAssistant,
-                Next = existing.Next, // Preserve the next step (the model updates it via tool call or user instruction)
-                Files = existing.Files, // Preserve the files list
+                Task = task,
+                State = state,
+                Next = next,
+                Files = existing.Files,
             };
 
             // Only write if something actually changed (avoid unnecessary disk I/O).
-            if (newState.Task != existing.Task || newState.State != existing.State)
+            if (newState.Task != existing.Task || newState.State != existing.State || newState.Next != existing.Next)
             {
                 engine.SaveVibeState(VibeStatePath, newState);
-                Log("vibe-state: auto-updated after turn (task=" + newState.Task.Length + " chars, state=" + newState.State.Length + " chars)");
+                // Mirror into the essence log (the durable source of truth for re-assertion).
+                essence?.UpdateCurrent(task, state, next, existing.Files);
+                Log("vibe-state: auto-updated after turn (task=" + newState.Task.Length
+                    + " chars, state=" + newState.State.Length + " chars, next=" + newState.Next.Length + " chars)");
             }
         }
         catch
         {
             // A VIBE_STATE update failure must never break a turn.
         }
+    }
+
+    /// <summary>
+    /// Cheap goal-pivot heuristic: true when <paramref name="newUserMessage"/> shares little
+    /// overlap with <paramref name="storedTask"/> (token-set Jaccard similarity below 0.3). Used to
+    /// decide whether the user has pivoted to a new goal (record an evolution entry) or is still on
+    /// the same task (keep the stable task).
+    /// </summary>
+    private static bool LooksLikePivot(string storedTask, string newUserMessage)
+    {
+        var a = TokenSet(storedTask);
+        var b = TokenSet(newUserMessage);
+        if (a.Count == 0 || b.Count == 0)
+        {
+            return false;
+        }
+
+        var intersect = 0;
+        foreach (var t in a)
+        {
+            if (b.Contains(t))
+            {
+                intersect++;
+            }
+        }
+
+        var union = a.Count + b.Count - intersect;
+        return union > 0 && ((double)intersect / union) < 0.3;
+    }
+
+    /// <summary>Builds a lower-cased token set (words of length >= 4, to ignore short stopwords)
+    /// for cheap overlap comparison.</summary>
+    private static HashSet<string> TokenSet(string text)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seps = new[] { ' ', ',', '.', '!', '?', ':', ';', '\n', '\r', '(', ')', '"', '\'', '[', ']' };
+        foreach (var raw in text.ToLowerInvariant().Split(seps, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var t = raw.Trim();
+            if (t.Length >= 4)
+            {
+                set.Add(t);
+            }
+        }
+
+        return set;
+    }
+
+    /// <summary>
+    /// Extracts a state digest from the last assistant message: prefers explicit Done/In
+    /// progress/Blocked/Next markers; otherwise a bounded tail of the text. Never returns more
+    /// than ~400 chars.
+    /// </summary>
+    private static string ExtractStateDigest(string assistantText)
+    {
+        if (string.IsNullOrWhiteSpace(assistantText))
+        {
+            return string.Empty;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var line in assistantText.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("Done:", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("In progress:", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("Blocked:", StringComparison.OrdinalIgnoreCase)
+                || trimmed.StartsWith("Next:", StringComparison.OrdinalIgnoreCase))
+            {
+                if (sb.Length > 0)
+                {
+                    sb.Append(' ');
+                }
+
+                sb.Append(trimmed);
+            }
+        }
+
+        var digest = sb.ToString();
+        if (string.IsNullOrWhiteSpace(digest))
+        {
+            digest = assistantText.Length > 240 ? assistantText[^240..].TrimStart() : assistantText;
+        }
+
+        return digest.Length > 400 ? digest[^400..] : digest;
+    }
+
+    /// <summary>
+    /// Extracts an explicit Next/TODO marker from the last assistant message; falls back to
+    /// <paramref name="fallback"/> when none is found.
+    /// </summary>
+    private static string ExtractNextMarker(string assistantText, string fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(assistantText))
+        {
+            foreach (var line in assistantText.Split('\n'))
+            {
+                var trimmed = line.Trim();
+                if (trimmed.StartsWith("Next:", StringComparison.OrdinalIgnoreCase)
+                    || trimmed.StartsWith("TODO:", StringComparison.OrdinalIgnoreCase))
+                {
+                    return trimmed.Length > 200 ? trimmed[..200] + "…" : trimmed;
+                }
+            }
+        }
+
+        return fallback;
     }
 
     private static string MessageText(JsonNode? msg)

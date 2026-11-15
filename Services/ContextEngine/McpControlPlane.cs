@@ -26,19 +26,22 @@ public sealed class McpControlPlane
     private readonly IGitRunner _git;
     private readonly string _vibeStatePath;
     private readonly string _workDir;
+    private readonly EssenceLog? _essenceLog;
 
     public McpControlPlane(
         IContextEngine engine,
         ContextSwapStore swapStore,
         IGitRunner git,
         string vibeStatePath,
-        string workDir)
+        string workDir,
+        EssenceLog? essenceLog = null)
     {
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
         _swapStore = swapStore ?? throw new ArgumentNullException(nameof(swapStore));
         _git = git ?? throw new ArgumentNullException(nameof(git));
         _vibeStatePath = vibeStatePath ?? throw new ArgumentNullException(nameof(vibeStatePath));
         _workDir = workDir ?? throw new ArgumentNullException(nameof(workDir));
+        _essenceLog = essenceLog;
     }
 
     /// <summary>
@@ -106,6 +109,20 @@ public sealed class McpControlPlane
         };
 
         _engine.SaveVibeState(_vibeStatePath, updated);
+
+        // Mirror into the durable essence log (the source of truth for re-assertion after
+        // compaction / cold resume). If the task changed, record a goal-evolution entry.
+        if (_essenceLog is not null)
+        {
+            _essenceLog.UpdateCurrent(updated.Task, updated.State, updated.Next, updated.Files);
+            if (!string.Equals(updated.Task, current.Task, StringComparison.Ordinal)
+                && !string.IsNullOrWhiteSpace(current.Task)
+                && !string.IsNullOrWhiteSpace(updated.Task))
+            {
+                _essenceLog.RecordEvolution(current.Task, updated.Task, "model update");
+            }
+        }
+
         return Ok(new JsonObject
         {
             ["task"] = updated.Task,

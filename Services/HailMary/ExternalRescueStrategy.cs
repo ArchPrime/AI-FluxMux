@@ -98,11 +98,37 @@ public sealed class ExternalRescueStrategy : ICompactionStrategy
             return Task.FromResult(CompactionResult.Fail("No Cline session id available to write the compaction file."));
         }
 
-        var written = ClineCompactionWriter.WriteCompactionFile(
-            sessionId,
-            prepared.SummaryPreview,
-            0, // source message count is carried in the preview; header count is best-effort
-            string.Empty);
+        // Read the real .messages.json so we can compute the Cline source-prefix hash that Cline
+        // validates at session load. Without a matching hash, Cline silently discards the
+        // compaction file (see ClineCompactionWriter.ComputeClineSourcePrefixHash).
+        var messagesPath = ctx.ClineMessagesPath
+            ?? Path.Combine(ClineCompactionWriter.GetSessionDir(sessionId), sessionId + ".messages.json");
+        var sourceMessages = ClineCompactionWriter.ReadMessagesArray(messagesPath);
+
+        string? written;
+        if (sourceMessages is not null && sourceMessages.Count > 0)
+        {
+            // Compact the ENTIRE history: replace all N messages with the summary. Cline's sd()
+            // then rebuilds the context as [summary] + [] (no tail), which is what we want for a
+            // truly stuck chat.
+            ctx.LogLine("[HailMary] strategy=" + Name + ": Using WriteCompactionFileValid with " + sourceMessages.Count + " source messages.");
+            written = ClineCompactionWriter.WriteCompactionFileValid(
+                sessionId,
+                prepared.SummaryPreview,
+                sourceMessages,
+                sourceMessages.Count);
+        }
+        else
+        {
+            // No readable .messages.json — fall back to the legacy writer (best-effort). The
+            // compaction may be rejected by Cline, but we still write something.
+            ctx.LogLine("[HailMary] strategy=" + Name + ": WARNING: Could not read .messages.json (path=" + messagesPath + "). Falling back to legacy WriteCompactionFile.");
+            written = ClineCompactionWriter.WriteCompactionFile(
+                sessionId,
+                prepared.SummaryPreview,
+                0,
+                string.Empty);
+        }
 
         if (written is null)
         {
@@ -112,10 +138,19 @@ public sealed class ExternalRescueStrategy : ICompactionStrategy
         }
 
         ctx.LogLine("[HailMary] strategy=" + Name + ": WROTE .compaction.json at " + written +
-                    " — Cline will read it on its next turn and resume compacted.");
+                    " (source messages=" + (sourceMessages?.Count ?? 0) + ") — Cline applies it when the session is reloaded.");
+
+        // NOTE: We intentionally do NOT replace .messages.json here. Cline validates the
+        // .compaction.json against the loaded .messages.json at session load. If we replace
+        // .messages.json with a compacted version, the hash will no longer match and Cline
+        // will reject the compaction. The .compaction.json alone is sufficient: when the user
+        // closes and reopens the chat, Cline loads the original .messages.json, validates the
+        // .compaction.json (hash matches), and applies the compaction.
+
         return Task.FromResult(new CompactionResult(
             Success: true,
-            Message: "Wrote external compaction for Cline session " + sessionId + ". Cline will read it on its next turn.",
+            Message: "Wrote external compaction for Cline session " + sessionId +
+                     ". To apply it, close and reopen this Cline chat (or restart Cline) so the session reloads with the compacted context.",
             CompactionPath: written,
             SummaryPreview: prepared.SummaryPreview));
     }

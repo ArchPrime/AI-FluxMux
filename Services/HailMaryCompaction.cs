@@ -166,6 +166,49 @@ public static class HailMaryCompaction
             report.AfterTokens = t;
         }
 
+        // If the middle-cut alone didn't free enough space (the remaining turns are still too
+        // large), run the non-destructive salvage stages on the surviving messages. This handles
+        // the case where a single huge message (a large file embed, a repeated tool loop, a
+        // bloated tool result) is in the "keep" zone and the middle-cut can't drop it. The
+        // salvage stages shrink individual messages without dropping conversational turns.
+        var currentTokens = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);
+        if (currentTokens > target)
+        {
+            // Stage 1: dedupe identical messages (any role).
+            if (DedupeIdenticalMessages(payload, report))
+            {
+                var t = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);
+                bestTokens = Math.Min(bestTokens, t);
+                report.AfterTokens = t;
+                if (t <= target)
+                {
+                    report.AfterTokens = bestTokens;
+                    return report.ToResult();
+                }
+            }
+
+            // Stage 2: collapse repeated tool-call loops (command + read loops).
+            if (CollapseToolLoops(payload, report))
+            {
+                var t = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);
+                bestTokens = Math.Min(bestTokens, t);
+                report.AfterTokens = t;
+                if (t <= target)
+                {
+                    report.AfterTokens = bestTokens;
+                    return report.ToResult();
+                }
+            }
+
+            // Stage 3: truncate oversized tool-result bodies to the token cap.
+            if (TruncateOversizedToolResults(payload, report))
+            {
+                var t = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);
+                bestTokens = Math.Min(bestTokens, t);
+                report.AfterTokens = t;
+            }
+        }
+
         report.AfterTokens = bestTokens;
         return report.ToResult();
     }

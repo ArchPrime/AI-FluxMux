@@ -926,12 +926,25 @@ public sealed class FluxMuxRuntimeService
 		swapStore.EnsureExists();
 		host.SwapStore = swapStore;
 
+		// Essence log + reasserter (essence-preserving compaction). The essence log lives next to
+		// VIBE_STATE.md (kept together with the other session artifacts). The reasserter re-asserts
+		// the essence after a compaction edge / cold resume (rewrites the Cline compaction file and/or
+		// builds the local re-injection block).
+		var essenceLogDir = Path.GetDirectoryName(_vibeStatePath) ?? _scriptRoot;
+		var essenceLogPath = Path.Combine(essenceLogDir, "essence.json");
+		var essenceLog = new FluxMux.Avalonia.Services.ContextEngine.EssenceLog(
+			new FluxMux.Avalonia.Services.ContextEngine.FileSystemContextIo(),
+			essenceLogPath);
+		host.EssenceLog = essenceLog;
+		host.EssenceReasserter = new FluxMux.Avalonia.Services.ContextEngine.EssenceReasserter(essenceLog);
+
 		var mcpPlane = new FluxMux.Avalonia.Services.ContextEngine.McpControlPlane(
 			host.ContextEngine,
 			swapStore,
 			new FluxMux.Avalonia.Services.ContextEngine.GitRunner(),
 			_vibeStatePath,
-			_workspaceRoot);
+			_workspaceRoot,
+			essenceLog);
 		host.McpControlPlane = mcpPlane;
 		host.ReportHailMaryApplied = tokens => HailMaryAppliedNotice?.Invoke(tokens);
 		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);

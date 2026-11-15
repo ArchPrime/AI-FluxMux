@@ -3366,6 +3366,7 @@
                                 <Button Content="Hail Mary Context Trim: shrink this turn"
                                         Margin="0,0,8,4"
                                         Command="{Binding HailMaryShrinkTurnCommand}"
+                                        Click="HailMaryBannerShrink_Click"
                                         ToolTip.Tip="Prunes the older turns from this chat's forwarded history (keeping the system prompt, your last task, and the chosen number of recent turns) so the reply has room to complete, then re-sends the turn. The Client app still has the full chat." />
                                 <Button Content="Dismiss"
                                         Margin="0,0,8,4"
@@ -3566,9 +3567,11 @@
                                     <StackPanel Orientation="Horizontal" Spacing="8">
                                         <Button Content="Confirm write"
                                                 Command="{Binding ConfirmHailMaryRescueCommand}"
+                                                Click="HailMaryPickerConfirm_Click"
                                                 FontSize="11" Padding="10,4" />
                                         <Button Content="Cancel"
                                                 Command="{Binding CancelHailMaryRescueCommand}"
+                                                Click="HailMaryPickerCancelRescue_Click"
                                                 FontSize="11" Padding="10,4" />
                                     </StackPanel>
                                 </StackPanel>
