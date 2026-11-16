@@ -4111,6 +4111,27 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 Log("vibe-state: goal pivot detected (task updated via essence log)");
             }
 
+            // Mechanical capture of decisions and dead ends from the last assistant message.
+            // These are the highest-value "meaning" that a lossy compaction destroys, and they
+            // can't be reconstructed from the conversation tail. We look for explicit markers
+            // (decision: / decided / going with / chose / opted for, and dead end / doesn't work /
+            // failed / abandoned / not viable) and record the surrounding text. Conservative:
+            // only records when a marker is found, and dedupes against already-recorded entries.
+            if (essence is not null && !string.IsNullOrWhiteSpace(lastAssistant))
+            {
+                foreach (var decision in ExtractDecisions(lastAssistant))
+                {
+                    essence.RecordDecision(decision);
+                    Log("vibe-state: decision captured (" + decision.Length + " chars)");
+                }
+
+                foreach (var deadEnd in ExtractDeadEnds(lastAssistant))
+                {
+                    essence.RecordDeadEnd(deadEnd);
+                    Log("vibe-state: dead end captured (" + deadEnd.Length + " chars)");
+                }
+            }
+
             // Build a proper digest (not raw truncations): prefer explicit markers, else a bounded
             // tail of the last assistant message.
             var state = ExtractStateDigest(lastAssistant);
@@ -4245,6 +4266,150 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         return fallback;
+    }
+
+    /// <summary>
+    /// Extracts decision markers from the last assistant message. Looks for lines that start with
+    /// or contain explicit decision phrases ("Decision:", "I decided", "We'll use", "Going with",
+    /// "Chose to", "Opted for", "Decided to"). Returns a bounded list of unique decision strings.
+    /// Conservative: only records when a marker is found; returns an empty list otherwise.
+    /// </summary>
+    private static List<string> ExtractDecisions(string assistantText)
+    {
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(assistantText))
+        {
+            return results;
+        }
+
+        // Decision markers: lines that explicitly state a decision.
+        var decisionMarkers = new[]
+        {
+            "Decision:", "decision:",
+            "I decided", "i decided",
+            "We'll use", "we'll use", "We will use", "we will use",
+            "Going with", "going with",
+            "Chose to", "chose to", "Chose", "chose",
+            "Opted for", "opted for", "Opted to", "opted to",
+            "Decided to", "decided to", "Decided", "decided",
+        };
+
+        foreach (var line in assistantText.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                continue;
+            }
+
+            // Check if this line contains a decision marker.
+            var hasMarker = false;
+            foreach (var marker in decisionMarkers)
+            {
+                if (trimmed.StartsWith(marker, StringComparison.Ordinal)
+                    || trimmed.Contains(marker, StringComparison.Ordinal))
+                {
+                    hasMarker = true;
+                    break;
+                }
+            }
+
+            if (!hasMarker)
+            {
+                continue;
+            }
+
+            // Extract the decision text (the line itself, bounded to 200 chars).
+            var decision = trimmed.Length > 200 ? trimmed[..200] + "…" : trimmed;
+
+            // Dedupe: only add if not already in the list.
+            if (!results.Any(existing => existing == decision))
+            {
+                results.Add(decision);
+            }
+
+            // Bound the list to avoid excessive entries.
+            if (results.Count >= 5)
+            {
+                break;
+            }
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Extracts dead-end markers from the last assistant message. Looks for lines that explicitly
+    /// state a failed approach or dead end ("dead end", "doesn't work", "failed", "abandoned",
+    /// "gave up on", "not viable", "no good", "rejected", "doesn't compile", "crashes"). Returns a
+    /// bounded list of unique dead-end strings. Conservative: only records when a marker is found;
+    /// returns an empty list otherwise.
+    /// </summary>
+    private static List<string> ExtractDeadEnds(string assistantText)
+    {
+        var results = new List<string>();
+        if (string.IsNullOrWhiteSpace(assistantText))
+        {
+            return results;
+        }
+
+        // Dead-end markers: lines that explicitly state a failed approach.
+        var deadEndMarkers = new[]
+        {
+            "dead end", "Dead end", "DEAD END",
+            "doesn't work", "Doesn't work", "does not work", "Does not work",
+            "failed", "Failed", "FAILED",
+            "abandoned", "Abandoned", "ABANDONED",
+            "gave up on", "Gave up on", "GAVE UP ON",
+            "not viable", "Not viable", "NOT VIABLE",
+            "no good", "No good", "NO GOOD",
+            "rejected", "Rejected", "REJECTED",
+            "doesn't compile", "Doesn't compile", "does not compile", "Does not compile",
+            "crashes", "Crashes", "CRASHES",
+            "doesn't build", "Doesn't build", "does not build", "Does not build",
+        };
+
+        foreach (var line in assistantText.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                continue;
+            }
+
+            // Check if this line contains a dead-end marker.
+            var hasMarker = false;
+            foreach (var marker in deadEndMarkers)
+            {
+                if (trimmed.Contains(marker, StringComparison.Ordinal))
+                {
+                    hasMarker = true;
+                    break;
+                }
+            }
+
+            if (!hasMarker)
+            {
+                continue;
+            }
+
+            // Extract the dead-end text (the line itself, bounded to 200 chars).
+            var deadEnd = trimmed.Length > 200 ? trimmed[..200] + "…" : trimmed;
+
+            // Dedupe: only add if not already in the list.
+            if (!results.Any(existing => existing == deadEnd))
+            {
+                results.Add(deadEnd);
+            }
+
+            // Bound the list to avoid excessive entries.
+            if (results.Count >= 5)
+            {
+                break;
+            }
+        }
+
+        return results;
     }
 
     private static string MessageText(JsonNode? msg)
