@@ -500,6 +500,112 @@ public static class ClineCompactionWriter
     }
 
     /// <summary>
+    /// Matches the incoming request's messages to the on-disk Cline session that owns them.
+    /// This is more reliable than <see cref="GetMostRecentSessionId"/> when multiple Cline sessions
+    /// are open, because it identifies the session by its actual message content rather than by
+    /// last-write-time. The incoming request's messages are a suffix of the on-disk session's
+    /// messages, so we match on the last few message IDs (which are stable and unique per message).
+    ///
+    /// Strategy (fast path first):
+    ///   1. Try the most-recent session (by last-write-time) — usually the active one.
+    ///   2. If no match, scan the next most-recent sessions (bounded to keep it fast).
+    ///   3. Return the session whose messages contain the request's last message ID.
+    ///
+    /// Returns null if no session matches (e.g., the request is from a non-Cline client, or the
+    /// session hasn't been written to disk yet).
+    /// </summary>
+    public static string? MatchSessionIdForRequest(JsonArray? requestMessages)
+    {
+        if (requestMessages is null || requestMessages.Count == 0)
+        {
+            return null;
+        }
+
+        // Collect the last few message IDs from the request (these are the most recent and most
+        // likely to be unique). We use the last 3 to be robust against a single ID collision.
+        var requestIds = new List<string>();
+        for (int i = Math.Max(0, requestMessages.Count - 3); i < requestMessages.Count; i++)
+        {
+            var msg = requestMessages[i] as JsonObject;
+            if (msg is null) continue;
+            var id = msg["id"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(id))
+            {
+                requestIds.Add(id.Trim());
+            }
+        }
+
+        if (requestIds.Count == 0)
+        {
+            // No stable IDs in the request — fall back to most-recent (can't do better).
+            return GetMostRecentSessionId();
+        }
+
+        try
+        {
+            var homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var sessionsDir = Path.Combine(homeDir, ".cline", "data", "sessions");
+            if (!Directory.Exists(sessionsDir))
+            {
+                return null;
+            }
+
+            var dirs = Directory.GetDirectories(sessionsDir)
+                .Select(d => new { Path = d, Time = Directory.GetLastWriteTime(d) })
+                .OrderByDescending(x => x.Time)
+                .Take(10) // Bounded: only scan the 10 most-recent sessions.
+                .ToList();
+
+            foreach (var dir in dirs)
+            {
+                var sessionId = Path.GetFileName(dir.Path);
+                var messagesPath = Path.Combine(dir.Path, sessionId + ".messages.json");
+                if (!File.Exists(messagesPath))
+                {
+                    continue;
+                }
+
+                var diskMessages = ReadMessagesArray(messagesPath);
+                if (diskMessages is null || diskMessages.Count == 0)
+                {
+                    continue;
+                }
+
+                // Check if the request's last message ID appears in this session's messages.
+                // We only need to check the last request ID (the most recent one) — if it's here,
+                // this is the session. Checking all 3 would be more robust but slower; the last
+                // ID is almost always unique enough.
+                var lastRequestId = requestIds[requestIds.Count - 1];
+                bool found = false;
+                // Scan from the end of the disk messages (the request's last message should be
+                // near the end of the on-disk messages, since the request is a suffix).
+                for (int i = diskMessages.Count - 1; i >= 0 && i >= diskMessages.Count - 50; i--)
+                {
+                    var diskMsg = diskMessages[i] as JsonObject;
+                    if (diskMsg is null) continue;
+                    var diskId = diskMsg["id"]?.GetValue<string>();
+                    if (diskId == lastRequestId)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (found)
+                {
+                    return sessionId;
+                }
+            }
+
+            return null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Replaces the session's .messages.json with a compacted version (summary + recent tail).
     /// This is the "nuclear" option for a truly stuck Cline chat: when Cline is unresponsive and
     /// can't process a new turn, the .compaction.json file alone won't help because Cline only

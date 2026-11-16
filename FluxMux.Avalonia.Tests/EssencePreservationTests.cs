@@ -105,6 +105,101 @@ public sealed class EssencePreservationTests
         Assert.DoesNotContain("## Key decisions", block);
     }
 
+    // ── Intent-shift capture (verbatim, bounded) ─────────────────────────────────
+
+    [Fact]
+    public void EssenceLog_RecordIntentShift_PreservesVerbatimAndPriorTask()
+    {
+        var io = new FakeContextIo();
+        var log = new EssenceLog(io, "/tmp/essence.json");
+        log.UpdateCurrent("Fix the launch retry", "In progress", "Run tests", "a.cs");
+        log.RecordIntentShift("I don't believe that's a pivot, we're still on the same goal", "Fix the launch retry");
+
+        var reloaded = log.Load();
+        Assert.Single(reloaded.IntentShifts);
+        Assert.Equal("I don't believe that's a pivot, we're still on the same goal", reloaded.IntentShifts[0].Verbatim);
+        Assert.Equal("Fix the launch retry", reloaded.IntentShifts[0].PriorTask);
+    }
+
+    [Fact]
+    public void EssenceLog_RecordIntentShift_IsBounded()
+    {
+        var io = new FakeContextIo();
+        var log = new EssenceLog(io, "/tmp/essence.json");
+        for (var i = 0; i < 70; i++)
+        {
+            log.RecordIntentShift("shift " + i, "prior task " + i);
+        }
+
+        var reloaded = log.Load();
+        // Bounded to 64 (MaxIntentShifts); oldest dropped first.
+        Assert.Equal(64, reloaded.IntentShifts.Count);
+        // The most recent should be "shift 69".
+        Assert.Equal("shift 69", reloaded.IntentShifts[reloaded.IntentShifts.Count - 1].Verbatim);
+        // The oldest should be "shift 6" (0-5 dropped).
+        Assert.Equal("shift 6", reloaded.IntentShifts[0].Verbatim);
+    }
+
+    [Fact]
+    public void EssenceLog_RecordIntentShift_EmptyVerbatim_IsIgnored()
+    {
+        var io = new FakeContextIo();
+        var log = new EssenceLog(io, "/tmp/essence.json");
+        log.RecordIntentShift("", "prior task");
+        log.RecordIntentShift("   ", "prior task");
+        Assert.Empty(log.Load().IntentShifts);
+    }
+
+    [Fact]
+    public void Essence_HasContent_TrueWhenOnlyIntentShifts()
+    {
+        var e = Essence.Empty;
+        Assert.False(e.HasContent());
+        e.IntentShifts.Add(new EssenceIntentShift("user said something", "prior task", DateTimeOffset.UtcNow));
+        Assert.True(e.HasContent());
+    }
+
+    [Fact]
+    public void Essence_ToClineSummary_IncludesIntentShifts_Bounded()
+    {
+        var e = Essence.Empty;
+        e.Current = new EssenceCurrent("Goal", "State", "Next", "f.cs");
+        // Add 10 intent-shifts; only the most recent 8 should appear in the Cline summary.
+        for (var i = 0; i < 10; i++)
+        {
+            e.IntentShifts.Add(new EssenceIntentShift("shift " + i, "prior " + i, DateTimeOffset.UtcNow));
+        }
+
+        var summary = e.ToClineSummary();
+        Assert.Contains("## Intent-shift candidates", summary);
+        // The most recent (shift 9) should be present.
+        Assert.Contains("shift 9", summary);
+        // An older one (shift 1) should be dropped (only most recent 8 kept).
+        Assert.DoesNotContain("shift 1", summary);
+        // The second-oldest kept (shift 2) should be present.
+        Assert.Contains("shift 2", summary);
+    }
+
+    [Fact]
+    public void Essence_ToReinjectionBlock_IncludesOnlyRecentIntentShifts()
+    {
+        var e = Essence.Empty;
+        e.Current = new EssenceCurrent("Goal", "State", "Next", "f.cs");
+        // Add 5 intent-shifts; only the most recent 2 should appear in the reinjection block.
+        for (var i = 0; i < 5; i++)
+        {
+            e.IntentShifts.Add(new EssenceIntentShift("shift " + i, "prior " + i, DateTimeOffset.UtcNow));
+        }
+
+        var block = e.ToReinjectionBlock();
+        // The most recent (shift 4) should be present.
+        Assert.Contains("shift 4", block);
+        // The second-most-recent (shift 3) should be present.
+        Assert.Contains("shift 3", block);
+        // An older one (shift 1) should be dropped (only most recent 2 kept).
+        Assert.DoesNotContain("shift 1", block);
+    }
+
     // ── CompactionEdgeDetector ───────────────────────────────────────────────────
 
     [Fact]
@@ -333,6 +428,160 @@ public sealed class EssencePreservationTests
         Assert.False(FluxMuxGatewayHost.LooksLikePivot("", "do something completely different here"));
     }
 
+    // ── LooksLikeCommentary (commentary vs. new-instruction detection) ───────────
+
+    [Fact]
+    public void LooksLikeCommentary_FirstPersonObservation_IsCommentary()
+    {
+        // The user's actual message that was mis-flagged as a pivot.
+        var msg = "Looking at the telemetry I see that the vibe state goal is taken as changed as a result of my last message. I don't believe that is true. I was offering commentary relevant to the pursuit of the same goal";
+        Assert.True(FluxMuxGatewayHost.LooksLikeCommentary(msg));
+    }
+
+    [Fact]
+    public void LooksLikeCommentary_NegationOfChange_IsCommentary()
+    {
+        Assert.True(FluxMuxGatewayHost.LooksLikeCommentary("I don't believe that's a pivot, we're still on the same goal"));
+        Assert.True(FluxMuxGatewayHost.LooksLikeCommentary("no change to the task, just observing the output"));
+    }
+
+    [Fact]
+    public void LooksLikeCommentary_MetaReference_IsCommentary()
+    {
+        Assert.True(FluxMuxGatewayHost.LooksLikeCommentary("this is relevant to the current goal"));
+        Assert.True(FluxMuxGatewayHost.LooksLikeCommentary("the task hasn't changed, I'm just noting something"));
+    }
+
+    [Fact]
+    public void LooksLikeCommentary_Question_IsCommentary()
+    {
+        Assert.True(FluxMuxGatewayHost.LooksLikeCommentary("why did the model fail to launch?"));
+        Assert.True(FluxMuxGatewayHost.LooksLikeCommentary("can you explain what happened with the VRAM?"));
+    }
+
+    [Fact]
+    public void LooksLikeCommentary_NewInstruction_IsNotCommentary()
+    {
+        // A genuine new instruction should NOT be flagged as commentary.
+        Assert.False(FluxMuxGatewayHost.LooksLikeCommentary("now investigate why the local model load is slow and check the VRAM usage"));
+        Assert.False(FluxMuxGatewayHost.LooksLikeCommentary("switch to the smaller model and retry the launch"));
+        Assert.False(FluxMuxGatewayHost.LooksLikeCommentary("implement a retry mechanism for the stuck launch state"));
+    }
+
+    [Fact]
+    public void LooksLikeCommentary_Empty_IsNotCommentary()
+    {
+        Assert.False(FluxMuxGatewayHost.LooksLikeCommentary(""));
+        Assert.False(FluxMuxGatewayHost.LooksLikeCommentary("   "));
+        Assert.False(FluxMuxGatewayHost.LooksLikeCommentary(null));
+    }
+
+    // ── LooksLikePivot with commentary guard ──────────────────────────────────────
+
+    [Fact]
+    public void LooksLikePivot_CommentaryWithLowOverlap_IsNotPivot()
+    {
+        // The user's actual scenario: the stored task is about the launch retry fix, but the
+        // user's message is commentary about the vibe-state system (low token overlap).
+        // Before the fix, this was mis-flagged as a pivot. Now it should be recognized as
+        // commentary and NOT flagged.
+        var storedTask = "Fix the autoloaded model fails to reach launched status issue by implementing a robust retry recovery mechanism in the model launch flow";
+        var userMessage = "Looking at the telemetry I see that the vibe state goal is taken as changed as a result of my last message. I don't believe that is true. I was offering commentary relevant to the pursuit of the same goal";
+        Assert.False(FluxMuxGatewayHost.LooksLikePivot(storedTask, userMessage));
+    }
+
+    [Fact]
+    public void LooksLikePivot_GenuineNewInstruction_IsPivot()
+    {
+        // A genuine new instruction with low token overlap SHOULD still be flagged as a pivot.
+        var storedTask = "Fix the autoloaded model fails to reach launched status issue by implementing a robust retry recovery mechanism in the model launch flow";
+        var userMessage = "now investigate the VRAM attribution discrepancy between nvidia-smi and the Settings tab and check if Epic Games is stealing VRAM";
+        Assert.True(FluxMuxGatewayHost.LooksLikePivot(storedTask, userMessage));
+    }
+
+    // ── HasImperativeSignal (directive detection) ─────────────────────────────────
+
+    [Fact]
+    public void HasImperativeSignal_DirectiveVerbs_Detected()
+    {
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("investigate why the load is slow"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("switch to the smaller model"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("implement a retry mechanism"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("fix the bug in the parser"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("build the new feature"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("change the architecture"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("refactor the module"));
+    }
+
+    [Fact]
+    public void HasImperativeSignal_DirectiveMarkers_Detected()
+    {
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("instead, focus on the API layer"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("let's try a different approach"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("I want to change the direction"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("we should prioritize the backend"));
+        Assert.True(FluxMuxGatewayHost.HasImperativeSignal("go ahead and deploy the fix"));
+    }
+
+    [Fact]
+    public void HasImperativeSignal_NoDirective_NotDetected()
+    {
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal("I see that the goal changed"));
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal("why did the model fail to launch?"));
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal("this is relevant to the current goal"));
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal("the task hasn't changed"));
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal("ok looks good"));
+    }
+
+    [Fact]
+    public void HasImperativeSignal_Empty_NotDetected()
+    {
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal(""));
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal("   "));
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal(null));
+    }
+
+    [Fact]
+    public void HasImperativeSignal_SubstringNotMatched()
+    {
+        // "building" should not match "build" (whole-word boundary check).
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal("the building is large"));
+        // "prefix" should not match "fix" (whole-word boundary check).
+        Assert.False(FluxMuxGatewayHost.HasImperativeSignal("the prefix is long"));
+    }
+
+    // ── LooksLikePivot with imperative-signal gate ────────────────────────────────
+
+    [Fact]
+    public void LooksLikePivot_LowOverlapNoImperative_IsNotPivot()
+    {
+        // A message with low token overlap but NO imperative signal should NOT be a pivot.
+        // This is the key tightening: "the model seems to be behaving oddly today" has low
+        // overlap with the stored task but is an observation, not a new directive.
+        var storedTask = "implement the essence-preserving compaction system for cline";
+        var userMessage = "the model seems to be behaving oddly today with the new context window";
+        Assert.False(FluxMuxGatewayHost.LooksLikePivot(storedTask, userMessage));
+    }
+
+    [Fact]
+    public void LooksLikePivot_ShortMessageBelowThreshold_IsNotPivot()
+    {
+        // A 3-4 token message is below the new 5-token threshold, even if it has an imperative
+        // verb. "now fix the bug" is 4 tokens — too short to be a genuine pivot.
+        var storedTask = "implement the essence-preserving compaction system for cline";
+        var userMessage = "now fix the bug";
+        Assert.False(FluxMuxGatewayHost.LooksLikePivot(storedTask, userMessage));
+    }
+
+    [Fact]
+    public void LooksLikePivot_LongMessageWithImperative_IsPivot()
+    {
+        // A long message (≥5 tokens) with an imperative signal and low overlap IS a pivot.
+        var storedTask = "implement the essence-preserving compaction system for cline";
+        var userMessage = "switch to a completely different architecture for the gateway layer";
+        Assert.True(FluxMuxGatewayHost.LooksLikePivot(storedTask, userMessage));
+    }
+
     // ── ExtractDecisions (decision capture) ─────────────────────────────────────
 
     [Fact]
@@ -393,5 +642,36 @@ public sealed class EssencePreservationTests
         var text = "This is just a normal paragraph with no dead-end markers at all.";
         var results = FluxMuxGatewayHost.ExtractDeadEnds(text);
         Assert.Empty(results);
+    }
+
+    // ── TruncateForLog (human-readable diagnostic log lines) ─────────────────────
+
+    [Fact]
+    public void TruncateForLog_ShortValue_ReturnsUnchanged()
+    {
+        Assert.Equal("use q8_0 KV cache", FluxMuxGatewayHost.TruncateForLog("use q8_0 KV cache"));
+    }
+
+    [Fact]
+    public void TruncateForLog_CollapsesWhitespaceAndNewlines()
+    {
+        var result = FluxMuxGatewayHost.TruncateForLog("line one\nline two   line three");
+        Assert.Equal("line one line two line three", result);
+    }
+
+    [Fact]
+    public void TruncateForLog_LongValue_IsTruncatedWithEllipsis()
+    {
+        var longText = new string('a', 500);
+        var result = FluxMuxGatewayHost.TruncateForLog(longText, maxChars: 100);
+        Assert.Equal(101, result.Length); // 100 chars + ellipsis
+        Assert.EndsWith("…", result);
+    }
+
+    [Fact]
+    public void TruncateForLog_NullOrEmpty_ReturnsEmpty()
+    {
+        Assert.Equal(string.Empty, FluxMuxGatewayHost.TruncateForLog(null));
+        Assert.Equal(string.Empty, FluxMuxGatewayHost.TruncateForLog("   "));
     }
 }

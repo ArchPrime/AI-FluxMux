@@ -204,6 +204,25 @@ public sealed class FluxMuxGatewayHost : IDisposable
         = new();
 
     /// <summary>
+    /// Tracks the Cline session's message count across turns so we can detect when Cline compacts
+    /// (the message count drops sharply). Cline manages its own context and autocompact, so FluxMux
+    /// cannot rely on token measurements (which are only available for local models). Instead, we
+    /// watch the message count in the incoming request: when it drops by more than a threshold
+    /// fraction from the previous turn, Cline has compacted and we re-assert the preserved essence.
+    /// Keyed by Cline session id so different sessions don't cross-trigger. Bounded to avoid leaks.
+    /// </summary>
+    private readonly Dictionary<string, int> _clineMessageCounts = new(StringComparer.Ordinal);
+
+    /// <summary>How much the Cline message count must drop (as a fraction of the previous value) to
+    /// count as a compaction. 0.30 = a 30% reduction. Cline's compaction replaces the full history
+    /// with a summary + recent tail, so the count drops dramatically (e.g., 6000 → 50).</summary>
+    private const double ClineCompactionDropFraction = 0.30;
+
+    /// <summary>The previous Cline message count must be at least this many for a drop to be
+    /// meaningful (avoids false edges from tiny early-chat counts).</summary>
+    private const int ClineMinPreviousMessages = 20;
+
+    /// <summary>
     /// Raised when the armed Hail Mary rear-prune is actually consumed on a turn (success or
     /// no-op), so the UI can clear the "queued" pulse and refresh the context gauge with the new
     /// (smaller) prompt-token count. Fires exactly once per armed prune.
@@ -972,6 +991,17 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     UpdateVibeStateAfterTurn(payload, model, Str(state, "local_variant"));
                     ObserveEssenceEdge(payload, state, measuredPromptTokens.Value, hotContext);
                 }
+            }
+
+            // Essence preservation for Cline-like clients: Cline manages its own context and
+            // autocompact, so token measurements are not available. Instead, we update the durable
+            // essence log on every Cline turn (so it's always current) and detect Cline's compaction
+            // by watching the incoming message count drop sharply. Never throws; no-op when the
+            // reasserter is not wired up or there is no essence.
+            if (!isProbeRequest && GetUserClientReinflatesContext?.Invoke() == true)
+            {
+                UpdateVibeStateAfterTurn(payload, model, Str(state, "local_variant"));
+                ObserveClineEssenceEdge(payload);
             }
 
             // VIBE_STATE re-injection (stage 0): when enabled, prepend the session's persistent
@@ -3833,8 +3863,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 return;
             }
 
-            Log("essence: compaction/restart edge detected (session=" + sessionKey
-                + ", tokens=" + promptTokens + ", limit=" + contextLimit + ")");
+            Log("essence: context was compacted/restarted (session=" + sessionKey
+                + ", now " + promptTokens + " tokens, limit " + contextLimit
+                + ") — re-asserting the preserved session essence so the model keeps its place");
 
             if (isClineLike)
             {
@@ -3849,7 +3880,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     var written = reasserter.ReassertClineCompaction(sessionId, messagesPath);
                     if (written is not null)
                     {
-                        Log("essence: re-asserted Cline compaction file at " + written);
+                        Log("essence: wrote the preserved essence into Cline's compaction file (" + written + ") — Cline will pick it up on its next turn");
+                    }
+                    else
+                    {
+                        Log("essence: no essence content to re-assert yet (session essence is still empty)");
                     }
                 }
 
@@ -3868,8 +3903,108 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 if (!string.IsNullOrWhiteSpace(block))
                 {
                     InjectEssenceBlock(payload, block);
-                    Log("essence: re-injected " + block.Length + " chars into the system prompt (edge)");
+                    Log("essence: re-injected the preserved essence (" + block.Length + " chars) into the system prompt for this turn");
                 }
+                else
+                {
+                    Log("essence: no essence content to re-inject yet (session essence is still empty)");
+                }
+            }
+        }
+        catch
+        {
+            // An essence re-assert failure must never break a turn.
+        }
+    }
+
+    /// <summary>
+    /// Essence preservation for Cline-like clients: detects when Cline has compacted its own context
+    /// (the incoming message count drops sharply from the previous turn) and re-asserts the durable
+    /// essence so it survives the compaction. Cline manages its own context and autocompact, so we
+    /// cannot rely on token measurements (only available for local models). Instead, we watch the
+    /// message count in the incoming request. When it drops by more than <see cref="ClineCompactionDropFraction"/>
+    /// from the previous turn (and the previous count was at least <see cref="ClineMinPreviousMessages"/>),
+    /// Cline has compacted and we re-assert the essence. Never throws; no-op when the reasserter is
+    /// not wired up or there is no essence.
+    /// </summary>
+    private void ObserveClineEssenceEdge(JsonObject payload)
+    {
+        var reasserter = EssenceReasserter;
+        if (reasserter is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var messages = payload["messages"] as JsonArray;
+            if (messages is null || messages.Count == 0)
+            {
+                return;
+            }
+
+            // Identify the actual session for THIS request by matching its messages against the
+            // on-disk session files. This is safer than GetMostRecentSessionId() when multiple
+            // Cline sessions are open — it keys by the request's real message IDs rather than by
+            // last-write-time, so a compaction in one session is never misattributed to another.
+            var sessionId = ClineCompactionWriter.MatchSessionIdForRequest(messages);
+            if (string.IsNullOrEmpty(sessionId))
+            {
+                return;
+            }
+
+            var currentCount = messages.Count;
+            var edge = false;
+            if (_clineMessageCounts.TryGetValue(sessionId, out var previousCount))
+            {
+                // Sharp drop in message count = Cline compacted.
+                edge = previousCount >= ClineMinPreviousMessages
+                    && currentCount < previousCount * (1.0 - ClineCompactionDropFraction);
+            }
+            else
+            {
+                // First turn for this session: not an edge (we have no baseline).
+                edge = false;
+            }
+
+            // Update the tracked count (bounded to avoid leaks in long-running processes).
+            _clineMessageCounts[sessionId] = currentCount;
+            if (_clineMessageCounts.Count > 256)
+            {
+                var oldestKey = _clineMessageCounts.Keys.First();
+                _clineMessageCounts.Remove(oldestKey);
+            }
+
+            if (!edge)
+            {
+                return;
+            }
+
+            Log("essence: Cline compacted its context (session=" + sessionId
+                + ", messages dropped from " + previousCount + " to " + currentCount
+                + ") — re-asserting the preserved session essence so the model keeps its place");
+
+            // Cline: rewrite the compaction file with the essence (rich format) so Cline
+            // assimilates it on its next turn.
+            var messagesPath = Path.Combine(
+                ClineCompactionWriter.GetSessionDir(sessionId),
+                sessionId + ".messages.json");
+            var written = reasserter.ReassertClineCompaction(sessionId, messagesPath);
+            if (written is not null)
+            {
+                Log("essence: wrote the preserved essence into Cline's compaction file (" + written + ") — Cline will pick it up on its next turn");
+            }
+            else
+            {
+                Log("essence: no essence content to re-assert yet (session essence is still empty)");
+            }
+
+            // Also inject for the immediate turn (in case Cline reads its own context before
+            // the file is re-read).
+            var block = reasserter.BuildLocalInjectionBlock();
+            if (!string.IsNullOrWhiteSpace(block))
+            {
+                InjectEssenceBlock(payload, block);
             }
         }
         catch
@@ -3971,14 +4106,17 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 // prompt, which breaks the KV cache prefix and forces a large re-prefill every turn.
                 // If this hash is stable across turns, the VIBE_STATE block is NOT the cause of the
                 // repeated prefilling. Remove this once the prefill behavior is understood.
-                Log("vibe-state: re-injected " + block.Length + " chars into the system prompt (blockHash=" + StableHash(block) + ")");
+                // NOTE: uses the "vibe-state-dbg:" prefix so it stays in the log file but is NOT
+                // forwarded to the live UI terminal (this fires every turn and would be noise).
+                Log("vibe-state-dbg: re-injected " + block.Length + " chars into the system prompt (blockHash=" + StableHash(block) + ")");
                 return;
             }
         }
 
         // No system message present: insert one at the front so the block is prefix-stable.
         messages.Insert(0, new JsonObject { ["role"] = "system", ["content"] = block });
-        Log("vibe-state: inserted a system message with " + block.Length + " chars at the front (blockHash=" + StableHash(block) + ")");
+        // "vibe-state-dbg:" prefix: stays in the log file, not forwarded to the live UI (per-turn noise).
+        Log("vibe-state-dbg: inserted a system message with " + block.Length + " chars at the front (blockHash=" + StableHash(block) + ")");
     }
 
     /// <summary>
@@ -4109,7 +4247,22 @@ public sealed class FluxMuxGatewayHost : IDisposable
             if (essence is not null && pivoted)
             {
                 essence.RecordEvolution(existing.Task, task, "user pivoted");
-                Log("vibe-state: goal pivot detected (task updated via essence log)");
+                Log("vibe-state: goal changed — was \"" + TruncateForLog(existing.Task)
+                    + "\", now \"" + TruncateForLog(task) + "\"");
+            }
+
+            // Candidate intent-shift capture: record the VERBATIM user message when it looks like
+            // it may have changed, corrected, or steered the goal. This fires on (a) a detected
+            // pivot, OR (b) a commentary/correction (which the old logic would have mis-flagged as
+            // a pivot). The mechanical layer does NOT classify the shift — it stores the raw
+            // material (verbatim + prior task anchor) so the reading model can later judge whether
+            // it was a pivot, a correction, or ordinary steering. Bias toward recall: over-capturing
+            // is cheap (bounded, disk-only), under-capturing loses fidelity.
+            if (essence is not null && !string.IsNullOrWhiteSpace(lastUser)
+                && (pivoted || LooksLikeCommentary(lastUser)))
+            {
+                essence.RecordIntentShift(lastUser, existing.Task);
+                Log("vibe-state: intent-shift candidate captured (verbatim, " + lastUser.Length + " chars) — " + TruncateForLog(lastUser));
             }
 
             // Mechanical capture of decisions and dead ends from the last assistant message.
@@ -4123,13 +4276,13 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 foreach (var decision in ExtractDecisions(lastAssistant))
                 {
                     essence.RecordDecision(decision);
-                    Log("vibe-state: decision captured (" + decision.Length + " chars)");
+                    Log("vibe-state: remembered a decision — \"" + TruncateForLog(decision) + "\"");
                 }
 
                 foreach (var deadEnd in ExtractDeadEnds(lastAssistant))
                 {
                     essence.RecordDeadEnd(deadEnd);
-                    Log("vibe-state: dead end captured (" + deadEnd.Length + " chars)");
+                    Log("vibe-state: remembered a dead end (won't retry) — \"" + TruncateForLog(deadEnd) + "\"");
                 }
             }
 
@@ -4152,7 +4305,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 engine.SaveVibeState(VibeStatePath, newState);
                 // Mirror into the essence log (the durable source of truth for re-assertion).
                 essence?.UpdateCurrent(task, state, next, existing.Files);
-                Log("vibe-state: auto-updated after turn (task=" + newState.Task.Length
+                // "vibe-state-dbg:" prefix: stays in the log file, not forwarded to the live UI.
+                // This fires on most turns, so surfacing it live would be noise. The meaningful
+                // events (goal change, decision, dead end) are logged separately with the
+                // "vibe-state:" prefix and DO reach the terminal.
+                Log("vibe-state-dbg: auto-updated after turn (task=" + newState.Task.Length
                     + " chars, state=" + newState.State.Length + " chars, next=" + newState.Next.Length + " chars)");
             }
         }
@@ -4163,10 +4320,20 @@ public sealed class FluxMuxGatewayHost : IDisposable
     }
 
     /// <summary>
-    /// Cheap goal-pivot heuristic: true when <paramref name="newUserMessage"/> shares little
-    /// overlap with <paramref name="storedTask"/> (token-set Jaccard similarity below 0.3). Used to
-    /// decide whether the user has pivoted to a new goal (record an evolution entry) or is still on
-    /// the same task (keep the stable task).
+    /// Cheap goal-pivot heuristic: true when <paramref name="newUserMessage"/> looks like a
+    /// substantial NEW instruction that diverges from <paramref name="storedTask"/>. Used to
+    /// decide whether the user has pivoted to a new goal (record an evolution entry) or is still
+    /// on the same task (keep the stable task).
+    ///
+    /// Two checks, both must pass for a pivot:
+    ///   1. The message is NOT commentary/observation about the current work (see
+    ///      <see cref="LooksLikeCommentary"/>). Commentary like "I see that X", "I don't
+    ///      believe that", "this is because..." is a reaction to the current goal, not a new goal.
+    ///   2. The message shares little token overlap with the stored task (Jaccard &lt; 0.3).
+    ///
+    /// This avoids the false-positive where a user discusses the current work (using different
+    /// words than the task description) and the low token overlap is mis-flagged as a pivot,
+    /// clobbering the stable task.
     /// </summary>
     internal static bool LooksLikePivot(string storedTask, string newUserMessage)
     {
@@ -4174,8 +4341,24 @@ public sealed class FluxMuxGatewayHost : IDisposable
         // "ok", "yes", "ok rebuilt", or "go ahead". Short messages share few tokens with the
         // stored task and would otherwise be mis-flagged as pivots, clobbering the stable task.
         // Require the new message to carry enough distinct content tokens to be a genuine pivot.
+        //
+        // The threshold is 5 (not 3): a 3-4 token message like "now fix the bug" or "try that
+        // approach" is often a continuation/confirmation of the SAME goal, not a pivot. A real
+        // pivot ("switch to a different architecture", "instead, focus on the API layer") is
+        // almost always longer. Raising the bar cuts the false-positive rate without missing
+        // genuine pivots, which are substantive by nature.
         var b = TokenSet(newUserMessage);
-        if (b.Count < 3)
+        if (b.Count < 5)
+        {
+            return false;
+        }
+
+        // Commentary/observation detection: if the message is reacting to or discussing the
+        // current work (rather than issuing a new instruction), it is NOT a pivot even if the
+        // token overlap is low. This is the key fix for the false-positive where a user says
+        // "I see that the goal changed, but I don't believe that's true — I was offering
+        // commentary relevant to the same goal" and the system mis-flags it as a new goal.
+        if (LooksLikeCommentary(newUserMessage))
         {
             return false;
         }
@@ -4196,7 +4379,190 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         var union = a.Count + b.Count - intersect;
-        return union > 0 && ((double)intersect / union) < 0.3;
+        if (union <= 0)
+        {
+            return false;
+        }
+
+        // Low token overlap is necessary but not sufficient for a pivot. We ALSO require the new
+        // message to carry an imperative/instructional signal — a verb that indicates the user is
+        // issuing a new directive ("switch", "instead", "now", "focus on", "investigate", "build",
+        // "change", "move to", "prioritize", etc.). A message with low overlap but no imperative
+        // signal is more likely a question, observation, or tangential remark than a genuine goal
+        // pivot. This second gate is what cuts the remaining false positives.
+        if (!HasImperativeSignal(newUserMessage))
+        {
+            return false;
+        }
+
+        return ((double)intersect / union) < 0.3;
+    }
+
+    /// <summary>
+    /// Detects whether a user message carries an IMPERATIVE/INSTRUCTIONAL signal — i.e., the user
+    /// is issuing a new directive rather than observing, questioning, or confirming. This is the
+    /// second gate in <see cref="LooksLikePivot"/>: low token overlap alone is not enough; the
+    /// message must also contain an action verb or directive marker to be a genuine pivot.
+    ///
+    /// Signals (any one is enough):
+    ///   - Directive verbs: "switch", "instead", "now", "focus", "investigate", "build", "change",
+    ///     "move", "prioritize", "refactor", "rewrite", "implement", "add", "remove", "update",
+    ///     "fix", "implement", "create", "make", "do", "run", "test", "deploy", "ship"
+    ///   - Directive markers: "let's", "please", "i want", "i need", "we should", "go ahead and",
+    ///     "change the", "new goal", "new task", "different approach", "different direction"
+    ///   - Imperative framing: starts with a verb (lowercase first word that is a known directive)
+    ///
+    /// This is intentionally conservative: if NO imperative signal is found, the message is NOT
+    /// treated as a pivot (even if token overlap is low). The cost of a false negative is low —
+    /// a real pivot will almost always contain a directive verb. The cost of a false positive is
+    /// high — it clobbers the stable task.
+    /// </summary>
+    internal static bool HasImperativeSignal(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return false;
+        }
+
+        var lower = message.ToLowerInvariant();
+
+        // Directive markers (multi-word phrases that strongly indicate a new goal).
+        string[] directiveMarkers =
+        {
+            "instead", "switch to", "switch the", "new goal", "new task", "new direction",
+            "different approach", "different direction", "focus on", "focus the", "prioritize",
+            "let's", "please", "i want", "i need", "we should", "go ahead and", "change the",
+            "change to", "move to", "move the", "refactor", "rewrite", "rebuild",
+        };
+        foreach (var marker in directiveMarkers)
+        {
+            if (lower.Contains(marker))
+            {
+                return true;
+            }
+        }
+
+        // Directive verbs (single words that indicate an action). We check these as whole words
+        // (bounded by non-letter characters) to avoid matching "build" inside "building" or
+        // "fix" inside "prefix".
+        string[] directiveVerbs =
+        {
+            "switch", "investigate", "build", "change", "move", "refactor", "rewrite",
+            "implement", "add", "remove", "update", "fix", "create", "make", "do", "run",
+            "test", "deploy", "ship", "prioritize", "focus", "stop", "pause", "resume",
+        };
+        foreach (var verb in directiveVerbs)
+        {
+            // Match the verb as a whole word: preceded and followed by a non-letter (or string
+            // boundary). This avoids substring false-positives.
+            var pattern = "(^|[^a-z])" + verb + "([^a-z]|$)";
+            if (System.Text.RegularExpressions.Regex.IsMatch(lower, pattern))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Detects whether a user message is COMMENTARY/OBSERVATION about the current work rather
+    /// than a NEW INSTRUCTION. Commentary is declarative ("I see...", "I don't believe...",
+    /// "this is because...") and reacts to the current goal; a pivot is imperative ("now do X",
+    /// "switch to Y", "investigate Z") and issues a new goal.
+    ///
+    /// Signals that indicate commentary (any one is enough):
+    ///   - First-person observation: "I see", "I notice", "I believe", "I don't", "I was", etc.
+    ///   - Meta-reference to the system/goal: "the goal", "the task", "this change", "same goal"
+    ///   - Question/observation markers: "why did", "can you explain", "is that", "is this"
+    ///   - Negation of a perceived change: "don't believe", "not true", "still on", "no change"
+    ///
+    /// This is intentionally conservative: if ANY of these signals is present, the message is
+    /// treated as commentary (not a pivot). The cost of a false negative (missing a real pivot)
+    /// is low — the user can always issue a clearer new instruction. The cost of a false
+    /// positive (flagging commentary as a pivot) is high — it clobbers the stable task and
+    /// pollutes the evolution history.
+    /// </summary>
+    internal static bool LooksLikeCommentary(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return false;
+        }
+
+        var text = message.ToLowerInvariant();
+
+        // First-person observation/reaction markers. These indicate the user is reacting to
+        // the current work, not issuing a new instruction.
+        var firstPersonObservation = new[]
+        {
+            "i see", "i notice", "i observe", "i believe", "i think",
+            "i don't", "i do not", "i was", "i am", "i've", "i have",
+            "i'm", "i feel", "i suspect", "i assume",
+        };
+
+        // Meta-reference to the current goal/task/system. These indicate the user is
+        // discussing the current work, not pivoting to a new one.
+        var metaReference = new[]
+        {
+            "the goal", "the task", "this change", "that is", "that's",
+            "this is", "the same goal", "the same task", "relevant to",
+            "pursuit of", "current goal", "current task", "this goal",
+            "that goal", "the change", "the pivot",
+        };
+
+        // Question/observation markers. These indicate the user is asking about or
+        // observing the current work, not issuing a new instruction.
+        var questionObservation = new[]
+        {
+            "why did", "can you explain", "is that", "is this",
+            "does that", "does this", "what does", "what is",
+            "how did", "why is",
+        };
+
+        // Negation of a perceived change. These explicitly indicate the user does NOT
+        // consider the current work to have changed.
+        var negationOfChange = new[]
+        {
+            "don't believe", "do not believe", "not true", "not a pivot",
+            "still on", "same goal", "same task", "no change",
+            "hasn't changed", "has not changed", "didn't change",
+            "did not change", "not changed",
+        };
+
+        foreach (var marker in firstPersonObservation)
+        {
+            if (text.Contains(marker, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        foreach (var marker in metaReference)
+        {
+            if (text.Contains(marker, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        foreach (var marker in questionObservation)
+        {
+            if (text.Contains(marker, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        foreach (var marker in negationOfChange)
+        {
+            if (text.Contains(marker, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Builds a lower-cased token set (words of length >= 4, to ignore short stopwords)
@@ -4581,6 +4947,23 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         // Trim to the bound.
+        return text.Length > maxChars ? text[..maxChars].TrimEnd() + "…" : text;
+    }
+
+    /// <summary>
+    /// Collapses whitespace and truncates a free-text value for a single-line diagnostic log entry.
+    /// Used to make the essence-preservation log lines human-readable in the live diagnostic
+    /// terminal: instead of "decision captured (214 chars)" the user sees the actual (bounded)
+    /// decision text. Newlines are collapsed so each log entry stays on one line.
+    /// </summary>
+    internal static string TruncateForLog(string? value, int maxChars = 160)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var text = System.Text.RegularExpressions.Regex.Replace(value.Trim(), @"\s+", " ");
         return text.Length > maxChars ? text[..maxChars].TrimEnd() + "…" : text;
     }
 

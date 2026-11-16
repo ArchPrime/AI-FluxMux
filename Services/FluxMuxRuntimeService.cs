@@ -959,8 +959,14 @@ public sealed class FluxMuxRuntimeService
 			// that are useful in the log file but clutter the UI. Forward only:
 			//   - [turn N] ...   (one line per turn: route, timing, forward-prune result)
 			//   - hail-mary ...  (only when armed and executed)
+			//   - essence: ... / vibe-state: ...  (the essence-preservation system: goal pivots,
+			//     captured decisions/dead ends, compaction-edge detection, and re-assertion). The
+			//     user has no other window into what is being preserved across compaction, so these
+			//     must surface live — otherwise the whole feature is invisible to the end user.
 			if (line.StartsWith("[turn ", StringComparison.Ordinal)
-				|| line.StartsWith("hail-mary", StringComparison.Ordinal))
+				|| line.StartsWith("hail-mary", StringComparison.Ordinal)
+				|| line.StartsWith("essence:", StringComparison.Ordinal)
+				|| line.StartsWith("vibe-state:", StringComparison.Ordinal))
 			{
 				GatewayLogLine?.Invoke(line);
 			}
@@ -4642,6 +4648,40 @@ public sealed class FluxMuxRuntimeService
 		{
 			if (IsTcpPortOpen("127.0.0.1", localBackendPort))
 			{
+				// The launch budget expired but the llama-server process is still alive and the
+				// model is not ready. This is the "stuck" state the user used to have to fix by
+				// manually hitting Launch a second time: the first launch's process is alive but
+				// the model never reached "ready" (often a cold load that outlasted the budget, or
+				// a process wedged mid-prefill). Replicate the manual second-launch automatically:
+				// kill this process, let VRAM settle, and retry the launch (up to MaxAttempts).
+				// The second attempt benefits from the model file now being in the page cache
+				// (warm) and a clean process/VRAM state, which is exactly why the manual retry
+				// succeeds.
+				//
+				// Only retry when we still have attempts left AND this is not a permanent failure.
+				// For interactive launches we surface the failure dialog only after exhausting
+				// the automatic retries; for non-interactive (auto-load / idle-wake / benchmark)
+				// we keep the old success+warming behavior so they don't block on a dialog.
+				if (startupAttempt < LocalLaunchStartupRetry.MaxAttempts && !LocalLaunchStartupRetry.LooksPermanent(_lastLocalStderrTail))
+				{
+					LogLaunchMonitor($"launch budget expired but llama-server (PID {process.Id}) is still alive and not ready; auto-retrying launch (attempt {startupAttempt}/{LocalLaunchStartupRetry.MaxAttempts}) — replicating a manual re-launch");
+					WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "transitioning", "llama-server did not become ready in time; AI-FluxMux is restarting it automatically.", GetGatewayPid());
+					progressReporter?.Invoke("AI-FluxMux is restarting llama-server (first attempt did not finish in time)");
+					try
+					{
+						process.Kill(entireProcessTree: true);
+						await process.WaitForExitAsync(launchToken);
+					}
+					catch
+					{
+						// Best-effort; the settle step below will wait for the port to close.
+					}
+					_lastLocalStderrTail = string.Empty;
+					await SettleAfterFailedLocalStartupAsync(localBackendPort, launchToken);
+					retryStartup = true;
+					continue;
+				}
+
 				WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "warming", "Local process running while endpoint warms up.");
 				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "warming", "llama-server is still warming up on the daemon port.", GetGatewayPid());
 				// For an interactive (user-initiated) launch, the launch window has now expired and
@@ -8377,6 +8417,8 @@ public sealed class FluxMuxRuntimeService
 			// server was holding the port (eating 15s+), or the page cache is cold, the 60s headroom
 			// isn't enough and the loop bails before the model is ready. The 120s headroom gives a
 			// cold YaRN load the time it needs without being stuck at a historical worst-case value.
+			//
+			// The readiness monitor (180s deadline) will keep polling if the model takes longer.
 			//
 			// The readiness monitor (180s deadline) will keep polling if the model takes longer.
 			int recordedMs = medianMs > 0 ? medianMs : (slowestMs > 0 ? slowestMs : fastestMs);

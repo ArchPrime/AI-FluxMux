@@ -19,6 +19,19 @@ public sealed record EssenceEvolutionEntry(
     DateTimeOffset AtUtc);
 
 /// <summary>
+/// A captured candidate intent-shift: a user message that the heuristic flagged as possibly
+/// changing, correcting, or steering the goal. Stored VERBATIM (the fidelity payload) plus the
+/// prior task as an anchor, so the reading model can later judge whether it was a pivot, a
+/// correction, or ordinary steering. The mechanical layer deliberately does NOT classify it —
+/// it records the raw material and a weak "candidate" tag, biasing toward recall. Bounded so
+/// the durable file cannot balloon; the reinjected views surface only a small recent subset.
+/// </summary>
+public sealed record EssenceIntentShift(
+    string Verbatim,
+    string PriorTask,
+    DateTimeOffset AtUtc);
+
+/// <summary>
 /// The durable essence log: the single source of truth for a session's *meaning* — the current
 /// task/state/next/files snapshot PLUS the history of how the goal evolved, the key decisions,
 /// and the dead ends. Written continuously while the model is live; re-asserted after a
@@ -31,6 +44,7 @@ public sealed class EssenceLog
     private const int MaxDecisions = 64;
     private const int MaxDeadEnds = 64;
     private const int MaxFiles = 128;
+    private const int MaxIntentShifts = 64;        // bound the intent-shift candidates (verbatim)
     private const int MaxEntryChars = 2_000;      // cap any single free-text field
 
     private readonly IContextIo _io;
@@ -107,6 +121,29 @@ public sealed class EssenceLog
         }
 
         e.Current = e.Current with { Task = Truncate(to) };
+        Save(e);
+    }
+
+    /// <summary>Records a candidate intent-shift (a user message that may have changed/corrected/
+    /// steered the goal) VERBATIM, with the prior task as an anchor. Bounded (oldest dropped
+    /// first). Never throws. The mechanical layer does NOT classify the shift — it stores the raw
+    /// material so the reading model can later judge whether it was a pivot, a correction, or
+    /// ordinary steering.</summary>
+    public void RecordIntentShift(string verbatim, string priorTask)
+    {
+        if (string.IsNullOrWhiteSpace(verbatim))
+        {
+            return;
+        }
+
+        var e = Load();
+        e.IntentShifts.Add(new EssenceIntentShift(
+            Truncate(verbatim), Truncate(priorTask), DateTimeOffset.UtcNow));
+        while (e.IntentShifts.Count > MaxIntentShifts)
+        {
+            e.IntentShifts.RemoveAt(0);
+        }
+
         Save(e);
     }
 
@@ -225,6 +262,11 @@ public sealed class Essence
 {
     public EssenceCurrent Current { get; set; } = EssenceCurrent.Empty;
     public List<EssenceEvolutionEntry> Evolution { get; set; } = new();
+
+    /// <summary>Candidate intent-shifts (verbatim user messages that may have changed/corrected/
+    /// steered the goal), most recent last. Bounded. The reading model judges each; the mechanical
+    /// layer only captures the raw material.</summary>
+    public List<EssenceIntentShift> IntentShifts { get; set; } = new();
     public List<string> Decisions { get; set; } = new();
     public List<string> DeadEnds { get; set; } = new();
     public List<string> Files { get; set; } = new();
@@ -235,6 +277,7 @@ public sealed class Essence
     public bool HasContent() =>
         !Current.IsEmpty
         || Evolution.Count > 0
+        || IntentShifts.Count > 0
         || Decisions.Count > 0
         || DeadEnds.Count > 0
         || Files.Count > 0;
@@ -255,6 +298,23 @@ public sealed class Essence
             {
                 sb.AppendLine("- " + Dash(ev.From) + " → " + Dash(ev.To)
                     + (string.IsNullOrWhiteSpace(ev.Why) ? string.Empty : " (" + ev.Why.Trim() + ")"));
+            }
+
+            sb.AppendLine();
+        }
+
+        // Candidate intent-shifts: verbatim user messages that may have changed/corrected/steered
+        // the goal. Bounded to the most recent 8 so this rich view does not balloon the compaction
+        // file. Each line carries the prior task (anchor) + the user's exact words, so the reading
+        // model can judge whether it was a pivot, a correction, or ordinary steering.
+        if (IntentShifts.Count > 0)
+        {
+            sb.AppendLine("## Intent-shift candidates (user messages that may have changed the goal — judge each)");
+            var recent = IntentShifts.Skip(Math.Max(0, IntentShifts.Count - 8)).ToList();
+            foreach (var s in recent)
+            {
+                sb.AppendLine("- " + Dash(s.Verbatim)
+                    + (string.IsNullOrWhiteSpace(s.PriorTask) ? string.Empty : " [prior task: " + s.PriorTask.Trim() + "]"));
             }
 
             sb.AppendLine();
@@ -318,7 +378,34 @@ public sealed class Essence
             sb.AppendLine("Last goal change: " + Dash(last.From) + " → " + Dash(last.To));
         }
 
+        // Candidate intent-shifts: only the most recent 1-2, hard-truncated. This is the
+        // speed-sensitive path (injected into the live system prompt at a compaction edge), so
+        // keep it minimal. The full bounded history is in ToClineSummary / the durable file.
+        if (IntentShifts.Count > 0)
+        {
+            var recent = IntentShifts.Skip(Math.Max(0, IntentShifts.Count - 2)).ToList();
+            foreach (var s in recent)
+            {
+                sb.AppendLine("Intent-shift candidate: " + Dash(TruncateForReinjection(s.Verbatim, 120))
+                    + (string.IsNullOrWhiteSpace(s.PriorTask) ? string.Empty : " [prior: " + TruncateForReinjection(s.PriorTask, 80) + "]"));
+            }
+        }
+
         return sb.ToString();
+    }
+
+    /// <summary>Collapses whitespace and hard-truncates a value for the terse reinjection block
+    /// (the speed-sensitive path). Keeps each intent-shift line to a single bounded line so the
+    /// system-prompt injection stays small.</summary>
+    private static string TruncateForReinjection(string value, int maxChars)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var text = System.Text.RegularExpressions.Regex.Replace(value.Trim(), @"\s+", " ");
+        return text.Length > maxChars ? text[..maxChars].TrimEnd() + "…" : text;
     }
 
     private static string Dash(string value) =>
