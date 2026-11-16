@@ -247,4 +247,151 @@ public sealed class EssencePreservationTests
             }
         }
     }
+
+    // ── DistillTask (concise reflection of user instructions) ───────────────────
+
+    [Fact]
+    public void DistillTask_StripsLeadingConversationalFiller()
+    {
+        var result = FluxMuxGatewayHost.DistillTask("ok, can you please also read examples of the essence used at last compaction");
+        Assert.Equal("read examples of the essence used at last compaction", result);
+    }
+
+    [Fact]
+    public void DistillTask_StripsTrailingConversationalFiller()
+    {
+        var result = FluxMuxGatewayHost.DistillTask("bump the version to 0.4.0 please");
+        Assert.Equal("bump the version to 0.4.0", result);
+    }
+
+    [Fact]
+    public void DistillTask_CollapsesWhitespaceAndNewlines()
+    {
+        var result = FluxMuxGatewayHost.DistillTask("  fix   the\n\n  bug  ");
+        Assert.Equal("fix the bug", result);
+    }
+
+    [Fact]
+    public void DistillTask_TruncatesToBound()
+    {
+        var longInput = "implement " + new string('x', 300);
+        var result = FluxMuxGatewayHost.DistillTask(longInput, maxChars: 50);
+        Assert.True(result.Length <= 51); // 50 chars + ellipsis
+        Assert.EndsWith("…", result);
+    }
+
+    [Fact]
+    public void DistillTask_PreservesSubstantiveContent()
+    {
+        var result = FluxMuxGatewayHost.DistillTask("check the llama.cpp FlashAttention quant patch for q4_0/q8_0 K/V types");
+        Assert.Contains("llama.cpp", result);
+        Assert.Contains("FlashAttention", result);
+        Assert.Contains("q4_0/q8_0", result);
+    }
+
+    [Fact]
+    public void DistillTask_EmptyInput_ReturnsEmpty()
+    {
+        Assert.Equal(string.Empty, FluxMuxGatewayHost.DistillTask(""));
+        Assert.Equal(string.Empty, FluxMuxGatewayHost.DistillTask("   "));
+    }
+
+    [Fact]
+    public void DistillTask_AllFiller_FallsBackToOriginal()
+    {
+        var result = FluxMuxGatewayHost.DistillTask("ok");
+        Assert.Equal("ok", result);
+    }
+
+    // ── LooksLikePivot (goal-pivot detection) ───────────────────────────────────
+
+    [Fact]
+    public void LooksLikePivot_ShortConfirmation_IsNotPivot()
+    {
+        Assert.False(FluxMuxGatewayHost.LooksLikePivot("implement the essence-preserving compaction system", "ok rebuilt"));
+    }
+
+    [Fact]
+    public void LooksLikePivot_SimilarMessage_IsNotPivot()
+    {
+        Assert.False(FluxMuxGatewayHost.LooksLikePivot(
+            "implement the essence-preserving compaction system for cline",
+            "continue implementing the essence-preserving compaction system"));
+    }
+
+    [Fact]
+    public void LooksLikePivot_DivergentMessage_IsPivot()
+    {
+        Assert.True(FluxMuxGatewayHost.LooksLikePivot(
+            "implement the essence-preserving compaction system for cline",
+            "investigate why the local model load is slow and check the vram usage"));
+    }
+
+    [Fact]
+    public void LooksLikePivot_EmptyStoredTask_IsNotPivot()
+    {
+        Assert.False(FluxMuxGatewayHost.LooksLikePivot("", "do something completely different here"));
+    }
+
+    // ── ExtractDecisions (decision capture) ─────────────────────────────────────
+
+    [Fact]
+    public void ExtractDecisions_CapturesExplicitDecision()
+    {
+        var text = "After analysis, I'll summarize.\nDecision: use symmetric q8_0/q8_0 KV cache for now to avoid the f16 fallback.\nMore text.";
+        var results = FluxMuxGatewayHost.ExtractDecisions(text);
+        Assert.Single(results);
+        Assert.Contains("q8_0/q8_0", results[0]);
+    }
+
+    [Fact]
+    public void ExtractDecisions_IgnoresMarkerListingLines()
+    {
+        var text = "- \"Decision:\", \"I decided\", \"We'll use\", \"Going with\", \"Chose to\", \"Opted for\", \"Decided to\"";
+        var results = FluxMuxGatewayHost.ExtractDecisions(text);
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void ExtractDecisions_IgnoresMarkerAlone()
+    {
+        var text = "Decision:";
+        var results = FluxMuxGatewayHost.ExtractDecisions(text);
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void ExtractDecisions_NoMarkers_ReturnsEmpty()
+    {
+        var text = "This is just a normal paragraph with no decision markers at all.";
+        var results = FluxMuxGatewayHost.ExtractDecisions(text);
+        Assert.Empty(results);
+    }
+
+    // ── ExtractDeadEnds (dead-end capture) ──────────────────────────────────────
+
+    [Fact]
+    public void ExtractDeadEnds_CapturesExplicitDeadEnd()
+    {
+        var text = "I tried approach A.\nDead end: approach A doesn't work because the kernel is missing.\nMoving on.";
+        var results = FluxMuxGatewayHost.ExtractDeadEnds(text);
+        Assert.Single(results);
+        Assert.Contains("kernel is missing", results[0]);
+    }
+
+    [Fact]
+    public void ExtractDeadEnds_IgnoresMarkerListingLines()
+    {
+        var text = "- \"dead end\", \"doesn't work\", \"failed\", \"abandoned\", \"gave up on\", \"not viable\", \"no good\"";
+        var results = FluxMuxGatewayHost.ExtractDeadEnds(text);
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void ExtractDeadEnds_NoMarkers_ReturnsEmpty()
+    {
+        var text = "This is just a normal paragraph with no dead-end markers at all.";
+        var results = FluxMuxGatewayHost.ExtractDeadEnds(text);
+        Assert.Empty(results);
+    }
 }

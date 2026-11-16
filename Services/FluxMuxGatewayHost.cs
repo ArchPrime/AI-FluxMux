@@ -4095,14 +4095,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
             }
             else if (string.IsNullOrWhiteSpace(existing.Task))
             {
-                // First turn: seed the stable task from the original ask (first user message).
+                // First turn: seed the stable task from the original ask (first user message),
+                // distilled to a concise label (the essence carries meaning, not a transcript).
                 var seed = !string.IsNullOrWhiteSpace(firstUser) ? firstUser : lastUser;
-                task = seed.Length > 160 ? seed[..160] + "…" : seed;
+                task = DistillTask(seed);
             }
             else
             {
-                // Pivot detected: the new intent becomes the task.
-                task = lastUser.Length > 160 ? lastUser[..160] + "…" : lastUser;
+                // Pivot detected: the new intent becomes the task (distilled to a concise label).
+                task = DistillTask(lastUser);
             }
 
             if (essence is not null && pivoted)
@@ -4167,7 +4168,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// decide whether the user has pivoted to a new goal (record an evolution entry) or is still on
     /// the same task (keep the stable task).
     /// </summary>
-    private static bool LooksLikePivot(string storedTask, string newUserMessage)
+    internal static bool LooksLikePivot(string storedTask, string newUserMessage)
     {
         // A real goal pivot is a substantial new instruction, not a short confirmation like
         // "ok", "yes", "ok rebuilt", or "go ahead". Short messages share few tokens with the
@@ -4249,7 +4250,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
         var digest = sb.ToString();
         if (string.IsNullOrWhiteSpace(digest))
         {
-            digest = assistantText.Length > 240 ? assistantText[^240..].TrimStart() : assistantText;
+            // No explicit markers: take a bounded tail of the text, but collapse whitespace and
+            // strip leading conversational filler so the digest is concise (not a raw transcript
+            // with newlines). The essence should carry the *meaning* of where we are, not the
+            // verbatim last message.
+            var tail = assistantText.Length > 240 ? assistantText[^240..] : assistantText;
+            digest = DistillTask(tail, maxChars: 400);
         }
 
         return digest.Length > 400 ? digest[^400..] : digest;
@@ -4283,7 +4289,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// "Chose to", "Opted for", "Decided to"). Returns a bounded list of unique decision strings.
     /// Conservative: only records when a marker is found; returns an empty list otherwise.
     /// </summary>
-    private static List<string> ExtractDecisions(string assistantText)
+    internal static List<string> ExtractDecisions(string assistantText)
     {
         var results = new List<string>();
         if (string.IsNullOrWhiteSpace(assistantText))
@@ -4400,7 +4406,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// bounded list of unique dead-end strings. Conservative: only records when a marker is found;
     /// returns an empty list otherwise.
     /// </summary>
-    private static List<string> ExtractDeadEnds(string assistantText)
+    internal static List<string> ExtractDeadEnds(string assistantText)
     {
         var results = new List<string>();
         if (string.IsNullOrWhiteSpace(assistantText))
@@ -4488,6 +4494,94 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Distills a raw user instruction into a concise task label. The essence log should carry the
+    /// *meaning* of the ask, not a verbatim transcript. This strips conversational filler ("ok",
+    /// "please", "can you", "also", "hey", leading politeness), collapses whitespace, and trims to a
+    /// tighter bound. It is a cheap heuristic (no model call) — good enough to turn "ok, can you
+    /// please also read examples of the essence that was used at last compaction" into "read
+    /// examples of the essence used at last compaction". Never throws; returns the trimmed input
+    /// when nothing can be distilled.
+    /// </summary>
+    internal static string DistillTask(string raw, int maxChars = 140)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return string.Empty;
+        }
+
+        var text = raw.Trim();
+
+        // Collapse all whitespace (newlines, multiple spaces) into single spaces.
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ");
+
+        // Strip leading conversational filler. These are common openers that carry no task meaning.
+        // Applied repeatedly so "ok, please also can you..." collapses fully.
+        var leadingFiller = new[]
+        {
+            "ok,", "ok", "okay", "okay,", "yes", "yes,", "yeah", "yep",
+            "please", "pls", "please,", "can you", "could you", "would you",
+            "can you please", "could you please", "please also", "also", "and",
+            "hey", "hi", "hello", "so", "well", "right", "alright", "alright,",
+        };
+
+        bool changed;
+        do
+        {
+            changed = false;
+            var lower = text.ToLowerInvariant();
+            foreach (var filler in leadingFiller)
+            {
+                if (lower.StartsWith(filler, StringComparison.Ordinal))
+                {
+                    // Only strip if followed by a boundary (space, comma, or end) so we don't
+                    // eat into a real word (e.g. "ok" should not strip from "okay" already handled,
+                    // but "also" must not strip from "also" embedded in "also" — the boundary check
+                    // ensures we strip whole filler tokens).
+                    var rest = text[filler.Length..];
+                    if (rest.Length == 0 || rest[0] is ' ' or ',' or '.' or '!' or '?')
+                    {
+                        text = rest.TrimStart(' ', ',', '.', '!', '?', ' ');
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        } while (changed);
+
+        // Strip trailing conversational filler ("thanks", "thx", "please", "let me know").
+        var trailingFiller = new[]
+        {
+            " thanks", " thanks.", " thx", " please", " please.", " let me know",
+            " let me know.", " sound good?", " sounds good?",
+        };
+
+        changed = true;
+        while (changed)
+        {
+            changed = false;
+            var lower = text.ToLowerInvariant();
+            foreach (var filler in trailingFiller)
+            {
+                if (lower.EndsWith(filler, StringComparison.Ordinal))
+                {
+                    text = text[..^filler.Length].TrimEnd(' ', ',', '.', '!', '?');
+                    changed = true;
+                    break;
+                }
+            }
+        }
+
+        // If stripping left nothing, fall back to the original trimmed text.
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            text = raw.Trim();
+        }
+
+        // Trim to the bound.
+        return text.Length > maxChars ? text[..maxChars].TrimEnd() + "…" : text;
     }
 
     private static string MessageText(JsonNode? msg)
