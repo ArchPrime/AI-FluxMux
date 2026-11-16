@@ -4169,9 +4169,18 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// </summary>
     private static bool LooksLikePivot(string storedTask, string newUserMessage)
     {
-        var a = TokenSet(storedTask);
+        // A real goal pivot is a substantial new instruction, not a short confirmation like
+        // "ok", "yes", "ok rebuilt", or "go ahead". Short messages share few tokens with the
+        // stored task and would otherwise be mis-flagged as pivots, clobbering the stable task.
+        // Require the new message to carry enough distinct content tokens to be a genuine pivot.
         var b = TokenSet(newUserMessage);
-        if (a.Count == 0 || b.Count == 0)
+        if (b.Count < 3)
+        {
+            return false;
+        }
+
+        var a = TokenSet(storedTask);
+        if (a.Count == 0)
         {
             return false;
         }
@@ -4282,44 +4291,65 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return results;
         }
 
-        // Decision markers: lines that explicitly state a decision.
+        // Decision markers: lines that explicitly state a decision. We match on the *start* of the
+        // line (after trimming leading markdown/bullets) so we capture "Decision: X" or "- I decided
+        // to use Y" but NOT a line that merely lists the markers in quotes (e.g. my own
+        // documentation of this feature). The marker must be followed by substantive content.
         var decisionMarkers = new[]
         {
-            "Decision:", "decision:",
-            "I decided", "i decided",
-            "We'll use", "we'll use", "We will use", "we will use",
-            "Going with", "going with",
-            "Chose to", "chose to", "Chose", "chose",
-            "Opted for", "opted for", "Opted to", "opted to",
-            "Decided to", "decided to", "Decided", "decided",
+            "decision:",
+            "i decided",
+            "we'll use", "we will use",
+            "going with",
+            "chose to", "chose",
+            "opted for", "opted to",
+            "decided to", "decided",
         };
 
-        foreach (var line in assistantText.Split('\n'))
+        foreach (var rawLine in assistantText.Split('\n'))
         {
-            var trimmed = line.Trim();
+            // Strip leading markdown bullets/numbering so "- Decision: X" matches "decision:".
+            var trimmed = rawLine.Trim().TrimStart('-', '*', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', ')', ' ');
             if (string.IsNullOrWhiteSpace(trimmed))
             {
                 continue;
             }
 
-            // Check if this line contains a decision marker.
-            var hasMarker = false;
+            var lower = trimmed.ToLowerInvariant();
+
+            // Find a decision marker at the start of the line.
+            string? matchedMarker = null;
             foreach (var marker in decisionMarkers)
             {
-                if (trimmed.StartsWith(marker, StringComparison.Ordinal)
-                    || trimmed.Contains(marker, StringComparison.Ordinal))
+                if (lower.StartsWith(marker, StringComparison.Ordinal))
                 {
-                    hasMarker = true;
+                    matchedMarker = marker;
                     break;
                 }
             }
 
-            if (!hasMarker)
+            if (matchedMarker is null)
             {
                 continue;
             }
 
-            // Extract the decision text (the line itself, bounded to 200 chars).
+            // The marker must be followed by substantive content (not just the marker alone, and
+            // not a line that's clearly listing markers in quotes). Require at least 15 chars of
+            // content after the marker.
+            var contentAfterMarker = trimmed[matchedMarker.Length..].Trim().TrimStart(':', ' ', '—', '-');
+            if (contentAfterMarker.Length < 15)
+            {
+                continue;
+            }
+
+            // Skip lines that look like they're listing the markers themselves (contain multiple
+            // quoted markers) — that's documentation, not a real decision.
+            if (CountQuotedOccurrences(trimmed) >= 3)
+            {
+                continue;
+            }
+
+            // Extract the decision text (the full line, bounded to 200 chars).
             var decision = trimmed.Length > 200 ? trimmed[..200] + "…" : trimmed;
 
             // Dedupe: only add if not already in the list.
@@ -4339,6 +4369,31 @@ public sealed class FluxMuxGatewayHost : IDisposable
     }
 
     /// <summary>
+    /// Counts how many distinct quoted phrases (text inside double quotes) appear in a line. Used
+    /// to detect lines that are *listing* markers (documentation) rather than stating a real
+    /// decision/dead-end. A line with 3+ quoted phrases is almost certainly a list, not a decision.
+    /// </summary>
+    private static int CountQuotedOccurrences(string line)
+    {
+        var count = 0;
+        var inQuotes = false;
+        foreach (var c in line)
+        {
+            if (c == '"')
+            {
+                if (!inQuotes)
+                {
+                    count++;
+                }
+
+                inQuotes = !inQuotes;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// Extracts dead-end markers from the last assistant message. Looks for lines that explicitly
     /// state a failed approach or dead end ("dead end", "doesn't work", "failed", "abandoned",
     /// "gave up on", "not viable", "no good", "rejected", "doesn't compile", "crashes"). Returns a
@@ -4353,47 +4408,70 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return results;
         }
 
-        // Dead-end markers: lines that explicitly state a failed approach.
+        // Dead-end markers: lines that explicitly state a failed approach. Match on the *start* of
+        // the line (after trimming leading markdown/bullets) so we capture "Dead end: X" or
+        // "- This approach doesn't work because Y" but NOT a line that merely lists the markers in
+        // quotes (e.g. my own documentation of this feature). The marker must be followed by
+        // substantive content.
         var deadEndMarkers = new[]
         {
-            "dead end", "Dead end", "DEAD END",
-            "doesn't work", "Doesn't work", "does not work", "Does not work",
-            "failed", "Failed", "FAILED",
-            "abandoned", "Abandoned", "ABANDONED",
-            "gave up on", "Gave up on", "GAVE UP ON",
-            "not viable", "Not viable", "NOT VIABLE",
-            "no good", "No good", "NO GOOD",
-            "rejected", "Rejected", "REJECTED",
-            "doesn't compile", "Doesn't compile", "does not compile", "Does not compile",
-            "crashes", "Crashes", "CRASHES",
-            "doesn't build", "Doesn't build", "does not build", "Does not build",
+            "dead end",
+            "doesn't work", "does not work",
+            "failed",
+            "abandoned",
+            "gave up on",
+            "not viable",
+            "no good",
+            "rejected",
+            "doesn't compile", "does not compile",
+            "crashes",
+            "doesn't build", "does not build",
         };
 
-        foreach (var line in assistantText.Split('\n'))
+        foreach (var rawLine in assistantText.Split('\n'))
         {
-            var trimmed = line.Trim();
+            // Strip leading markdown bullets/numbering so "- Dead end: X" matches "dead end".
+            var trimmed = rawLine.Trim().TrimStart('-', '*', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', ')', ' ');
             if (string.IsNullOrWhiteSpace(trimmed))
             {
                 continue;
             }
 
-            // Check if this line contains a dead-end marker.
-            var hasMarker = false;
+            var lower = trimmed.ToLowerInvariant();
+
+            // Find a dead-end marker at the start of the line.
+            string? matchedMarker = null;
             foreach (var marker in deadEndMarkers)
             {
-                if (trimmed.Contains(marker, StringComparison.Ordinal))
+                if (lower.StartsWith(marker, StringComparison.Ordinal))
                 {
-                    hasMarker = true;
+                    matchedMarker = marker;
                     break;
                 }
             }
 
-            if (!hasMarker)
+            if (matchedMarker is null)
             {
                 continue;
             }
 
-            // Extract the dead-end text (the line itself, bounded to 200 chars).
+            // The marker must be followed by substantive content (not just the marker alone, and
+            // not a line that's clearly listing markers in quotes). Require at least 15 chars of
+            // content after the marker.
+            var contentAfterMarker = trimmed[matchedMarker.Length..].Trim().TrimStart(':', ' ', '—', '-');
+            if (contentAfterMarker.Length < 15)
+            {
+                continue;
+            }
+
+            // Skip lines that look like they're listing the markers themselves (contain multiple
+            // quoted markers) — that's documentation, not a real dead end.
+            if (CountQuotedOccurrences(trimmed) >= 3)
+            {
+                continue;
+            }
+
+            // Extract the dead-end text (the full line, bounded to 200 chars).
             var deadEnd = trimmed.Length > 200 ? trimmed[..200] + "…" : trimmed;
 
             // Dedupe: only add if not already in the list.
