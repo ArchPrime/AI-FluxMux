@@ -963,9 +963,13 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         hotContext,
                         Str(state, "local_preferred_model"));
 
-                    // Essence preservation: detect a compaction/restart edge and re-assert the
-                    // durable essence so it survives the context reset. Never throws; no-op when
-                    // the reasserter is not wired up or there is no essence.
+                    // Essence preservation: first, update the durable essence log with the current
+                    // task/state/next (extracted from the full conversation history in this request).
+                    // This runs on every local turn so the essence log is always current. Then,
+                    // detect a compaction/restart edge and re-assert the durable essence so it
+                    // survives the context reset. Never throws; no-op when the reasserter is not
+                    // wired up or there is no essence.
+                    UpdateVibeStateAfterTurn(payload, model, Str(state, "local_variant"));
                     ObserveEssenceEdge(payload, state, measuredPromptTokens.Value, hotContext);
                 }
             }
