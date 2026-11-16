@@ -6001,7 +6001,36 @@ public sealed class FluxMuxRuntimeService
 		{
 			return false;
 		}
-		return details.Contains("HTTP 503", StringComparison.OrdinalIgnoreCase) || details.Contains("Loading model", StringComparison.OrdinalIgnoreCase) || details.Contains("still loading", StringComparison.OrdinalIgnoreCase) || details.Contains("not ready for completions", StringComparison.OrdinalIgnoreCase) || details.Contains("unavailable_error", StringComparison.OrdinalIgnoreCase) || details.Contains("\"code\":503", StringComparison.OrdinalIgnoreCase) || details.Contains("Connection refused", StringComparison.OrdinalIgnoreCase) || details.Contains("actively refused", StringComparison.OrdinalIgnoreCase) || details.Contains("timed out", StringComparison.OrdinalIgnoreCase) || details.Contains("timeout", StringComparison.OrdinalIgnoreCase) || details.Contains("request was canceled", StringComparison.OrdinalIgnoreCase);
+		// These patterns cover the common transient failure modes seen when the public
+		// endpoint is still warming up after the model has loaded on the daemon port.
+		// If any of these match, the readiness monitor should start and keep polling
+		// until the public endpoint is ready, instead of leaving the user to manually
+		// hit launch a second time.
+		return details.Contains("HTTP 503", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("Loading model", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("still loading", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("not ready for completions", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("unavailable_error", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("\"code\":503", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("Connection refused", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("actively refused", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("request was canceled", StringComparison.OrdinalIgnoreCase)
+			// .NET's TaskCanceledException (thrown when CancellationTokenSource.CancelAfter
+			// fires) has the message "The operation was canceled." — this is the most common
+			// failure mode when the public endpoint probe times out. The earlier check for
+			// "request was canceled" did NOT match this, causing the readiness monitor to
+			// not start and forcing the user to manually hit launch a second time.
+			|| details.Contains("The operation was canceled", StringComparison.OrdinalIgnoreCase)
+			// Generic HttpRequestException messages that indicate a transient network issue
+			// (e.g., the gateway's public endpoint is not yet listening).
+			|| details.Contains("An error occurred while sending the request", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("HttpRequestException", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("TaskCanceledException", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("connection reset", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("forcibly closed", StringComparison.OrdinalIgnoreCase)
+			|| details.Contains("Endpoint not responding", StringComparison.OrdinalIgnoreCase);
 	}
 
 	public static bool IsTransientLocalWarmupFailure(string? details)
