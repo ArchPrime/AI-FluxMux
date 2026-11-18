@@ -2,6 +2,35 @@
 
 **New chat? Read `BRIEFING.md` first** — it has the specific open items, key file map, and testing instructions.
 
+## ✅ DONE: Prefill bar oscillation + Hail Mary fixes + dead-code cleanup (11/17)
+
+**What:** Three fixes landed in one session:
+
+1. **Prefill bar oscillation** — The progress bar was resetting to 0% during Cline's agentic loop (rapid successive requests). Root cause: each new request started a new prefill cycle, and the old cycle's `PrefillFirstByteNotice` / generation-timer ticks were still firing, clobbering the new cycle's progress. Fix: cycle-ID debouncing in `MainViewModel.cs` — added `_prefillCycleActive`, `_prefillCycleId`, and `_activePrefillCycleId` fields. Stale `PrefillFirstByteNotice` and generation timer ticks are now ignored if a new prefill cycle has started.
+
+2. **Hail Mary headroom "always 40%" bug** — `HailMaryHeadroomToBoolConverter` defined its own `HailMaryHeadroom` enum in the `ViewModels` namespace, causing a type mismatch with the `MainViewModel` property (which used `Services.HailMary.HailMaryHeadroom`). The binding silently failed, leaving the property at the default `Balanced` (40%). Fix: removed the duplicate enum; converters now use `Services.HailMary.HailMaryHeadroom`. Also fixed the "unchecked radio clobbering" bug by caching `_lastSelected` in the converter instance so `ConvertBack(false)` returns the current selection instead of a hardcoded default. Same fix applied to `HailMaryStrategyToBoolConverter`.
+
+3. **Hail Mary "side quest" context loss** — `VibeStatePlusMessagesFidelitySource` was reading `VIBE_STATE.md` even when `essence.json` was available. The essence log has the full goal evolution, decisions, and dead ends; `VIBE_STATE.md` is a snapshot. Fix: updated the fidelity source to prefer `essence.json` over `VIBE_STATE.md` when available. Added `EssencePath` to `CompactionContext` and wired it in `MainViewModel`.
+
+4. **Dead-code cleanup** — Removed 4 warnings: CS0219 ×3 (`invokeSucceeded` in ClineSmolTrigger, `missingGgufBytes` in ModelProfilePack, `systemMemoryMb` in MainViewModel) and CS0169 ×1 (`_ramWatchdogTimer` in FluxMuxRuntimeService — vestigial; the timer lives in FluxMuxSupervisor).
+
+**Files changed:**
+- `ViewModels/MainViewModel.cs` — cycle-ID debouncing fields + logic; `EssencePath` wiring
+- `ViewModels/HailMaryHeadroomToBoolConverter.cs` — removed duplicate enum, added `_lastSelected` cache
+- `ViewModels/HailMaryStrategyToBoolConverter.cs` — added `_lastSelected` cache
+- `Services/HailMary/VibeStatePlusMessagesFidelitySource.cs` — prefer `essence.json` over `VIBE_STATE.md`
+- `Services/HailMary/ICompactionStrategy.cs` — added `EssencePath` to `CompactionContext`
+- `Services/HailMary/ExternalRescueStrategy.cs` — pass `EssencePath` through
+- `Services/ClineSmolTrigger.cs` — removed unused `invokeSucceeded`
+- `Services/ModelProfilePack.cs` — removed unused `missingGgufBytes`
+- `Services/FluxMuxRuntimeService.cs` — removed vestigial `_ramWatchdogTimer` + `RamWatchdogIntervalMs`
+- `FluxMux.Avalonia.Tests/HailMaryStrategyTests.cs` — +8 regression tests (5 converter, 3 essence preference)
+
+**Build:** 0 errors. **Tests:** 1910/1910 pass (full suite).
+**Deploy:** DEPLOYED 11/17 (user recompiled).
+
+**Next:** See "Open items" below.
+
 ## ✅ DONE: Paged-context Step 5 — Tests (11/9)
 
 **What:** Final step of the unified paged-context + `VIBE_STATE.md` strategy (see `PLAN_PAGED_CONTEXT.md`). Added 2 new `ForwardPruneTests` verifying the lossless paging behavior:

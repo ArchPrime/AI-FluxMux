@@ -385,6 +385,38 @@ public partial class MainViewModel : ViewModelBase
     private DispatcherTimer? _generationTimer;
     private DateTime _generationStartUtc;
 
+    // ── Prefill-notice debouncing (Cline agentic-loop guard) ──────────────────────
+    // Cline (and similar agentic clients) fire a NEW HTTP request for every step in their
+    // think→act→observe loop. Each request fires PrefillStartedNotice, which would reset the
+    // progress bar to 0 and restart the prefill timer. Within a single user chat turn, this
+    // makes the bar "flash backwards and forwards" — it climbs toward 100%, resets to 0, climbs
+    // again, resets to 0, etc. (once per agentic step).
+    //
+    // The fix: if a PrefillStartedNotice arrives while the previous prefill/generation cycle is
+    // still active (i.e. the first content token has NOT yet arrived, or the stream has not yet
+    // ended), treat it as the SAME chat turn and do NOT reset the bar to 0. Instead, just update
+    // the estimate and let the bar continue from where it is. This makes the bar monotonic within
+    // a burst of rapid prefill notices. A genuinely NEW chat turn is signaled by a gap: the
+    // previous cycle has completed (first byte arrived + stream ended), so the bar is already at
+    // 0 (idle) and a fresh prefill notice correctly starts it from 0.
+    //
+    // _prefillCycleActive: true from PrefillStartedNotice until the stream ends (ResetPrefill
+    // IndicatorToIdle). While active, new prefill notices do NOT reset the bar to 0.
+    private bool _prefillCycleActive;
+
+    // A monotonically increasing ID for each prefill cycle. PrefillStartedNotice increments it;
+    // PrefillFirstByteNotice captures the current value. If the captured value differs from the
+    // current value when the first-byte notice fires, it means a NEW prefill started (Cline's
+    // agentic loop advanced to the next step) and this first-byte notice is STALE — it belongs to
+    // the previous request. Stale first-byte notices must be ignored: they would reset the bar to
+    // 0 and switch to the generation phase for a request that is no longer the active one.
+    private int _prefillCycleId;
+
+    // The cycle ID of the prefill timer that is CURRENTLY running. Set when StartPrefillTimer is
+    // called. PrefillFirstByteNotice compares this to _prefillCycleId: if they differ, a new
+    // prefill has started and this first-byte notice is stale (belongs to the previous request).
+    private int _activePrefillCycleId;
+
     private const int ModelProfilesTabIndex = 2;
 
     private static readonly string[] RuntimeLocalProfileMetadataKeys =
@@ -489,10 +521,34 @@ public partial class MainViewModel : ViewModelBase
         {
             SafeUiInvoke(() =>
             {
+                // Cline agentic-loop guard: if a prefill/generation cycle is already active
+                // (the previous request's stream has not yet ended), this notice is from the
+                // NEXT step in Cline's think→act→observe loop, not a genuinely new chat turn.
+                // In that case, do NOT reset the bar to 0 — that would make it "flash backwards
+                // and forwards" (climb to ~100%, snap to 0, climb again, snap to 0, …) once per
+                // agentic step. Instead, keep the bar where it is and just update the estimate
+                // so the current prefill timer continues from the existing progress.
+                //
+                // A genuinely NEW chat turn is signaled by _prefillCycleActive being false: the
+                // previous cycle has completed (stream ended → ResetPrefillIndicatorToIdle set
+                // the bar to 0 and cleared the flag). In that case, reset the bar to 0 and start
+                // a fresh prefill timer as before.
+                bool newCycle = !_prefillCycleActive;
+                if (newCycle)
+                {
+                    PrefillProgress = 0.0;
+                    _prefillMaxProgress = 0.0;
+                    _prefillMinRemainingSeconds = int.MaxValue;
+                }
+                _prefillCycleActive = true;
+                // Bump the cycle ID so any in-flight PrefillFirstByteNotice from the PREVIOUS
+                // request (still draining its stream) can detect that it is stale and ignore
+                // itself. Without this, a stale first-byte notice would reset the bar to 0 and
+                // switch to the generation phase for a request that is no longer active.
+                _prefillCycleId++;
+
                 BottomBarPhase = 1; // Prefill
                 PrefillInProgress = true;
-                PrefillProgress = 0.0;
-                _prefillMaxProgress = 0.0;
 
                 // Detect RAM-spill prefill: the prompt exceeds the VRAM-resident context on a
                 // YaRN profile, so the overflow is running in ordinary RAM (much slower than VRAM).
@@ -611,6 +667,15 @@ public partial class MainViewModel : ViewModelBase
         {
             SafeUiInvoke(() =>
             {
+                // Stale-notice guard (Cline agentic-loop): if a NEW prefill has started since this
+                // one (i.e. _prefillCycleId has advanced past _activePrefillCycleId), this
+                // first-byte notice belongs to the PREVIOUS request, which is no longer the active
+                // one. Ignore it: it would reset the bar to 0 and switch to the generation phase
+                // for a request that has already been superseded. The performance-model sample
+                // below is still recorded (it's useful telemetry), but the UI state changes are
+                // skipped.
+                bool isStale = _activePrefillCycleId != _prefillCycleId;
+
                 // Record the real sample so the performance model refits and persists.
                 // RAM-spill samples go into the dedicated RAM-spill model (a different regime
                 // than VRAM-resident prefills). VRAM-resident samples go into the cold/warm
@@ -628,6 +693,13 @@ public partial class MainViewModel : ViewModelBase
                     // Live telemetry: record the actual prefill speed so the supervisor can
                     // calibrate the next estimate when the learned model has no data.
                     _runtimeService.Supervisor.RecordActualPrefillSpeed(_prefillPromptTokens, elapsedMs);
+                }
+
+                // If this first-byte notice is stale (a new prefill has started), do NOT change the
+                // UI state. The current prefill timer is driving the bar for the NEW request.
+                if (isStale)
+                {
+                    return;
                 }
 
                 // Complete the prefill bar, then reset it to 0 so the generation phase can
@@ -4809,8 +4881,23 @@ public partial class MainViewModel : ViewModelBase
     private void StartPrefillTimer()
     {
         _prefillTimer?.Stop();
-        _prefillMaxProgress = 0.0;
-        _prefillMinRemainingSeconds = int.MaxValue;
+        // Cross-stop: a new prefill means the previous turn's generation (if any) is over or
+        // being superseded. Stop the generation timer so it does NOT keep writing to
+        // PrefillProgress in parallel with this prefill timer. Two timers writing to the same
+        // property at different cadences (250ms prefill vs 500ms generation) makes the bar
+        // oscillate between the generation cap (~0.8) and the prefill asymptote (~1.0) — the
+        // "flashing backwards and forwards between completed and partially complete" symptom.
+        StopGenerationTimer();
+        // NOTE: _prefillMaxProgress and _prefillMinRemainingSeconds are NOT reset here. They are
+        // reset by the PrefillStartedNotice handler ONLY when this is a genuinely new cycle
+        // (the previous cycle completed). If a new PrefillStartedNotice arrived while the
+        // previous cycle was still active (Cline's think→act→observe loop), the handler keeps
+        // the running-max so the bar does NOT snap backwards to 0 — it continues from where it
+        // was, making the progress monotonic within a burst of rapid prefill notices.
+        // Record the cycle ID of the prefill timer we are about to start. PrefillFirstByteNotice
+        // compares this to _prefillCycleId to detect stale notices (first-byte from a previous
+        // request that is no longer the active one).
+        _activePrefillCycleId = _prefillCycleId;
         _prefillTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _prefillTimer.Tick += (_, _) =>
         {
@@ -4879,10 +4966,32 @@ public partial class MainViewModel : ViewModelBase
     private void StartGenerationTimer()
     {
         _generationTimer?.Stop();
+        // Cross-stop: generation has begun (first content token arrived), so the prefill timer
+        // must stop. Without this, a stale prefill timer (e.g. from a thinking model where the
+        // prefill timer kept running through the thinking phase) would keep writing to
+        // PrefillProgress in parallel with this generation timer, making the bar oscillate
+        // between the prefill asymptote (~1.0) and the generation cap (~0.8).
+        StopPrefillTimer();
         _generationStartUtc = DateTime.UtcNow;
+        // Capture the cycle ID so the tick handler can detect if a NEW prefill has started
+        // (Cline's agentic loop advanced to the next step). If the cycle ID has changed, this
+        // generation timer is stale and should stop itself rather than resetting the bar to 0
+        // for a request that is no longer the active one.
+        var generationCycleId = _prefillCycleId;
         _generationTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         _generationTimer.Tick += (_, _) =>
         {
+            // Stale-generation guard (Cline agentic-loop): if a NEW prefill has started since
+            // this generation timer began (i.e. _prefillCycleId has advanced past
+            // generationCycleId), this timer belongs to the PREVIOUS request, which is no longer
+            // the active one. Stop it and do NOT reset the bar — the current prefill timer is
+            // driving the bar for the NEW request.
+            if (generationCycleId != _prefillCycleId)
+            {
+                StopGenerationTimer();
+                return;
+            }
+
             var snapshot = _runtimeService.ReadGenerationSpeedSnapshot();
             // If the stream has ended (snapshot no longer active), stop the timer and reset.
             if (snapshot is not null && !snapshot.Active)
@@ -5011,6 +5120,11 @@ public partial class MainViewModel : ViewModelBase
         // because it's much faster than the generation speed and can be misleading.
         PrefillStatusText = "Ready";
         BottomBarPhase = 0; // Idle
+        // The prefill/generation cycle has fully completed (stream ended). Clear the flag so the
+        // NEXT PrefillStartedNotice (a genuinely new chat turn) resets the bar to 0 and starts a
+        // fresh prefill timer. While this flag is true, rapid prefill notices (Cline's agentic
+        // loop) do NOT reset the bar — they just update the estimate and let the bar continue.
+        _prefillCycleActive = false;
     }
 
     private bool _approvingChosenCloud;
@@ -5181,6 +5295,14 @@ public partial class MainViewModel : ViewModelBase
         var ctx = new global::FluxMux.Avalonia.Services.HailMary.CompactionContext
         {
             VibeStatePath = _runtimeService.VibeStatePath,
+            // The essence.json lives next to VIBE_STATE.md (same session-artifact directory). It
+            // carries the "wider mission" context (goal evolution, decisions, dead ends) that the
+            // VIBE_STATE current block and the (possibly compacted) .messages.json do not. The
+            // fidelity source prefers it when present so the compaction reflects the whole mission,
+            // not just the most recent side quest.
+            EssencePath = System.IO.Path.Combine(
+                System.IO.Path.GetDirectoryName(_runtimeService.VibeStatePath) ?? string.Empty,
+                "essence.json"),
             Log = line => _runtimeService.Supervisor?.LogLaunchMonitor(line),
             TargetFreeFraction = global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroomPolicy.TargetFreeFraction(HailMaryHeadroom),
             PromptTokens = promptTokens,
@@ -6125,7 +6247,6 @@ public partial class MainViewModel : ViewModelBase
             int igpuCount = 0;
             int protectedCount = 0;
             int systemCount = 0;
-            long systemMemoryMb = 0;
 
             foreach (var row in VramProcessRows)
             {

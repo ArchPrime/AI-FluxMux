@@ -384,9 +384,9 @@ public sealed class FluxMuxRuntimeService
 	// RAM-overflow watchdog: monitors the llama-server process's working set and auto-kills it
 	// if it exceeds a threshold for a sustained period. This is the "belt" in the belt-and-
 	// suspenders abort strategy (the "suspenders" is the Ctrl+Shift+K hotkey).
-	private Timer? _ramWatchdogTimer;
+	// The timer itself lives in FluxMuxSupervisor; this class only holds the sustain-tracking
+	// state and the threshold/sustain constants.
 	private DateTime _ramWatchdogExceededUtc = DateTime.MinValue;
-	private const int RamWatchdogIntervalMs = 5000;
 	private const double RamWatchdogThresholdPercent = 0.85;
 	private const int RamWatchdogSustainSeconds = 30;
 

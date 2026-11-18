@@ -13,6 +13,15 @@ public sealed class HailMaryStrategyToBoolConverter : IValueConverter
 {
     public static readonly HailMaryStrategyToBoolConverter Instance = new();
 
+    // The last strategy value that was actually selected (via ConvertBack(true)). Both radio
+    // buttons in the group are two-way bound to the SAME HailMarySelectedStrategy property, so
+    // when one is checked the other is unchecked and fires ConvertBack(false, ...). If the
+    // unchecked case returned a hardcoded default, the unchecked radio would clobber the
+    // property with that default no matter which option the user picked. By remembering the
+    // last selected value and returning it on unchecked, only the checked radio's
+    // ConvertBack(true) actually mutates the property; the unchecked one is a no-op.
+    private HailMaryStrategy _lastSelected = HailMaryStrategy.WaitForCline;
+
     public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture)
     {
         if (value is HailMaryStrategy strategy)
@@ -29,15 +38,18 @@ public sealed class HailMaryStrategyToBoolConverter : IValueConverter
         if (value is true)
         {
             var name = parameter?.ToString() ?? string.Empty;
-            return name switch
+            var selected = name switch
             {
                 "ExternalRescue" => HailMaryStrategy.ExternalRescue,
                 _ => HailMaryStrategy.WaitForCline,
             };
+            _lastSelected = selected;
+            return selected;
         }
 
-        // Unchecked: return the current value unchanged so the other radio buttons'
-        // ConvertBack (which fire with false) do not clobber the selected strategy.
-        return value is HailMaryStrategy existing ? existing : HailMaryStrategy.WaitForCline;
+        // Unchecked: this radio was just deselected because the other radio in the group was
+        // selected. Return the last-selected value unchanged so this unchecked event does NOT
+        // overwrite the property the user just set.
+        return _lastSelected;
     }
 }

@@ -134,7 +134,6 @@ public static class ModelProfilePack
         var sameSettingsDifferentName = 0;
         var missingGguf = 0;
         var missingGgufModels = new List<string>();
-        var missingGgufBytes = 0L;
         var missingProjector = 0;
         var skips = new List<ModelProfilePackSkip>();
 

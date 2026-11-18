@@ -38,26 +38,148 @@ public sealed class VibeStatePlusMessagesFidelitySource : IFidelitySource
             AppliedFreeFraction = ctx.TargetFreeFraction,
         };
 
+        // Load the durable essence log (essence.json) first. It carries the "wider mission"
+        // context — the full goal-evolution history, key decisions, and dead ends — that the
+        // VIBE_STATE current block (latest focus only) and the .messages.json (possibly
+        // compacted to the recent segment) do not. When the essence has content, it becomes the
+        // PRIMARY source for Goal/State/Next/Files/GoalEvolution/KeyDecisions/DeadEnds, so the
+        // compaction reflects the whole mission rather than just the most recent side quest.
+        var essence = LoadEssence(ctx.EssencePath);
+        bool essenceHasContent = essence is not null && essence.HasContent();
+
         var vibe = LoadVibeState(ctx.VibeStatePath);
-        snapshot.Goal = vibe.Task;
-        snapshot.State = vibe.State;
-        snapshot.Next = vibe.Next;
-        snapshot.Files = vibe.Files;
+        if (essenceHasContent)
+        {
+            // Essence is the richer, more up-to-date source. Use its Current snapshot for the
+            // goal/state/next/files, and its durable history for the evolution/decisions/dead-ends.
+            snapshot.Goal = essence!.Current.Task;
+            snapshot.State = essence.Current.State;
+            snapshot.Next = essence.Current.Next;
+            snapshot.Files = essence.Files.Count > 0 ? string.Join(", ", essence.Files) : essence.Current.Files;
+            snapshot.GoalEvolution = FormatEssenceEvolution(essence.Evolution);
+            snapshot.KeyDecisions = FormatEssenceDecisions(essence.Decisions);
+            snapshot.DeadEnds = FormatEssenceDeadEnds(essence.DeadEnds);
+        }
+        else
+        {
+            // No essence available — fall back to the VIBE_STATE current block.
+            snapshot.Goal = vibe.Task;
+            snapshot.State = vibe.State;
+            snapshot.Next = vibe.Next;
+            snapshot.Files = vibe.Files;
+        }
 
         var conv = LoadConversation(ctx.ClineMessagesPath);
         if (conv is not null)
         {
             snapshot.SourceMessageCount = conv.MessageCount;
             snapshot.SourceLastMessageKey = conv.LastMessageKey;
-            snapshot.GoalEvolution = ExtractGoalEvolution(conv.UserMessages);
-            snapshot.KeyDecisions = ExtractKeyDecisions(conv.AssistantTexts);
-            snapshot.DeadEnds = ExtractDeadEnds(conv.FailedToolNotes);
+            // Recent turns are ALWAYS pulled from the .messages.json (verbatim detail of the
+            // most recent exchange) — the essence does not carry verbatim turns.
             snapshot.RecentTurns = conv.RecentTurns;
+            // If the essence did not provide the evolution/decisions/dead-ends (no essence file),
+            // fall back to extracting them from the .messages.json as before.
+            if (!essenceHasContent)
+            {
+                snapshot.GoalEvolution = ExtractGoalEvolution(conv.UserMessages);
+                snapshot.KeyDecisions = ExtractKeyDecisions(conv.AssistantTexts);
+                snapshot.DeadEnds = ExtractDeadEnds(conv.FailedToolNotes);
+            }
         }
 
-        snapshot.SourceLabel = "VIBE_STATE" + (conv is not null ? " + Cline .messages.json (denoised)" : string.Empty);
+        snapshot.SourceLabel = (essenceHasContent ? "ESSENCE" : "VIBE_STATE")
+            + (conv is not null ? " + Cline .messages.json (denoised)" : string.Empty);
         ApplyHeadroomBudget(snapshot, ctx.TargetFreeFraction);
         return Task.FromResult(snapshot);
+    }
+
+    /// <summary>
+    /// Loads the durable essence log from <paramref name="path"/>. Returns null when the path is
+    /// blank or the file is missing/unreadable (never throws). The essence is the single source of
+    /// truth for a session's meaning — the current snapshot plus the history of how the goal
+    /// evolved, the key decisions, and the dead ends.
+    /// </summary>
+    private static global::FluxMux.Avalonia.Services.ContextEngine.Essence? LoadEssence(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            var text = File.ReadAllText(path);
+            return global::FluxMux.Avalonia.Services.ContextEngine.Essence.FromJson(text);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Formats the essence's goal-evolution history into the "## Goal evolution" body.</summary>
+    private static string FormatEssenceEvolution(
+        System.Collections.Generic.List<global::FluxMux.Avalonia.Services.ContextEngine.EssenceEvolutionEntry> evolution)
+    {
+        if (evolution.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        // Show the most recent pivots (the essence log is bounded to 64; the last 12 carry the
+        // most relevant "how the task changed" signal for a resume).
+        var recent = evolution.Skip(Math.Max(0, evolution.Count - 12)).ToList();
+        foreach (var ev in recent)
+        {
+            sb.AppendLine("- " + (string.IsNullOrWhiteSpace(ev.From) ? "—" : ev.From.Trim())
+                + " → " + (string.IsNullOrWhiteSpace(ev.To) ? "—" : ev.To.Trim())
+                + (string.IsNullOrWhiteSpace(ev.Why) ? string.Empty : " (" + ev.Why.Trim() + ")"));
+        }
+
+        return Truncate(sb.ToString().TrimEnd(), MaxGoalEvolutionChars);
+    }
+
+    /// <summary>Formats the essence's key decisions into the "## Key decisions" body.</summary>
+    private static string FormatEssenceDecisions(System.Collections.Generic.List<string> decisions)
+    {
+        if (decisions.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var d in decisions)
+        {
+            sb.AppendLine("• " + Truncate(d.Trim(), 500));
+            if (sb.Length > MaxKeyDecisionsChars)
+            {
+                break;
+            }
+        }
+
+        return Truncate(sb.ToString().TrimEnd(), MaxKeyDecisionsChars);
+    }
+
+    /// <summary>Formats the essence's dead ends into the "## Dead ends" body.</summary>
+    private static string FormatEssenceDeadEnds(System.Collections.Generic.List<string> deadEnds)
+    {
+        if (deadEnds.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var d in deadEnds)
+        {
+            sb.AppendLine("- " + Truncate(d.Trim(), 300));
+            if (sb.Length > MaxDeadEndsChars)
+            {
+                break;
+            }
+        }
+
+        return Truncate(sb.ToString().TrimEnd(), MaxDeadEndsChars);
     }
 
     private static void ApplyHeadroomBudget(FidelitySnapshot s, double targetFreeFraction)
@@ -152,7 +274,13 @@ public sealed class VibeStatePlusMessagesFidelitySource : IFidelitySource
         foreach (var text in assistantTexts)
         {
             var cleaned = CleanAssistantText(text);
-            if (cleaned.Length < 40)
+            // Filter only trivial noise (e.g. "ok", "done", "I'll try that"). The threshold is
+            // deliberately low (15 chars) because a concise but important finding — e.g.
+            // "the root cause was the config" (31 chars) — is a perfectly valid key decision and
+            // must not be dropped. The LooksLikeDecisionOrFinding check below is what ensures the
+            // content is actually meaningful (contains a decision/finding marker), so the length
+            // gate only needs to remove one-word acknowledgements, not short-but-substantive lines.
+            if (cleaned.Length < 15)
             {
                 continue;
             }

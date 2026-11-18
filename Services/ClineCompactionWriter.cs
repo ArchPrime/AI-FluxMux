@@ -422,12 +422,15 @@ public static class ClineCompactionWriter
             };
 
             // Append the recent-message tail (Cline's native format includes recent turns after
-            // the summary for continuity).
+            // the summary for continuity). We must CLONE each tail message before adding it to
+            // the messages array, because a JsonNode can only have one parent at a time. Adding
+            // a node that already belongs to the recentTail array would throw
+            // InvalidOperationException ("The node already has a parent").
             if (recentTail is not null)
             {
                 foreach (var msg in recentTail)
                 {
-                    messages.Add(msg);
+                    messages.Add(msg?.DeepClone());
                 }
             }
 
@@ -668,12 +671,15 @@ public static class ClineCompactionWriter
             };
             messages.Add(summaryMessage);
 
-            // Append the recent-message tail (for continuity).
+            // Append the recent-message tail (for continuity). We must CLONE each tail message
+            // before adding it to the messages array, because a JsonNode can only have one parent
+            // at a time. Adding a node that already belongs to the recentTail array would throw
+            // InvalidOperationException ("The node already has a parent").
             if (recentTail is not null)
             {
                 foreach (var msg in recentTail)
                 {
-                    messages.Add(msg);
+                    messages.Add(msg?.DeepClone());
                 }
             }
 

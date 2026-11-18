@@ -283,6 +283,54 @@ public sealed class EssencePreservationTests
         Assert.Contains("Goal", block);
     }
 
+    [Fact]
+    public void Reasserter_ClineCompaction_IncludesRecentTail()
+    {
+        // Regression test for the JsonNode parent-conflict bug in ReadRecentTail: when a real
+        // .messages.json exists, the recent-message tail must be included in the compaction file.
+        // Before the fix, tail.Add(messages[i]) threw InvalidOperationException ("The node already
+        // has a parent") because messages[i] already belonged to the parsed `messages` array, so
+        // the entire tail was silently dropped and the compaction file had only the summary.
+        var io = new FakeContextIo();
+        var log = new EssenceLog(io, "/tmp/essence.json");
+        log.UpdateCurrent("Goal", "State", "Next", "f.cs");
+
+        // Create a temp session with a real .messages.json containing 3 messages.
+        var sessionId = "test_reattacher_" + Guid.NewGuid().ToString("N");
+        var sessionDir = ClineCompactionWriter.GetSessionDir(sessionId);
+        var messagesPath = Path.Combine(sessionDir, sessionId + ".messages.json");
+        Directory.CreateDirectory(sessionDir);
+        var messagesJson = "{\"version\":1,\"sessionId\":\"" + sessionId + "\",\"messages\":[" +
+            "{\"id\":\"m1\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"first\"}]}," +
+            "{\"id\":\"m2\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}," +
+            "{\"id\":\"m3\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"third\"}]}" +
+            "]}";
+        File.WriteAllText(messagesPath, messagesJson);
+
+        var r = new EssenceReasserter(log);
+        try
+        {
+            var path = r.ReassertClineCompaction(sessionId, messagesPath);
+            Assert.NotNull(path);
+            var doc = JsonNode.Parse(File.ReadAllText(path!)) as JsonObject;
+            Assert.NotNull(doc);
+            var msgs = doc?["messages"] as JsonArray;
+            Assert.NotNull(msgs);
+            // The compaction file should have the summary message + the 3-message tail = 4 total.
+            // Before the fix, this would be 1 (summary only) because the tail was dropped.
+            Assert.Equal(4, msgs!.Count);
+            // The last message should be the most recent from the source (m3).
+            Assert.Equal("m3", msgs[3]?["id"]?.ToString());
+        }
+        finally
+        {
+            if (Directory.Exists(sessionDir))
+            {
+                Directory.Delete(sessionDir, recursive: true);
+            }
+        }
+    }
+
     // ── ClineCompactionWriter rich format ────────────────────────────────────────
 
     [Fact]

@@ -207,6 +207,145 @@ public sealed class HailMaryStrategyTests
         }
     }
 
+    // ── Essence-preference (wider-mission context) ────────────────────────────────
+    // When essence.json is present and has content, the fidelity source should prefer it over
+    // the VIBE_STATE current block + .messages.json extraction, because the essence carries the
+    // full goal-evolution / decisions / dead-ends ("wider mission") that the compacted
+    // .messages.json and the VIBE_STATE latest-focus block do not.
+
+    [Fact]
+    public async Task BuildAsync_PrefersEssence_WhenPresent()
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), "hailmary_test_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            // VIBE_STATE says "side quest" (the latest focus).
+            var vibePath = Path.Combine(tmp, "VIBE_STATE.md");
+            File.WriteAllText(vibePath,
+                "# VIBE STATE\n\n```json\n" +
+                "{\"task\":\"Side quest task\",\"state\":\"Side quest state\",\"next\":\"Side quest next\",\"files\":\"\",\"updatedUtc\":\"2026-01-01T00:00:00Z\"}\n" +
+                "```\n");
+
+            // Essence says "wider mission" with goal evolution + decisions + dead ends.
+            var essencePath = Path.Combine(tmp, "essence.json");
+            File.WriteAllText(essencePath,
+                "{" +
+                "\"Current\":{\"Task\":\"Wider mission task\",\"State\":\"Wider mission state\",\"Next\":\"Wider mission next\",\"Files\":\"\"}," +
+                "\"Evolution\":[{\"From\":\"original ask\",\"To\":\"pivoted to wider mission\",\"Why\":\"user pivoted\",\"AtUtc\":\"2026-01-02T00:00:00Z\"}]," +
+                "\"IntentShifts\":[]," +
+                "\"Decisions\":[\"chose approach X over Y\"]," +
+                "\"DeadEnds\":[\"approach Z failed\"]," +
+                "\"Files\":[\"MainViewModel.cs\"]," +
+                "\"Version\":1" +
+                "}");
+
+            var source = new VibeStatePlusMessagesFidelitySource();
+            var ctx = new CompactionContext
+            {
+                VibeStatePath = vibePath,
+                EssencePath = essencePath,
+                ClineMessagesPath = null,
+            };
+
+            var snapshot = await source.BuildAsync(ctx);
+
+            // The essence's Current snapshot wins over VIBE_STATE.
+            Assert.Equal("Wider mission task", snapshot.Goal);
+            Assert.Equal("Wider mission state", snapshot.State);
+            Assert.Equal("Wider mission next", snapshot.Next);
+            // The essence's durable history wins over .messages.json extraction.
+            Assert.Contains("pivoted to wider mission", snapshot.GoalEvolution, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("chose approach X over Y", snapshot.KeyDecisions, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("approach Z failed", snapshot.DeadEnds, StringComparison.OrdinalIgnoreCase);
+            // The essence's Files list wins.
+            Assert.Contains("MainViewModel.cs", snapshot.Files, StringComparison.OrdinalIgnoreCase);
+            // The source label reflects that the essence was used.
+            Assert.StartsWith("ESSENCE", snapshot.SourceLabel);
+        }
+        finally
+        {
+            Directory.Delete(tmp, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BuildAsync_FallsBackToVibeState_WhenEssenceMissing()
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), "hailmary_test_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            var vibePath = Path.Combine(tmp, "VIBE_STATE.md");
+            File.WriteAllText(vibePath,
+                "# VIBE STATE\n\n```json\n" +
+                "{\"task\":\"Vibe task\",\"state\":\"Vibe state\",\"next\":\"Vibe next\",\"files\":\"a.cs\",\"updatedUtc\":\"2026-01-01T00:00:00Z\"}\n" +
+                "```\n");
+
+            var source = new VibeStatePlusMessagesFidelitySource();
+            var ctx = new CompactionContext
+            {
+                VibeStatePath = vibePath,
+                EssencePath = Path.Combine(tmp, "does_not_exist.json"), // missing
+                ClineMessagesPath = null,
+            };
+
+            var snapshot = await source.BuildAsync(ctx);
+
+            // Falls back to the VIBE_STATE current block.
+            Assert.Equal("Vibe task", snapshot.Goal);
+            Assert.Equal("Vibe state", snapshot.State);
+            Assert.Equal("Vibe next", snapshot.Next);
+            Assert.Equal("a.cs", snapshot.Files);
+            Assert.StartsWith("VIBE_STATE", snapshot.SourceLabel);
+        }
+        finally
+        {
+            Directory.Delete(tmp, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task BuildAsync_EssenceStillPullsRecentTurnsFromMessages()
+    {
+        var tmp = Path.Combine(Path.GetTempPath(), "hailmary_test_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tmp);
+        try
+        {
+            var essencePath = Path.Combine(tmp, "essence.json");
+            File.WriteAllText(essencePath,
+                "{" +
+                "\"Current\":{\"Task\":\"Wider mission\",\"State\":\"state\",\"Next\":\"next\",\"Files\":\"\"}," +
+                "\"Evolution\":[],\"IntentShifts\":[],\"Decisions\":[],\"DeadEnds\":[],\"Files\":[],\"Version\":1" +
+                "}");
+
+            var messagesPath = Path.Combine(tmp, "session.messages.json");
+            File.WriteAllText(messagesPath,
+                "{\"version\":1,\"messages\":[" +
+                "{\"id\":\"m1\",\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"recent user turn\"}]}" +
+                "]}");
+
+            var source = new VibeStatePlusMessagesFidelitySource();
+            var ctx = new CompactionContext
+            {
+                VibeStatePath = string.Empty,
+                EssencePath = essencePath,
+                ClineMessagesPath = messagesPath,
+            };
+
+            var snapshot = await source.BuildAsync(ctx);
+
+            // Recent turns are ALWAYS pulled from the .messages.json, even when the essence is used.
+            Assert.Contains("[user] recent user turn", snapshot.RecentTurns);
+            Assert.Equal(1, snapshot.SourceMessageCount);
+            Assert.StartsWith("ESSENCE", snapshot.SourceLabel);
+        }
+        finally
+        {
+            Directory.Delete(tmp, recursive: true);
+        }
+    }
+
     // ── Headroom policy ────────────────────────────────────────────────────────────
 
     [Fact]
@@ -215,6 +354,65 @@ public sealed class HailMaryStrategyTests
         Assert.Equal(0.20, HailMaryHeadroomPolicy.TargetFreeFraction(HailMaryHeadroom.PreserveMore));
         Assert.Equal(0.40, HailMaryHeadroomPolicy.TargetFreeFraction(HailMaryHeadroom.Balanced));
         Assert.Equal(0.60, HailMaryHeadroomPolicy.TargetFreeFraction(HailMaryHeadroom.LeaveMoreRoom));
+    }
+
+    // ── Headroom radio-button converter (regression: unchecked radios must not clobber) ──
+    // All three headroom radio buttons are two-way bound to the SAME HailMaryHeadroom property.
+    // When the user checks one, the other two are unchecked and each fires ConvertBack(false).
+    // The unchecked case must return the last-selected value (a no-op), NOT a hardcoded default.
+    // Otherwise the last unchecked radio clobbers the property with the default (Balanced/40%),
+    // making "PreserveMore (20%)" and "LeaveMoreRoom (60%)" silently collapse to 40%.
+
+    [Fact]
+    public void HeadroomConverter_Checked_PreserveMore_ReturnsPreserveMore()
+    {
+        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
+        var result = converter.ConvertBack(true, typeof(HailMaryHeadroom), "PreserveMore", null);
+        Assert.Equal(HailMaryHeadroom.PreserveMore, result);
+    }
+
+    [Fact]
+    public void HeadroomConverter_Checked_LeaveMoreRoom_ReturnsLeaveMoreRoom()
+    {
+        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
+        var result = converter.ConvertBack(true, typeof(HailMaryHeadroom), "LeaveMoreRoom", null);
+        Assert.Equal(HailMaryHeadroom.LeaveMoreRoom, result);
+    }
+
+    [Fact]
+    public void HeadroomConverter_Unchecked_DoesNotClobberLastSelection()
+    {
+        // Simulate the user checking PreserveMore, then the other two radios firing
+        // ConvertBack(false) as they get unchecked. The unchecked events must NOT overwrite
+        // the PreserveMore selection with the default (Balanced).
+        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
+        converter.ConvertBack(true, typeof(HailMaryHeadroom), "PreserveMore", null); // user picks 20%
+        var afterUncheckBalanced = converter.ConvertBack(false, typeof(HailMaryHeadroom), "Balanced", null);
+        var afterUncheckLeaveMore = converter.ConvertBack(false, typeof(HailMaryHeadroom), "LeaveMoreRoom", null);
+        Assert.Equal(HailMaryHeadroom.PreserveMore, afterUncheckBalanced);
+        Assert.Equal(HailMaryHeadroom.PreserveMore, afterUncheckLeaveMore);
+    }
+
+    [Fact]
+    public void HeadroomConverter_SwitchingOptions_UpdatesSelection()
+    {
+        // The user can change their mind: checking a different option updates the selection.
+        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
+        converter.ConvertBack(true, typeof(HailMaryHeadroom), "PreserveMore", null);
+        var switched = converter.ConvertBack(true, typeof(HailMaryHeadroom), "LeaveMoreRoom", null);
+        Assert.Equal(HailMaryHeadroom.LeaveMoreRoom, switched);
+        // And the now-unchecked PreserveMore radio does not revert it.
+        var afterUncheck = converter.ConvertBack(false, typeof(HailMaryHeadroom), "PreserveMore", null);
+        Assert.Equal(HailMaryHeadroom.LeaveMoreRoom, afterUncheck);
+    }
+
+    [Fact]
+    public void HeadroomConverter_Convert_MatchesCurrentSelection()
+    {
+        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
+        Assert.True((bool)converter.Convert(HailMaryHeadroom.PreserveMore, typeof(bool), "PreserveMore", null)!);
+        Assert.False((bool)converter.Convert(HailMaryHeadroom.PreserveMore, typeof(bool), "Balanced", null)!);
+        Assert.True((bool)converter.Convert(HailMaryHeadroom.Balanced, typeof(bool), "Balanced", null)!);
     }
 
     // ── AlreadyHasHeadroom detection ───────────────────────────────────────────────

@@ -42,6 +42,7 @@ public sealed class ExternalRescueStrategy : ICompactionStrategy
         var prepareCtx = new CompactionContext
         {
             VibeStatePath = ctx.VibeStatePath,
+            EssencePath = ctx.EssencePath,
             ClineSessionId = sessionId,
             ClineMessagesPath = messagesPath,
             Log = ctx.Log,

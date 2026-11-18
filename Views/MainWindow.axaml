@@ -32,38 +32,40 @@
             <TextBlock Text="{Binding Converter={x:Static vm:CloudProviderDisplayConverter.Instance}}" />
         </DataTemplate>
         <DataTemplate x:Key="LiveUtilizationGaugeTemplate" x:DataType="vm:LiveUtilizationGaugeViewModel">
-            <StackPanel Spacing="2" ToolTip.Tip="{Binding Tooltip}">
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                    <TextBlock Text="{Binding Title}"
-                               FontSize="11"
-                               FontWeight="SemiBold"
-                               Foreground="#E4E7EC"
+            <Border Background="Transparent" ToolTip.Tip="{Binding Tooltip}">
+                <StackPanel Spacing="2">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                        <TextBlock Text="{Binding Title}"
+                                   FontSize="11"
+                                   FontWeight="SemiBold"
+                                   Foreground="#E4E7EC"
+                                   TextWrapping="NoWrap"
+                                   TextTrimming="CharacterEllipsis" />
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding Badge}"
+                                   FontSize="10"
+                                   Opacity="0.72"
+                                   Foreground="#D0D5DD"
+                                   TextWrapping="NoWrap" />
+                    </Grid>
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                        <ctrl:SegmentedUtilizationGauge Percent="{Binding Percent}"
+                                                        VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="1"
+                                   Text="{Binding PercentText}"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Foreground="#F9FAFB"
+                                   VerticalAlignment="Center" />
+                    </Grid>
+                    <TextBlock Text="{Binding DetailText}"
+                               FontSize="10"
+                               Opacity="0.78"
+                               Foreground="#D0D5DD"
                                TextWrapping="NoWrap"
                                TextTrimming="CharacterEllipsis" />
-                    <TextBlock Grid.Column="1"
-                               Text="{Binding Badge}"
-                               FontSize="10"
-                               Opacity="0.72"
-                               Foreground="#D0D5DD"
-                               TextWrapping="NoWrap" />
-                </Grid>
-                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
-                    <ctrl:SegmentedUtilizationGauge Percent="{Binding Percent}"
-                                                    VerticalAlignment="Center" />
-                    <TextBlock Grid.Column="1"
-                               Text="{Binding PercentText}"
-                               FontSize="12"
-                               FontWeight="SemiBold"
-                               Foreground="#F9FAFB"
-                               VerticalAlignment="Center" />
-                </Grid>
-                <TextBlock Text="{Binding DetailText}"
-                           FontSize="10"
-                           Opacity="0.78"
-                           Foreground="#D0D5DD"
-                           TextWrapping="NoWrap"
-                           TextTrimming="CharacterEllipsis" />
-            </StackPanel>
+                </StackPanel>
+            </Border>
         </DataTemplate>
         <DataTemplate x:Key="ValidatedProfileOptionTemplate" x:DataType="vm:ValidatedQuickSelectProfileOption">
             <StackPanel Orientation="Horizontal" Spacing="6">

@@ -872,7 +872,6 @@ namespace FluxMux.Avalonia.Services
 
                     // PRIMARY: try the UIA Invoke pattern first. It works even if the window
                     // isn't in the foreground, and doesn't depend on screen coordinates.
-                    bool invokeSucceeded = false;
                     try
                     {
                         object invokePatternId = invokePatternType.GetField("Pattern")!.GetValue(null)!;
@@ -882,7 +881,6 @@ namespace FluxMux.Avalonia.Services
                         {
                             object invokePattern = patternArgs[1]!;
                             invokePattern.GetType().GetMethod("Invoke")!.Invoke(invokePattern, null);
-                            invokeSucceeded = true;
                             return "clicked Cline's send button (codicon-send) via UI Automation Invoke pattern";
                         }
                     }

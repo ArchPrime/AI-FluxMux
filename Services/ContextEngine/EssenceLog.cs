@@ -272,7 +272,14 @@ public sealed class Essence
     public List<string> Files { get; set; } = new();
     public int Version { get; set; } = 1;
 
-    public static Essence Empty { get; } = new();
+    /// <summary>
+    /// Returns a fresh, empty <see cref="Essence"/> instance. This is a factory method (not a
+    /// shared singleton) so that callers can safely mutate the returned instance without affecting
+    /// other callers. A shared singleton would cause cross-test and cross-session contamination:
+    /// any mutation to <c>Essence.Empty.Current</c> or <c>Essence.Empty.IntentShifts</c> would
+    /// leak into every other code path that reads <c>Essence.Empty</c>.
+    /// </summary>
+    public static Essence Empty => new();
 
     public bool HasContent() =>
         !Current.IsEmpty

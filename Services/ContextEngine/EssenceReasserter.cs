@@ -102,7 +102,11 @@ public sealed class EssenceReasserter
             var start = Math.Max(0, count - maxMessages);
             for (var i = start; i < count; i++)
             {
-                tail.Add(messages[i]);
+                // CLONE each message before adding it to the tail array. A JsonNode can only have
+                // one parent at a time; messages[i] already belongs to the `messages` array, so
+                // adding it directly would throw InvalidOperationException ("The node already has
+                // a parent") and silently drop the entire tail. Cloning detaches it safely.
+                tail.Add(messages[i]?.DeepClone());
             }
 
             return (tail, count, lastKey);

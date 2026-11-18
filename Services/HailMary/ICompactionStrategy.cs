@@ -28,6 +28,16 @@ public sealed class CompactionContext
     /// <summary>Path to the session VIBE_STATE.md (the maintained task/state/next/files digest).</summary>
     public string VibeStatePath { get; init; } = string.Empty;
 
+    /// <summary>
+    /// Path to the session essence.json (the durable essence log: current snapshot + goal
+    /// evolution + intent-shifts + decisions + dead ends). When present and non-empty, the
+    /// fidelity source prefers it over the VIBE_STATE-only summary because it carries the
+    /// "wider mission" context (how the goal evolved, key decisions, dead ends) that the
+    /// .messages.json (which may have been compacted) and the VIBE_STATE current block (which
+    /// only holds the latest focus) do not. Empty when the essence log is not available.
+    /// </summary>
+    public string EssencePath { get; init; } = string.Empty;
+
     /// <summary>The Cline session id (e.g. "1792478967620_pcp87"). Resolved at run time.</summary>
     public string? ClineSessionId { get; init; }
 
