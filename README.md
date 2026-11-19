@@ -1,5 +1,7 @@
 # AI-FluxMux 0.4.0
 
+[![HOL Guard](https://img.shields.io/endpoint?url=https%3A%2F%2Fhol.org%2Fapi%2Fregistry%2Fbadges%2Fplugin%3Fslug%3Darchprime%252Fai-fluxmux%26metric%3Drelease)](https://hol.org/registry/plugins/archprime%2Fai-fluxmux?utm_source=hol_marketplace&utm_medium=plugins_badge&utm_campaign=plugins&utm_content=archprime%2Fai-fluxmux&ref=plugin-author-4be71856)
+
 Desktop router for local and cloud models. Designed for any OpenAI-compatible Client app (Cline, DeepSeek Harness, and similar). Extensive control, turn by turn, or per stored model profile, or via port rules, over model behavior. Model tuning wizard, model switch testing, YaRN context extension and more.
 
 **Requirements:** Windows 10/11 (x64). No .NET install needed — the app is self-contained.
