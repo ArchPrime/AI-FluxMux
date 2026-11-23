@@ -2721,6 +2721,35 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial string LocalVariantSpecType { get; set; } = "ngram-simple";
 
+    // The settings below are llama-server launch flags the launch code always honoured but the
+    // editor could not set, so they were reachable only by editing fluxmux_config.json. They were
+    // picked from 31 such flags for benefit to a local-model user; the rest stay JSON-only on
+    // purpose (see AGENTS.md "Profile editor: which launch flags are exposed"). A label value
+    // ("Auto", "Unlimited", ServerDefaultOption) is saved as-is and the launch code reads it as
+    // "not set", so llama-server keeps its own default.
+
+    /// <summary>MTP draft length (--spec-draft-n-max). Auto = llama-server/launch default (2).</summary>
+    [ObservableProperty]
+    public partial string LocalVariantSpecDraftNMax { get; set; } = "Auto";
+
+    /// <summary>Thinking-token cap (--reasoning-budget). 0 = no thinking; Unlimited = flag off.</summary>
+    [ObservableProperty]
+    public partial string LocalVariantReasoningBudget { get; set; } = "Unlimited";
+
+    [ObservableProperty]
+    public partial string LocalVariantTopK { get; set; } = ServerDefaultOption;
+
+    [ObservableProperty]
+    public partial string LocalVariantTopP { get; set; } = ServerDefaultOption;
+
+    [ObservableProperty]
+    public partial string LocalVariantMinP { get; set; } = ServerDefaultOption;
+
+    [ObservableProperty]
+    public partial string LocalVariantPresencePenalty { get; set; } = ServerDefaultOption;
+
+    internal const string ServerDefaultOption = "Server default";
+
     [ObservableProperty]
     public partial string LocalVariantCacheReuse { get; set; } = "256";
 
@@ -7206,6 +7235,26 @@ public partial class MainViewModel : ViewModelBase
 
     private static Task FlushUiAsync() => Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background).GetTask();
 
+    private async Task<LocalGenerationTimingResult> TimeLocalGenerationSpeedWithProgressAsync(
+        string progressPrefix,
+        CancellationToken cancellationToken)
+    {
+        var startedUtc = DateTime.UtcNow;
+        var timingTask = _runtimeService.TimeLocalGenerationSpeedAsync(
+            (int)OrchestratorPort,
+            FirstNonEmpty(SelectedLocalProfile, SelectedSelection1LocalProfile),
+            cancellationToken);
+        while (!timingTask.IsCompleted)
+        {
+            var elapsedSeconds = Math.Max(0, (int)(DateTime.UtcNow - startedUtc).TotalSeconds);
+            ReportTuneProgress(progressPrefix + " Waiting for the generation speed test (" + elapsedSeconds + "s).");
+            await FlushUiAsync();
+            await Task.WhenAny(timingTask, Task.Delay(10000, cancellationToken));
+        }
+
+        return await timingTask;
+    }
+
     private async Task<LocalGenerationTimingResult> TimeShortLocalReplyWithProgressAsync(
         string progressPrefix,
         CancellationToken cancellationToken,
@@ -8082,6 +8131,24 @@ public partial class MainViewModel : ViewModelBase
 
     public ObservableCollection<string> LocalSpecTypeOptions { get; } =
     ["Disabled", "draft-mtp", "ngram-simple"];
+
+    public ObservableCollection<string> LocalSpecDraftNMaxOptions { get; } =
+    ["Auto", "1", "2", "3", "4", "5", "6"];
+
+    public ObservableCollection<string> LocalReasoningBudgetOptions { get; } =
+    ["Unlimited", "0", "1024", "2048", "4096", "8192", "16384"];
+
+    public ObservableCollection<string> LocalTopKOptions { get; } =
+    [ServerDefaultOption, "20", "40", "64", "100"];
+
+    public ObservableCollection<string> LocalTopPOptions { get; } =
+    [ServerDefaultOption, "0.8", "0.9", "0.95"];
+
+    public ObservableCollection<string> LocalMinPOptions { get; } =
+    [ServerDefaultOption, "0", "0.01", "0.05", "0.1"];
+
+    public ObservableCollection<string> LocalPresencePenaltyOptions { get; } =
+    [ServerDefaultOption, "0.5", "1.0", "1.5", "2.0"];
 
     public ObservableCollection<string> LocalCacheReuseOptions { get; } =
     ["0", "64", "128", "256", "512"];
@@ -14920,7 +14987,26 @@ public partial class MainViewModel : ViewModelBase
     partial void OnLocalVariantUbatchSizeChanged(string value)
         => AcceptLocalComboChange("LocalUbatchSize", value, restored => LocalVariantUbatchSize = restored);
     partial void OnLocalVariantSpecTypeChanged(string value)
-        => AcceptLocalComboChange("LocalSpecType", value, restored => LocalVariantSpecType = restored);
+    {
+        AcceptLocalComboChange("LocalSpecType", value, restored => LocalVariantSpecType = restored);
+        OnPropertyChanged(nameof(IsLocalSpecDraftLengthApplicable));
+    }
+
+    /// <summary>Draft length only means something for draft-mtp; the control greys out otherwise.</summary>
+    public bool IsLocalSpecDraftLengthApplicable =>
+        string.Equals(LocalVariantSpecType, "draft-mtp", StringComparison.OrdinalIgnoreCase);
+    partial void OnLocalVariantSpecDraftNMaxChanged(string value)
+        => AcceptLocalComboChange("LocalSpecDraftNMax", value, restored => LocalVariantSpecDraftNMax = restored);
+    partial void OnLocalVariantReasoningBudgetChanged(string value)
+        => AcceptLocalComboChange("LocalReasoningBudget", value, restored => LocalVariantReasoningBudget = restored);
+    partial void OnLocalVariantTopKChanged(string value)
+        => AcceptLocalComboChange("LocalTopK", value, restored => LocalVariantTopK = restored);
+    partial void OnLocalVariantTopPChanged(string value)
+        => AcceptLocalComboChange("LocalTopP", value, restored => LocalVariantTopP = restored);
+    partial void OnLocalVariantMinPChanged(string value)
+        => AcceptLocalComboChange("LocalMinP", value, restored => LocalVariantMinP = restored);
+    partial void OnLocalVariantPresencePenaltyChanged(string value)
+        => AcceptLocalComboChange("LocalPresencePenalty", value, restored => LocalVariantPresencePenalty = restored);
     partial void OnLocalVariantCacheReuseChanged(string value)
         => AcceptLocalComboChange("LocalCacheReuse", value, restored => LocalVariantCacheReuse = restored);
     partial void OnLocalVariantCacheStrategyChanged(string value)
@@ -14943,7 +15029,7 @@ public partial class MainViewModel : ViewModelBase
             // tuned for YaRN (e.g. q6_k) would keep the smaller cache after YaRN is off.
             var advice = CurrentLocalHardwareAdvice();
             var resolved = ResolveLocalPriorityOrder(LocalPriorityOrder);
-            var specType = InferSpecTypeFromProfile();
+            var specType = ResolvePresetSpecType();
             if (string.IsNullOrWhiteSpace(specType) || specType.Equals("Auto", StringComparison.OrdinalIgnoreCase))
             {
                 specType = advice.SpecType;
@@ -15214,6 +15300,12 @@ public partial class MainViewModel : ViewModelBase
         Restore("LocalBatchSize", LocalVariantBatchSize, value => LocalVariantBatchSize = value);
         Restore("LocalUbatchSize", LocalVariantUbatchSize, value => LocalVariantUbatchSize = value);
         Restore("LocalSpecType", LocalVariantSpecType, value => LocalVariantSpecType = value);
+        Restore("LocalSpecDraftNMax", LocalVariantSpecDraftNMax, value => LocalVariantSpecDraftNMax = value);
+        Restore("LocalReasoningBudget", LocalVariantReasoningBudget, value => LocalVariantReasoningBudget = value);
+        Restore("LocalTopK", LocalVariantTopK, value => LocalVariantTopK = value);
+        Restore("LocalTopP", LocalVariantTopP, value => LocalVariantTopP = value);
+        Restore("LocalMinP", LocalVariantMinP, value => LocalVariantMinP = value);
+        Restore("LocalPresencePenalty", LocalVariantPresencePenalty, value => LocalVariantPresencePenalty = value);
         Restore("LocalCacheReuse", LocalVariantCacheReuse, value => LocalVariantCacheReuse = value);
         Restore("LocalCacheStrategy", LocalVariantCacheStrategy, value => LocalVariantCacheStrategy = value);
         Restore("LocalCacheRam", LocalVariantCacheRam, value => LocalVariantCacheRam = value);
@@ -15847,7 +15939,11 @@ public partial class MainViewModel : ViewModelBase
         UpdateLocalLaunchTelemetrySummary();
         UpdateProfileFootprintIndicators();
         RefreshLocalVariantTreeItemSummariesInPlace();
-        RefreshProfileEndpointStatusSurfaces();
+        // Every warning surface, not only the profile tree: the Quick Select options carry their
+        // own ⚠ flag, fixed when the list is built. A failure rebuilds them (via
+        // NoteLocalProfileConnectionFailure), so without this a successful launch cleared the
+        // warning on disk but Quick Select kept showing ⚠ on a running, validated profile.
+        RefreshProfileWarningSurfaces();
     }
 
     private static bool LocalProfileEditorDiffersFromSaved(JsonObject? saved, JsonObject pending)
@@ -21439,27 +21535,38 @@ public partial class MainViewModel : ViewModelBase
         return "What to try: " + string.Join(" ", steps);
     }
 
-    private static string BuildLocalTuneResultSummary(long winnerMs, long? settingsPassMs, bool extraTrialsRan)
+    internal const string UsualAutoTuneTrialLabel = "the settings already in the form";
+
+    /// <summary>Minimum gain over the usual settings for a trial to win (noise was about ±1%).</summary>
+    internal const double MeaningfulSpeedGainFraction = 0.03;
+
+    internal static bool IsMeaningfulSpeedGain(double baselineTps, double candidateTps)
+        => baselineTps > 0 && candidateTps >= baselineTps * (1 + MeaningfulSpeedGainFraction);
+
+    internal static string BuildLocalTuneResultSummary(double winnerTps, string? winnerLabel, double? settingsPassTps, bool extraTrialsRan)
     {
-        var testNow = " Those launch settings were stored so the speed test could reload the model. Max tokens, temperature, reasoning, and chat format you already set were left alone.";
+        var testNow = " **Save profile** keeps these settings; **Revert changes** puts back the ones you had before AutoTune (Launch again to run them). Max tokens, temperature, reasoning, and chat format you already set were left alone.";
+        var winnerRate = winnerTps.ToString("0.#", CultureInfo.InvariantCulture) + " tok/s";
         if (!extraTrialsRan)
         {
-            return "No extra speed trials ran beyond the usual AutoTune settings. Those settings have been applied." + testNow;
+            return "No extra speed trials ran beyond the settings already in the form (" + winnerRate + "). Those settings have been applied." + testNow;
         }
 
-        if (settingsPassMs is null)
+        if (settingsPassTps is not double baseTps)
         {
-            return "The extra speed trials could not be compared with the usual AutoTune settings, because that mix did not complete a timed reply. The fastest successful mix has been applied." + testNow;
+            return "The extra speed trials could not be compared with the settings already in the form, because that mix did not complete a timed reply. The fastest successful mix (" + winnerRate + ") has been applied." + testNow;
         }
 
-        if (winnerMs >= settingsPassMs.Value)
+        var baseRate = baseTps.ToString("0.#", CultureInfo.InvariantCulture) + " tok/s";
+        if (string.Equals(winnerLabel, UsualAutoTuneTrialLabel, StringComparison.OrdinalIgnoreCase)
+            || !IsMeaningfulSpeedGain(baseTps, winnerTps))
         {
-            return "The extra speed trials did not improve response time compared with the usual AutoTune settings. Those settings have been applied." + testNow;
+            return "The extra speed trials did not generate clearly faster than the settings already in the form (" + baseRate + "). Those settings have been applied." + testNow;
         }
 
-        var gain = settingsPassMs.Value - winnerMs;
-        return "About " + FormatFriendlyDurationMs(gain) +
-               " faster than the usual AutoTune settings. That mix has been applied." + testNow;
+        var gainPercent = (int)Math.Round((winnerTps / baseTps - 1) * 100);
+        return "Generates about " + gainPercent + "% faster (" + baseRate + " → " + winnerRate + ") with " + winnerLabel +
+               ". That mix has been applied." + testNow;
     }
 
     private void LoadCloudVariantSettingsEditor()
@@ -21783,6 +21890,12 @@ public partial class MainViewModel : ViewModelBase
         settings["LocalBatchSize"] = LocalVariantBatchSize;
         settings["LocalUbatchSize"] = LocalVariantUbatchSize;
         settings["LocalSpecType"] = FluxMuxRuntimeService.NormalizeLlamaSpecType(LocalVariantSpecType);
+        settings["LocalSpecDraftNMax"] = LocalVariantSpecDraftNMax;
+        settings["LocalReasoningBudget"] = LocalVariantReasoningBudget;
+        settings["LocalTopK"] = LocalVariantTopK;
+        settings["LocalTopP"] = LocalVariantTopP;
+        settings["LocalMinP"] = LocalVariantMinP;
+        settings["LocalPresencePenalty"] = LocalVariantPresencePenalty;
         settings["LocalCacheReuse"] = LocalVariantCacheReuse;
         settings["LocalCacheStrategy"] = LocalVariantCacheStrategy;
         settings["LocalCacheRam"] = LocalVariantCacheRam;
@@ -22410,6 +22523,12 @@ public partial class MainViewModel : ViewModelBase
             FluxMuxRuntimeService.NormalizeLlamaSpecType(settings["LocalSpecType"]?.ToString()),
             LocalSpecTypeOptions,
             specFallback);
+        LocalVariantSpecDraftNMax = CoerceLocalOption(settings["LocalSpecDraftNMax"]?.ToString(), LocalSpecDraftNMaxOptions, "Auto");
+        LocalVariantReasoningBudget = CoerceReasoningBudget(settings["LocalReasoningBudget"]?.ToString());
+        LocalVariantTopK = CoerceServerDefaultOption(settings["LocalTopK"]?.ToString(), LocalTopKOptions);
+        LocalVariantTopP = CoerceServerDefaultOption(settings["LocalTopP"]?.ToString(), LocalTopPOptions);
+        LocalVariantMinP = CoerceServerDefaultOption(settings["LocalMinP"]?.ToString(), LocalMinPOptions);
+        LocalVariantPresencePenalty = CoerceServerDefaultOption(settings["LocalPresencePenalty"]?.ToString(), LocalPresencePenaltyOptions);
         LocalVariantCacheReuse = CoerceLocalOption(settings["LocalCacheReuse"]?.ToString(), LocalCacheReuseOptions, "256");
         LocalVariantCacheStrategy = CoerceLocalOption(settings["LocalCacheStrategy"]?.ToString(), LocalCacheStrategyOptions, "Auto");
         LocalVariantCacheRam = CoerceLocalOption(NormalizeCacheRamOption(settings["LocalCacheRam"]?.ToString() ?? string.Empty), LocalCacheRamOptions, advice.CacheRam);
@@ -22475,6 +22594,8 @@ public partial class MainViewModel : ViewModelBase
 
         _localAutoTuneRunning = true;
         var savedSnapshot = CloneSavedLocalVariantSettings();
+        // The form as it was before AutoTune, so the result can name each control it changed.
+        var formBeforeAutoTune = CaptureLocalDetailedSettings();
         var keepResults = false;
         try
         {
@@ -22511,8 +22632,36 @@ public partial class MainViewModel : ViewModelBase
             {
                 if (LocalExperimentalHardwareTuneEnabled)
                 {
-                    PersistLocalAutoTuneFormSettings();
+                    // The speed test had to write each trial (and the winner) to the profile so
+                    // llama-server could reload with it. Put the pre-AutoTune profile back so the
+                    // result behaves like any other edit: it stays in the form, unsaved; Save
+                    // profile keeps it and Revert changes really does bring back the old
+                    // settings. Previously the winner was saved automatically, so Revert could
+                    // not undo AutoTune. The form is deliberately NOT reloaded here.
+                    if (savedSnapshot is not null)
+                    {
+                        // Put back the operator's settings, but not stale status: each trial
+                        // reload re-validates (or warns about) this profile, and that outcome
+                        // is current. Restoring the old stamp could revive an old ⚠ or erase
+                        // a fresh validation.
+                        CarryCurrentValidationState(
+                            GetLiveLocalProfileSettings(SelectedLocalVariant, SelectedLocalProfile),
+                            savedSnapshot);
+                        RestoreSavedLocalVariantSettings(savedSnapshot);
+                    }
+                    else
+                    {
+                        // A variant with no saved copy yet has nothing to go back to.
+                        PersistLocalAutoTuneFormSettings();
+                    }
                 }
+
+                var changeList = BuildLabelledChangeList(formBeforeAutoTune, CaptureLocalDetailedSettings());
+                var changeText = string.IsNullOrEmpty(changeList)
+                    ? "No detailed setting changed."
+                    : "Changed in the detailed settings (not saved yet): " + changeList + ".";
+                LocalQuickAutoTuneInfoText = (LocalQuickAutoTuneInfoText ?? string.Empty).TrimEnd() + Environment.NewLine + Environment.NewLine + changeText;
+                ReportTuneProgress(changeText);
             }
             else
             {
@@ -22578,8 +22727,14 @@ public partial class MainViewModel : ViewModelBase
 
         var trials = BuildLocalMeasuredAutoTuneTrials();
         Dictionary<string, string>? winner = null;
-        var winnerMs = long.MaxValue;
-        long? settingsPassMs = null;
+        string? winnerLabel = null;
+        var winnerTps = 0d;
+        double? settingsPassTps = null;
+        Dictionary<string, string>? settingsPass = null;
+        // The trial whose settings llama-server was last loaded with. Each trial has to be
+        // written to the profile so the reload can read it, so without a final step the running
+        // model would be the LAST trial, not the winner.
+        Dictionary<string, string>? lastLoaded = null;
         var notes = new List<string>();
         ReportTuneProgress(
             "Speed test starting on " + (SelectedLocalVariantItem?.DisplayName ?? SelectedLocalVariant) +
@@ -22614,6 +22769,8 @@ public partial class MainViewModel : ViewModelBase
                     break;
                 }
 
+                lastLoaded = trial.Settings;
+
                 ReportTuneProgress("Trial " + trialNumber + ": reloading the local model.");
                 LocalQuickAutoTuneInfoText = "Trial " + trialNumber + " of " + trials.Count + ": reloading the model. Progress is in the diagnostics window.";
                 await FlushUiAsync();
@@ -22624,29 +22781,35 @@ public partial class MainViewModel : ViewModelBase
                     continue;
                 }
 
-                ReportTuneProgress("Trial " + trialNumber + ": sending a short test prompt.");
-                LocalQuickAutoTuneInfoText = "Trial " + trialNumber + " of " + trials.Count + ": waiting for a short test reply.";
+                // Score by generation speed (tokens/s on a ~256-token reply), not by how long a
+                // 16-token "ready" reply takes: that short reply is mostly start-up time and could
+                // not see speculative decoding or draft length at all (see
+                // FluxMuxRuntimeService.TimeLocalGenerationSpeedAsync).
+                ReportTuneProgress("Trial " + trialNumber + ": timing a " + FluxMuxRuntimeService.GenerationSpeedProbeTokens + "-token reply.");
+                LocalQuickAutoTuneInfoText = "Trial " + trialNumber + " of " + trials.Count + ": measuring generation speed.";
                 await FlushUiAsync();
-                var timing = await TimeShortLocalReplyWithProgressAsync(
+                var timing = await TimeLocalGenerationSpeedWithProgressAsync(
                     "Trial " + trialNumber + ":",
                     cancellationToken);
-                if (!timing.IsSuccess)
+                if (!timing.IsSuccess || timing.TokensPerSecond is not double tps)
                 {
-                    notes.Add(trial.Label + ": the short reply did not complete.");
+                    notes.Add(trial.Label + ": the speed test reply did not complete.");
                     ReportTuneProgress("Trial " + trialNumber + " failed: " + timing.Details);
                     continue;
                 }
 
-                notes.Add(trial.Label + " took about " + FormatFriendlyDurationMs(timing.LatencyMs));
-                ReportTuneProgress("Trial " + trialNumber + " finished in about " + FormatFriendlyDurationMs(timing.LatencyMs) + ".");
-                if (trial.Label.Equals("usual AutoTune settings", StringComparison.OrdinalIgnoreCase))
+                notes.Add(trial.Label + ": " + tps.ToString("0.#", CultureInfo.InvariantCulture) + " tok/s");
+                ReportTuneProgress("Trial " + trialNumber + ": " + timing.Details);
+                if (trial.Label.Equals(UsualAutoTuneTrialLabel, StringComparison.OrdinalIgnoreCase))
                 {
-                    settingsPassMs = timing.LatencyMs;
+                    settingsPassTps = tps;
+                    settingsPass = new Dictionary<string, string>(trial.Settings, StringComparer.OrdinalIgnoreCase);
                 }
 
-                if (timing.LatencyMs < winnerMs)
+                if (tps > winnerTps)
                 {
-                    winnerMs = timing.LatencyMs;
+                    winnerTps = tps;
+                    winnerLabel = trial.Label;
                     winner = new Dictionary<string, string>(trial.Settings, StringComparer.OrdinalIgnoreCase);
                 }
             }
@@ -22657,6 +22820,18 @@ public partial class MainViewModel : ViewModelBase
             LocalQuickAutoTuneInfoText = "The speed test stopped because it took too long. Settings so far have been applied. " + remediation;
             ReportTuneProgress("Speed test stopped because it took too long. " + remediation);
             return;
+        }
+
+        // A trial must beat the usual settings by a clear margin to replace them; otherwise
+        // run-to-run noise (about ±1% here) would pick a "winner" at random.
+        if (winner is not null
+            && settingsPass is not null
+            && settingsPassTps is double baseTps
+            && !IsMeaningfulSpeedGain(baseTps, winnerTps))
+        {
+            winner = settingsPass;
+            winnerLabel = UsualAutoTuneTrialLabel;
+            winnerTps = baseTps;
         }
 
         if (winner is not null)
@@ -22672,7 +22847,29 @@ public partial class MainViewModel : ViewModelBase
                 RefreshProfileEndpointStatusSurfaces();
             }
 
-            var summary = BuildLocalTuneResultSummary(winnerMs, settingsPassMs, extraTrialsRan: trials.Count > 1);
+            // Run the winner, not whichever trial happened to be last. The reload reads the
+            // profile, so the winner is written there for the reload; ApplyLocalPriorityWizard
+            // then puts the pre-AutoTune profile back, leaving the winner in the form, unsaved.
+            var runningWinner = lastLoaded is not null && SameTuneSettings(winner, lastLoaded);
+            if (!runningWinner && TryPersistCurrentLocalVariantSettings())
+            {
+                ReportTuneProgress("Reloading the local model with the fastest mix (" + winnerLabel + ").");
+                LocalQuickAutoTuneInfoText = "Reloading the model with the fastest mix. Progress is in the diagnostics window.";
+                await FlushUiAsync();
+                try
+                {
+                    runningWinner = await RestartLocalForMeasuredAutoTuneAsync(cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    runningWinner = false;
+                }
+            }
+
+            var summary = BuildLocalTuneResultSummary(winnerTps, winnerLabel, settingsPassTps, extraTrialsRan: trials.Count > 1)
+                + (runningWinner
+                    ? " The model is running that mix now."
+                    : " The model could not be reloaded with that mix; click Launch after saving to run it.");
             LocalQuickAutoTuneInfoText = summary;
             ReportTuneProgress(summary);
         }
@@ -22693,7 +22890,7 @@ public partial class MainViewModel : ViewModelBase
         var trials = new List<LocalMeasuredTuneTrial>
         {
             new(
-                "usual AutoTune settings",
+                UsualAutoTuneTrialLabel,
                 new Dictionary<string, string>(baseline, StringComparer.OrdinalIgnoreCase),
                 "No extra change: times the usual AutoTune mix already in the form.")
         };
@@ -22701,7 +22898,6 @@ public partial class MainViewModel : ViewModelBase
         var order = ResolveLocalPriorityOrder(LocalPriorityOrder);
         var speedRank = IndexOfPriority(order, "Speed");
         var contextRank = IndexOfPriority(order, "Context length");
-        var thinkingRank = IndexOfPriority(order, "Fidelity");
 
         if (speedRank <= 1
             && contextRank > 0)
@@ -22716,7 +22912,7 @@ public partial class MainViewModel : ViewModelBase
                 };
 
                 trials.Add(new(
-                    "larger Batch size",
+                    "Batch size " + largerBatch,
                     extra,
                     "Testing Batch size " + extra["LocalBatchSize"] +
                     " (prompt processed in larger chunks), was " + (baseline.GetValueOrDefault("LocalBatchSize") ?? "unset") +
@@ -22724,35 +22920,101 @@ public partial class MainViewModel : ViewModelBase
             }
         }
 
-        if (thinkingRank > 0
-            && !string.Equals(baseline.GetValueOrDefault("LocalSpecType"), "Disabled", StringComparison.OrdinalIgnoreCase))
+        // Speculative decoding is lossless (the model checks every guessed token), so these
+        // trials are not gated on the Fidelity priority. A profile set to Disabled is the
+        // operator's choice and is never switched on or off here.
+        var specChoice = baseline.GetValueOrDefault("LocalSpecType");
+        if (!string.Equals(specChoice, "Disabled", StringComparison.OrdinalIgnoreCase))
         {
-            var currentSpec = FluxMuxRuntimeService.NormalizeLlamaSpecType(
-                baseline.GetValueOrDefault("LocalSpecType") ?? InferSpecTypeFromProfile());
+            var currentSpec = FluxMuxRuntimeService.NormalizeLlamaSpecType(specChoice ?? InferSpecTypeFromProfile());
             if (string.IsNullOrWhiteSpace(currentSpec)
                 || currentSpec.Equals("Disabled", StringComparison.OrdinalIgnoreCase))
             {
                 currentSpec = InferSpecTypeFromProfile();
             }
 
-            var alternateSpec = currentSpec.StartsWith("ngram", StringComparison.OrdinalIgnoreCase)
-                ? "draft-mtp"
-                : "ngram-simple";
-            if (!alternateSpec.Equals(currentSpec, StringComparison.OrdinalIgnoreCase))
+            if (currentSpec.Equals("draft-mtp", StringComparison.OrdinalIgnoreCase))
             {
+                // MTP already on: the useful question is how far to guess ahead. Swapping to
+                // ngram-simple (the old trial) is never faster on an MTP model.
+                var currentDraft = baseline.GetValueOrDefault("LocalSpecDraftNMax");
+                foreach (var draft in DraftLengthTrialValues(currentDraft))
+                {
+                    var extra = new Dictionary<string, string>(baseline, StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["LocalSpecDraftNMax"] = draft
+                    };
+                    trials.Add(new(
+                        "Draft length " + draft,
+                        extra,
+                        "Testing MTP draft length " + draft + " (tokens guessed ahead per step), was " +
+                        (int.TryParse(currentDraft, out var cd) && cd > 0 ? cd.ToString(CultureInfo.InvariantCulture) : "Auto (2)") + "."));
+                }
+            }
+            else if (InferSpecTypeFromProfile().Equals("draft-mtp", StringComparison.OrdinalIgnoreCase))
+            {
+                // An MTP-capable model on ngram: try MTP. A model without MTP heads is never
+                // offered draft-mtp, since llama-server cannot load that combination.
                 var extra = new Dictionary<string, string>(baseline, StringComparer.OrdinalIgnoreCase)
                 {
-                    ["LocalSpecType"] = alternateSpec
+                    ["LocalSpecType"] = "draft-mtp"
                 };
                 trials.Add(new(
-                    "other Speculative method",
+                    "Speculative draft-mtp",
                     extra,
-                    "Testing Speculative " + alternateSpec + " instead of " + currentSpec +
-                    " (the guess-ahead / draft method)."));
+                    "Testing Speculative draft-mtp instead of " + currentSpec + " (the guess-ahead / draft method)."));
             }
         }
 
-        return trials.Take(3).ToList();
+        // Each trial reloads the model (~15 s here), so keep the run short: the usual settings,
+        // the batch trial, and up to two draft lengths.
+        return trials.Take(4).ToList();
+    }
+
+    /// <summary>
+    /// Copies the validation stamp and warning from <paramref name="live"/> onto
+    /// <paramref name="target"/> (removing them from the target when the live profile has none),
+    /// so restoring an older copy of a profile's settings never restores its old status.
+    /// </summary>
+    internal static void CarryCurrentValidationState(JsonObject? live, JsonObject target)
+    {
+        if (live is null)
+        {
+            return;
+        }
+
+        foreach (var key in new[] { ProfileEndpointValidationStamp.ValidatedUtcKey, ProfileEndpointValidationStamp.WarningKey })
+        {
+            if (live[key] is { } value)
+            {
+                target[key] = value.DeepClone();
+            }
+            else
+            {
+                target.Remove(key);
+            }
+        }
+    }
+
+    internal static bool SameTuneSettings(IReadOnlyDictionary<string, string> a, IReadOnlyDictionary<string, string> b)
+        => a.Count == b.Count
+           && a.All(pair => b.TryGetValue(pair.Key, out var other)
+                            && string.Equals(pair.Value ?? string.Empty, other ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Draft lengths for AutoTune to try against the current one: 2, 3 and 4, minus the current
+    /// value (Auto counts as 2, the launch default). 3 measured best on the 27B NVFP4 MTP model;
+    /// 4 is included because acceptance differs between models and between kinds of text.
+    /// </summary>
+    internal static IReadOnlyList<string> DraftLengthTrialValues(string? currentDraft)
+    {
+        var current = int.TryParse(currentDraft, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed > 0
+            ? parsed
+            : 2;
+        return new[] { 2, 3, 4 }
+            .Where(value => value != current)
+            .Select(value => value.ToString(CultureInfo.InvariantCulture))
+            .ToList();
     }
 
     private Dictionary<string, string> CaptureLocalDetailedSettings()
@@ -22780,6 +23042,12 @@ public partial class MainViewModel : ViewModelBase
             ["LocalBatchSize"] = LocalVariantBatchSize,
             ["LocalUbatchSize"] = LocalVariantUbatchSize,
             ["LocalSpecType"] = LocalVariantSpecType,
+            ["LocalSpecDraftNMax"] = LocalVariantSpecDraftNMax,
+            ["LocalReasoningBudget"] = LocalVariantReasoningBudget,
+            ["LocalTopK"] = LocalVariantTopK,
+            ["LocalTopP"] = LocalVariantTopP,
+            ["LocalMinP"] = LocalVariantMinP,
+            ["LocalPresencePenalty"] = LocalVariantPresencePenalty,
             ["LocalCacheReuse"] = LocalVariantCacheReuse,
             ["LocalCacheStrategy"] = LocalVariantCacheStrategy,
             ["LocalCacheRam"] = LocalVariantCacheRam,
@@ -23389,7 +23657,7 @@ public partial class MainViewModel : ViewModelBase
     private Dictionary<string, string> CalculateLocalSettingsFromPriorityOrder(IReadOnlyList<string> resolved)
     {
         var advice = CurrentLocalHardwareAdvice();
-        var specType = InferSpecTypeFromProfile();
+        var specType = ResolvePresetSpecType();
         if (string.IsNullOrWhiteSpace(specType) || specType.Equals("Auto", StringComparison.OrdinalIgnoreCase))
         {
             specType = advice.SpecType;
@@ -23673,6 +23941,12 @@ public partial class MainViewModel : ViewModelBase
             ["LocalBatchSize"] = LocalVariantBatchSize,
             ["LocalUbatchSize"] = LocalVariantUbatchSize,
             ["LocalSpecType"] = LocalVariantSpecType,
+            ["LocalSpecDraftNMax"] = LocalVariantSpecDraftNMax,
+            ["LocalReasoningBudget"] = LocalVariantReasoningBudget,
+            ["LocalTopK"] = LocalVariantTopK,
+            ["LocalTopP"] = LocalVariantTopP,
+            ["LocalMinP"] = LocalVariantMinP,
+            ["LocalPresencePenalty"] = LocalVariantPresencePenalty,
             ["LocalCacheReuse"] = LocalVariantCacheReuse,
             ["LocalCacheStrategy"] = LocalVariantCacheStrategy,
             ["LocalCacheRam"] = LocalVariantCacheRam,
@@ -23788,6 +24062,12 @@ public partial class MainViewModel : ViewModelBase
             FluxMuxRuntimeService.NormalizeLlamaSpecType(settings.GetValueOrDefault("LocalSpecType", LocalVariantSpecType)),
             LocalSpecTypeOptions,
             InferSpecTypeFromProfile());
+        LocalVariantSpecDraftNMax = settings.GetValueOrDefault("LocalSpecDraftNMax", LocalVariantSpecDraftNMax);
+        LocalVariantReasoningBudget = settings.GetValueOrDefault("LocalReasoningBudget", LocalVariantReasoningBudget);
+        LocalVariantTopK = settings.GetValueOrDefault("LocalTopK", LocalVariantTopK);
+        LocalVariantTopP = settings.GetValueOrDefault("LocalTopP", LocalVariantTopP);
+        LocalVariantMinP = settings.GetValueOrDefault("LocalMinP", LocalVariantMinP);
+        LocalVariantPresencePenalty = settings.GetValueOrDefault("LocalPresencePenalty", LocalVariantPresencePenalty);
         LocalVariantCacheReuse = settings.GetValueOrDefault("LocalCacheReuse", LocalVariantCacheReuse);
         LocalVariantCacheStrategy = settings.GetValueOrDefault("LocalCacheStrategy", LocalVariantCacheStrategy);
         LocalVariantCacheRam = settings.GetValueOrDefault("LocalCacheRam", LocalVariantCacheRam);
@@ -24140,6 +24420,12 @@ public partial class MainViewModel : ViewModelBase
             ["LocalBatchSize"] = LocalVariantBatchSize,
             ["LocalUbatchSize"] = LocalVariantUbatchSize,
             ["LocalSpecType"] = LocalVariantSpecType,
+            ["LocalSpecDraftNMax"] = LocalVariantSpecDraftNMax,
+            ["LocalReasoningBudget"] = LocalVariantReasoningBudget,
+            ["LocalTopK"] = LocalVariantTopK,
+            ["LocalTopP"] = LocalVariantTopP,
+            ["LocalMinP"] = LocalVariantMinP,
+            ["LocalPresencePenalty"] = LocalVariantPresencePenalty,
             ["LocalCacheReuse"] = LocalVariantCacheReuse,
             ["LocalCacheStrategy"] = LocalVariantCacheStrategy,
             ["LocalCacheRam"] = LocalVariantCacheRam,
@@ -24176,6 +24462,12 @@ public partial class MainViewModel : ViewModelBase
             ["b"] = LocalVariantBatchSize,
             ["ub"] = LocalVariantUbatchSize,
             ["spec"] = LocalVariantSpecType,
+            ["draft"] = LocalVariantSpecDraftNMax,
+            ["rbudget"] = LocalVariantReasoningBudget,
+            ["topk"] = LocalVariantTopK,
+            ["topp"] = LocalVariantTopP,
+            ["minp"] = LocalVariantMinP,
+            ["presence"] = LocalVariantPresencePenalty,
             ["reuse"] = LocalVariantCacheReuse,
             ["cram"] = LocalVariantCacheRam,
             ["fit"] = LocalVariantFit,
@@ -24183,6 +24475,79 @@ public partial class MainViewModel : ViewModelBase
             ["reason"] = LocalVariantReasoning,
             ["parser"] = LocalVariantChatParser
         };
+    }
+
+    /// <summary>
+    /// Profile-editor labels for the detailed-settings keys AutoTune can change, in page order.
+    /// AutoTune reports its changes with these exact labels so the operator can find each one on
+    /// the page; reporting config keys or trial names ("usual AutoTune settings") could not be
+    /// matched to any control. Keep in step with MainWindow.axaml when a label changes.
+    /// </summary>
+    internal static readonly IReadOnlyList<(string Key, string Label)> LocalDetailedSettingLabels =
+    [
+        ("LocalExtendContextIntoRam", "Extend context into RAM (YaRN)"),
+        ("LocalYarnMaxContext", "YaRN context size"),
+        ("LocalVisionEnabled", "Images: Enable"),
+        ("LocalVisionMaxImageEdge", "Images: Max image edge"),
+        ("LocalVisionProjectorPath", "Images: projector"),
+        ("OverrideContext", "Context"),
+        ("LocalFlashAttention", "Flash"),
+        ("LocalFit", "Fit VRAM"),
+        ("LocalKvCacheTypeK", "KV key"),
+        ("LocalKvCacheTypeV", "KV value"),
+        ("LocalSwaFull", "SWA full"),
+        ("LocalCacheReuse", "Cache reuse"),
+        ("LocalCacheRam", "Cache RAM"),
+        ("AutoCompressEnabled", "Compact"),
+        ("LocalCacheStrategy", "Cache strategy"),
+        ("LocalGpuOffloadMode", "GPU mode"),
+        ("GpuLayers", "GPU layers"),
+        ("LocalSpecType", "Speculative"),
+        ("LocalMultiGpuMode", "Multi-GPU"),
+        ("LocalSplitMode", "Split mode"),
+        ("LocalMainGpu", "Main GPU"),
+        ("LocalTensorSplit", "Tensor split"),
+        ("OverrideThreads", "Threads"),
+        ("LocalThreadsBatch", "Batch threads"),
+        ("LocalBatchSize", "Batch size"),
+        ("LocalUbatchSize", "Micro-batch"),
+        ("LocalMultiUserMode", "Multi-user"),
+        ("LocalSpecDraftNMax", "Draft length"),
+        ("LocalChatTemplate", "Template"),
+        ("LocalChatParser", "Chat parser"),
+        ("LocalUnbanTokensMode", "Unban tokens"),
+        ("LocalReasoningBudget", "Thinking budget"),
+        ("LocalTemperature", "Temperature"),
+        ("OverrideMaxTokens", "Max tokens"),
+        ("LocalReasoning", "Reasoning"),
+        ("LocalTopK", "Sampling: Top-k"),
+        ("LocalTopP", "Sampling: Top-p"),
+        ("LocalMinP", "Sampling: Min-p"),
+        ("LocalPresencePenalty", "Sampling: Presence"),
+        ("LocalRopeScaling", "YaRN scaling (set automatically)"),
+        ("LocalRopeScale", "YaRN scale factor (set automatically)")
+    ];
+
+    /// <summary>
+    /// "Draft length 3 → 4; KV key q4_0 → q8_0" for every labelled setting whose value differs,
+    /// in page order. Empty when nothing changed.
+    /// </summary>
+    internal static string BuildLabelledChangeList(IReadOnlyDictionary<string, string> before, IReadOnlyDictionary<string, string> after)
+    {
+        static string Show(string? value) => value switch
+        {
+            null or "" => "(not set)",
+            _ when value.Equals("True", StringComparison.OrdinalIgnoreCase) => "On",
+            _ when value.Equals("False", StringComparison.OrdinalIgnoreCase) => "Off",
+            _ => value
+        };
+
+        var changes = LocalDetailedSettingLabels
+            .Where(entry => after.ContainsKey(entry.Key)
+                && !string.Equals(before.GetValueOrDefault(entry.Key) ?? string.Empty, after[entry.Key] ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+            .Select(entry => entry.Label + " " + Show(before.GetValueOrDefault(entry.Key)) + " → " + Show(after[entry.Key]))
+            .ToList();
+        return string.Join("; ", changes);
     }
 
     private static string BuildChangeSummary(IReadOnlyDictionary<string, string> before, IReadOnlyDictionary<string, string> after)
@@ -24461,6 +24826,27 @@ public partial class MainViewModel : ViewModelBase
         return CoerceLocalOption(sanitized, LocalChatTemplateOptions, "Auto");
     }
 
+    /// <summary>
+    /// Speculative method for the AutoTune preset: the operator's current choice in the form
+    /// (including Disabled), so a settings pass never overrides it. Only when the form has no
+    /// choice yet does it fall back to the model-name guess, then to the hardware advice.
+    /// </summary>
+    private string ResolvePresetSpecType()
+    {
+        var current = FluxMuxRuntimeService.NormalizeLlamaSpecType(LocalVariantSpecType);
+        if (!string.IsNullOrWhiteSpace(current)
+            && !current.Equals("Auto", StringComparison.OrdinalIgnoreCase)
+            && LocalSpecTypeOptions.Any(option => option.Equals(current, StringComparison.OrdinalIgnoreCase)))
+        {
+            return current;
+        }
+
+        var inferred = InferSpecTypeFromProfile();
+        return string.IsNullOrWhiteSpace(inferred) || inferred.Equals("Auto", StringComparison.OrdinalIgnoreCase)
+            ? CurrentLocalHardwareAdvice().SpecType
+            : inferred;
+    }
+
     private string InferSpecTypeFromProfile()
     {
         var lowered = (SelectedLocalProfile ?? string.Empty).ToLowerInvariant();
@@ -24497,6 +24883,38 @@ public partial class MainViewModel : ViewModelBase
 
         var match = options.FirstOrDefault(option => option.Equals(value, StringComparison.OrdinalIgnoreCase));
         return match ?? fallback;
+    }
+
+    /// <summary>
+    /// Loads a sampling value: blank or "Auto" (older hand-edited configs) shows as
+    /// <see cref="ServerDefaultOption"/>; any number is kept (and added to the list if new).
+    /// </summary>
+    private static string CoerceServerDefaultOption(string? value, ObservableCollection<string> options)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Equals("Auto", StringComparison.OrdinalIgnoreCase)
+            || value.Equals(ServerDefaultOption, StringComparison.OrdinalIgnoreCase))
+        {
+            return ServerDefaultOption;
+        }
+
+        return CoerceLocalOption(value, options, ServerDefaultOption);
+    }
+
+    /// <summary>
+    /// Loads the reasoning budget. The launch code treats any negative number (llama-server's own
+    /// "-1 = unlimited") or a non-number as "flag off", so those all show as Unlimited.
+    /// </summary>
+    private string CoerceReasoningBudget(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || !int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var budget)
+            || budget < 0)
+        {
+            return "Unlimited";
+        }
+
+        return CoerceLocalOption(budget.ToString(CultureInfo.InvariantCulture), LocalReasoningBudgetOptions, "Unlimited");
     }
 
     private static string CoerceLocalOption(string? value, IEnumerable<string> options, string fallback)

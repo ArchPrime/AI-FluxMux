@@ -72,6 +72,9 @@ public sealed class FluxMuxRuntimeService
 
 		public int? CompletionTokens { get; init; }
 
+		/// <summary>llama-server's own generation rate from the reply's "timings" block, when present.</summary>
+		public double? PredictedPerSecond { get; init; }
+
 		public int AttemptsUsed { get; init; }
 
 		public long ProbeWindowMs { get; init; }
@@ -3541,6 +3544,49 @@ public sealed class FluxMuxRuntimeService
 		return await TimeShortReadyReplyAsync(probePort, model, "Short reply completed", "The short reply test did not complete.", cancellationToken, 90000);
 	}
 
+	/// <summary>
+	/// Measures generation speed (tokens per second) on the running llama-server, for AutoTune.
+	/// The "ready" probe (16 tokens) is dominated by prompt start-up, so it cannot see what
+	/// speculative decoding or batch size change: MTP roughly doubled generation speed on this
+	/// PC (71 → 135-152 tok/s) yet barely moves a 16-token reply. This asks for a fixed ~256-token
+	/// coding answer and reports llama-server's own predicted_per_second from the reply's
+	/// "timings"; if that block is missing it falls back to completion tokens ÷ wall time.
+	/// </summary>
+	public async Task<LocalGenerationTimingResult> TimeLocalGenerationSpeedAsync(int publicGatewayPort, string model, CancellationToken cancellationToken = default(CancellationToken))
+	{
+		Process localServerProcess = _localServerProcess;
+		int probePort = ((localServerProcess != null && !localServerProcess.HasExited && _managedLocalPort > 0) ? _managedLocalPort : (publicGatewayPort + 1));
+		JsonArray messages = new JsonArray
+		{
+			new JsonObject
+			{
+				["role"] = "user",
+				["content"] = "Write a Python function that parses an ISO 8601 date string without using datetime, with a docstring and three unit tests."
+			}
+		};
+		ChatProbeResult probe = await SendChatProbeAsync(probePort, model, messages, 180000, cancellationToken, GenerationSpeedProbeTokens);
+		double? tokensPerSecond = probe.PredictedPerSecond;
+		if ((tokensPerSecond is null || tokensPerSecond <= 0) && probe.IsSuccess && probe.CompletionTokens is int n && n > 0 && probe.LatencyMs > 0)
+		{
+			tokensPerSecond = n * 1000.0 / probe.LatencyMs;
+		}
+		return new LocalGenerationTimingResult
+		{
+			IsSuccess = probe.IsSuccess && tokensPerSecond > 0,
+			LatencyMs = probe.LatencyMs,
+			TokensPerSecond = tokensPerSecond,
+			CompletionTokens = probe.CompletionTokens,
+			Details = (probe.IsSuccess
+				? (tokensPerSecond > 0
+					? $"Generated {probe.CompletionTokens?.ToString() ?? "?"} tokens at {tokensPerSecond:0.#} tokens/s."
+					: "The reply completed but its generation speed could not be read.")
+				: FirstNonEmpty(probe.Details, "The generation speed test did not complete."))
+		};
+	}
+
+	/// <summary>Reply length for <see cref="TimeLocalGenerationSpeedAsync"/>: long enough that generation, not start-up, dominates.</summary>
+	internal const int GenerationSpeedProbeTokens = 256;
+
 	public async Task<LocalGenerationTimingResult> TimeShortLocalReplyThroughPublicEndpointAsync(int publicGatewayPort, string model, CancellationToken cancellationToken = default(CancellationToken), int requestTimeoutMs = 60000)
 	{
 		return await TimeShortReadyReplyAsync(publicGatewayPort, model, "Public endpoint reply completed", "The public endpoint test did not complete.", cancellationToken, requestTimeoutMs, FluxMuxGatewayRouting.Local);
@@ -5654,7 +5700,8 @@ public sealed class FluxMuxRuntimeService
 				LatencyMs = sw.ElapsedMilliseconds,
 				Content = TruncateTail(content, 1200),
 				PromptTokens = ParseNullableInt(parsed?["usage"]?["prompt_tokens"]?.ToString()),
-				CompletionTokens = ParseNullableInt(parsed?["usage"]?["completion_tokens"]?.ToString())
+				CompletionTokens = ParseNullableInt(parsed?["usage"]?["completion_tokens"]?.ToString()),
+				PredictedPerSecond = ParseNullableDouble(parsed?["timings"]?["predicted_per_second"]?.ToString())
 			};
 		}
 		catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -6354,6 +6401,11 @@ public sealed class FluxMuxRuntimeService
 		return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out result) ? new int?(result) : ((int?)null);
 	}
 
+	private static double? ParseNullableDouble(string? value)
+	{
+		return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double result) ? result : null;
+	}
+
 	private static bool IsTcpPortOpen(string host, int port)
 	{
 		try
@@ -6758,8 +6810,11 @@ public sealed class FluxMuxRuntimeService
 			list.Add("--top-p");
 			list.Add(profileDouble2.ToString(CultureInfo.InvariantCulture));
 		}
-		double profileDouble3 = GetProfileDouble(profile, "LocalMinP", 0.0);
-		if (profileDouble3 > 0.0 && profileDouble3 < 1.0 && SupportsArg(helpText, "--min-p"))
+		// min-p is sent whenever the profile sets an explicit number, including 0. llama-server's
+		// own default is 0.05, and Qwen recommends 0, so "0" must reach the server rather than be
+		// read as "unset". A non-numeric value ("Server default") leaves the flag off.
+		double profileDouble3 = GetProfileDouble(profile, "LocalMinP", -1.0);
+		if (profileDouble3 >= 0.0 && profileDouble3 < 1.0 && SupportsArg(helpText, "--min-p"))
 		{
 			list.Add("--min-p");
 			list.Add(profileDouble3.ToString(CultureInfo.InvariantCulture));
@@ -6794,7 +6849,11 @@ public sealed class FluxMuxRuntimeService
 			list.Add("--reasoning-effort");
 			list.Add(reasoningEffort);
 		}
-		int profileInt8 = GetProfileInt(profile, "LocalReasoningBudget", -1);
+		// Not GetProfileInt: that treats 0 as "unset", but a budget of 0 (no thinking) is a real
+		// choice in the profile editor. Negative or non-numeric ("Unlimited") leaves the flag off.
+		int profileInt8 = int.TryParse(GetString(profile, "LocalReasoningBudget"), NumberStyles.Integer, CultureInfo.InvariantCulture, out int reasoningBudget)
+			? reasoningBudget
+			: -1;
 		if (profileInt8 >= 0 && SupportsArg(helpText, "--reasoning-budget"))
 		{
 			list.Add("--reasoning-budget");

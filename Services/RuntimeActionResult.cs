@@ -180,6 +180,11 @@ public sealed class LocalGenerationTimingResult
 
     public long LatencyMs { get; init; }
 
+    /// <summary>Generation speed, set only by the generation-speed probe (AutoTune).</summary>
+    public double? TokensPerSecond { get; init; }
+
+    public int? CompletionTokens { get; init; }
+
     public string Details { get; init; } = string.Empty;
 }
 

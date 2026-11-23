@@ -394,7 +394,7 @@
                                                                                     CommandParameter="{Binding SelectedLocalVariantItem}" />
                                                                             <CheckBox VerticalAlignment="Center"
                                                                                       IsChecked="{Binding LocalExperimentalHardwareTuneEnabled}"
-                                                                                      views:MarkedText.Tip="When ticked, **AutoTune** still applies the usual launch settings, then reloads the model and times a tiny reply (a few words). That path stores settings so the model can reload. Any speed-up on that tiny test is usually a fraction of a second — not a full chat. Progress shows in Diagnostics. Leave unticked for the instant unsaved settings pass only.">
+                                                                                      views:MarkedText.Tip="When ticked, **AutoTune** applies the usual launch settings, then reloads the model for each trial and measures generation speed (tokens per second on a ~256-token reply). On an MTP model it tries draft lengths 2, 3 and 4. A trial must be at least 3% faster to win. The model is left running the winner, and the result stays in the detailed settings, unsaved: **Save profile** keeps it, **Revert changes** puts back your previous settings. Takes a few minutes; progress shows in Diagnostics. Leave unticked for the instant settings pass only (no reload, no measuring).">
                                                                                 <CheckBox.Content>
                                                                                     <TextBlock Text="Test local system for additional optimisations (experimental)"
                                                                                                TextWrapping="Wrap"
@@ -547,7 +547,7 @@
                                                                     <Border Padding="8,6" CornerRadius="5" BorderBrush="{DynamicResource FluxMutedBorder}" BorderThickness="1" Background="{DynamicResource FluxMutedBackground}">
                                                                         <StackPanel Spacing="6">
                                                                             <TextBlock FontSize="12" FontWeight="SemiBold" Text="Fit and memory" />
-                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="6">
+                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="6">
                                                                         <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Context" />
                                                                         <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="1024" Maximum="{Binding LocalVariantContextMax}" Increment="1024" Value="{Binding LocalVariantContext}" ToolTip.Tip="How much of the chat the model can keep in mind. Bigger uses more graphics memory and may need a full reload later. AutoTune sizes this from leftover GPU memory after Images (Max image edge). On this 32 GB PC the daily NVFP4 sizes are 213056 with Images off and 163840 with Images on." />
                                                                         <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Flash" />
@@ -626,19 +626,23 @@
                                                                         <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalUbatchSizeOptions}" SelectedItem="{Binding LocalVariantUbatchSize}" ToolTip.Tip="A smaller bite if the question is too big to fit in graphics memory at once. Lower this if reading the question fails because memory ran out." />
                                                                         <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Multi-user" />
                                                                         <ComboBox Grid.Row="1" Grid.Column="3" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantMultiUserMode}" ToolTip.Tip="Allow more than one question at a time. This does not make a single answer faster, and each extra question uses graphics memory." />
+                                                                        <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Draft length" IsEnabled="{Binding IsLocalSpecDraftLengthApplicable}" />
+                                                                        <ComboBox Grid.Row="1" Grid.Column="5" ItemsSource="{Binding LocalSpecDraftNMaxOptions}" SelectedItem="{Binding LocalVariantSpecDraftNMax}" IsEnabled="{Binding IsLocalSpecDraftLengthApplicable}" ToolTip.Tip="With Speculative set to draft-mtp: how many tokens the model guesses ahead each step. Auto is 2. On the 27B NVFP4 MTP model, 3 measured about 12% faster than 2 (152 vs 135 tok/s); too high wastes work when guesses are rejected. AutoTune can try 2, 3 and 4. Needs a reload." />
                                                                             </Grid>
                                                                         </StackPanel>
                                                                     </Border>
                                                                     <Border Padding="8,6" CornerRadius="5" BorderBrush="{DynamicResource FluxTintPurpleBorder}" BorderThickness="1" Background="{DynamicResource FluxTintPurpleBackground}">
                                                                         <StackPanel Spacing="6">
                                                                             <TextBlock FontSize="12" FontWeight="SemiBold" Text="Chat format" />
-                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="8" RowSpacing="6">
+                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6">
                                                                         <TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Template" />
                                                                         <ComboBox Grid.Column="1" ItemsSource="{Binding LocalChatTemplateOptions}" SelectedItem="{Binding LocalVariantChatTemplate}" ToolTip.Tip="Auto uses the format stored in the local model. Pick a named format only for older models. Newer Qwen models must stay on Auto or they may ignore instructions from the Client app." />
                                                                         <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Chat parser" />
                                                                         <ComboBox Grid.Column="3" ItemsSource="{Binding LocalChatParserOptions}" SelectedItem="{Binding LocalVariantChatParser}" ToolTip.Tip="How chat messages are read. Leave the default unless answers look garbled. Skip parsing is a last resort." />
                                                                         <TextBlock Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Unban tokens" />
                                                                         <ComboBox Grid.Column="5" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantUnbanTokensMode}" ToolTip.Tip="Allow some words llama-server would otherwise block. This is a real llama-server option (--unbantokens) when llama-server's help lists it; AI-FluxMux only sends it then. AutoTune may turn this on for some chat formats." />
+                                                                        <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Thinking budget" />
+                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalReasoningBudgetOptions}" SelectedItem="{Binding LocalVariantReasoningBudget}" ToolTip.Tip="Most tokens the model may spend thinking before it answers (llama-server --reasoning-budget). Unlimited: no cap. 0: no thinking at all. A cap shortens the wait before a reply starts when Reasoning is on. Needs a reload." />
                                                                             </Grid>
                                                                             <StackPanel Orientation="Horizontal" Spacing="10">
                                                                                 <TextBlock FontSize="12"
@@ -659,6 +663,27 @@
                                                                         <TextBlock Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Reasoning" />
                                                                         <ComboBox Grid.Column="5" ItemsSource="{Binding LocalReasoningOptions}" SelectedItem="{Binding LocalVariantReasoning}" ToolTip.Tip="Whether the model writes a hidden thinking step before answering. Off is usually better for the Client app. Use the Quick Select list for Off, Low, Medium, or XHigh on the running row." />
                                                                             </Grid>
+                                                                            <Expander Classes="fieldHeight"
+                                                                                      Header="Sampling · needs a reload"
+                                                                                      IsExpanded="False"
+                                                                                      HorizontalAlignment="Stretch"
+                                                                                      ToolTip.Tip="llama-server's default word-choice settings. They apply only when the Client app does not send its own. Server default leaves llama-server's built-in value. Qwen suggests top-k 20, top-p 0.95, min-p 0, and presence penalty 1.5 for quantized models that repeat themselves.">
+                                                                                <Expander.Resources>
+                                                                                    <x:Double x:Key="ExpanderMinHeight">28</x:Double>
+                                                                                    <Thickness x:Key="ExpanderHeaderPadding">8,0,0,0</Thickness>
+                                                                                    <Thickness x:Key="ExpanderChevronMargin">8,0,8,0</Thickness>
+                                                                                </Expander.Resources>
+                                                                                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6" Margin="0,6,0,0">
+                                                                                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Top-k" />
+                                                                                    <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding LocalTopKOptions}" SelectedItem="{Binding LocalVariantTopK}" ToolTip.Tip="Only the k most likely next words are considered. llama-server default 40; Qwen suggests 20." />
+                                                                                    <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Top-p" />
+                                                                                    <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalTopPOptions}" SelectedItem="{Binding LocalVariantTopP}" ToolTip.Tip="Only the most likely words that add up to this share are considered. llama-server default 0.95." />
+                                                                                    <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Min-p" />
+                                                                                    <ComboBox Grid.Row="0" Grid.Column="5" ItemsSource="{Binding LocalMinPOptions}" SelectedItem="{Binding LocalVariantMinP}" ToolTip.Tip="Drops words far less likely than the best one. llama-server default 0.05; Qwen suggests 0." />
+                                                                                    <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Presence" />
+                                                                                    <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalPresencePenaltyOptions}" SelectedItem="{Binding LocalVariantPresencePenalty}" ToolTip.Tip="Discourages repeating words already used. Try 1.5 if a quantized model starts looping the same lines. Too high can make code worse." />
+                                                                                </Grid>
+                                                                            </Expander>
                                                                         </StackPanel>
                                                                     </Border>
                                                                 </StackPanel>

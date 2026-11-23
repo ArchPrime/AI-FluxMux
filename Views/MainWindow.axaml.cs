@@ -1371,6 +1371,15 @@ public partial class MainWindow : Window
 
     private void VariantExpander_Expanded(object? sender, RoutedEventArgs e)
     {
+        // Expander events bubble. The profile editor is drawn inside each row's Expander and has
+        // Expanders of its own (e.g. Sampling), so their events reach this handler too. Only the
+        // row's own Expander may drive row selection; otherwise the first open of a row snapped
+        // shut again.
+        if (!ReferenceEquals(e.Source, sender))
+        {
+            return;
+        }
+
         if (sender is not Expander { DataContext: CloudVariantTreeItemViewModel item } ||
             DataContext is not MainViewModel vm)
             return;
@@ -1384,7 +1393,9 @@ public partial class MainWindow : Window
 
     private void VariantExpander_Collapsing(object? sender, RoutedEventArgs e)
     {
-        if (sender is not Expander expander)
+        // See VariantExpander_Expanded: ignore Collapsing bubbled up from an Expander nested in
+        // the profile editor, or it collapses the whole row.
+        if (sender is not Expander expander || !ReferenceEquals(e.Source, sender))
         {
             return;
         }

@@ -87,7 +87,8 @@ public sealed class LocalPrioritySettingsCalculatorTests
         Assert.Equal("q8_0", settings["LocalKvCacheTypeV"]);
         Assert.False(LocalPrioritySettingsCalculator.IsBelowMinimumKvCacheType(settings["LocalKvCacheTypeK"]));
         Assert.Equal(fidelity == 0 || stability == 0 ? "0.2" : speed == 0 ? "0.4" : "0.3", settings["LocalTemperature"]);
-        Assert.Equal(fidelity == 0 ? "Disabled" : "ngram-simple", settings["LocalSpecType"]);
+        // The priority order never changes the speculative method; the caller's choice is kept.
+        Assert.Equal("ngram-simple", settings["LocalSpecType"]);
         Assert.Equal(thinking == 0 ? "On" : "Off", settings["LocalReasoning"]);
         Assert.Equal("Enabled", settings["LocalFit"]);
         Assert.Equal(
@@ -139,7 +140,7 @@ public sealed class LocalPrioritySettingsCalculatorTests
         Assert.Equal("f16", settings["LocalKvCacheTypeK"]);
         Assert.Equal("f16", settings["LocalKvCacheTypeV"]);
         Assert.False(LocalPrioritySettingsCalculator.IsBelowMinimumKvCacheType(settings["LocalKvCacheTypeK"]));
-        Assert.Equal("Disabled", settings["LocalSpecType"]);
+        Assert.Equal("ngram-simple", settings["LocalSpecType"]);
         Assert.Equal("Enabled", settings["LocalVisionEnabled"]);
         Assert.Equal("0.2", settings["LocalTemperature"]);
     }

@@ -30,6 +30,13 @@ public static class LocalLaunchFingerprint
             settings["LocalBatchSize"]?.ToString() ?? string.Empty,
             settings["LocalUbatchSize"]?.ToString() ?? string.Empty,
             settings["LocalSpecType"]?.ToString() ?? string.Empty,
+            // Draft length and the server-side sampling defaults are llama-server launch flags,
+            // so changing them needs a relaunch like any other launch-critical setting.
+            settings["LocalSpecDraftNMax"]?.ToString() ?? string.Empty,
+            settings["LocalTopK"]?.ToString() ?? string.Empty,
+            settings["LocalTopP"]?.ToString() ?? string.Empty,
+            settings["LocalMinP"]?.ToString() ?? string.Empty,
+            settings["LocalPresencePenalty"]?.ToString() ?? string.Empty,
             settings["LocalCacheReuse"]?.ToString() ?? string.Empty,
             settings["LocalCacheRam"]?.ToString() ?? string.Empty,
             settings["LocalRopeScaling"]?.ToString() ?? "Auto",

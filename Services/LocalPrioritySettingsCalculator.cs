@@ -195,7 +195,14 @@ public static class LocalPrioritySettingsCalculator
                 ? "f16"
                 : PickKvTypeForYarnFit(advice, int.TryParse(ctx, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ctxInt) ? ctxInt : 0, extendContextIntoRam, effectiveKvBytesPerToken);
         var temp = fidelity == 0 || stability == 0 ? "0.2" : speed == 0 ? "0.4" : "0.3";
-        var spec = fidelity == 0 ? "Disabled" : stability == 0 ? "ngram-simple" : specType;
+        // The speculative method is NOT derived from the priority order. It used to be: Fidelity
+        // first turned MTP off and Stability first swapped it for ngram-simple. Both were wrong —
+        // speculative decoding is lossless (the model verifies every drafted token, so output is
+        // unchanged) and draft-mtp loads and runs reliably — and the swap silently halved
+        // generation speed (71 vs 135-152 tok/s on the 27B NVFP4 MTP model). That is how two
+        // variants ended up with MTP Disabled in Nov 2026. The caller passes the form's current
+        // choice (or the model-based guess when unset), and the preset keeps it.
+        var spec = specType;
         var reasoning = thinking == 0 ? "On" : "Off";
         // When YaRN extends the context past the native window, the overflow is meant to live
         // in ordinary memory. Fit-to-VRAM (KV compression to squeeze more onto the card) is
