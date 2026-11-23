@@ -112,6 +112,11 @@ public sealed class PortRulesTelemetryTests
             dir = Directory.GetParent(dir)?.FullName ?? string.Empty;
         }
 
-        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
+        // A build with --artifacts-path puts the test host outside the source tree; fall back to
+        // this file's own location, which is the same wherever the output lands.
+        return SourceRoot();
     }
+
+    private static string SourceRoot([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile) ?? ".", ".."));
 }

@@ -70,3 +70,6 @@ scan-stdout.txt
 scanner-lint.json
 scanner-output.json
 scanner-scan.json
+
+# Local working notes, not for the public repository
+NEXT_SESSION_PLAN.md

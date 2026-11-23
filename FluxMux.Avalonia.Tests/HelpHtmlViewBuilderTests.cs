@@ -285,9 +285,20 @@ public sealed class HelpHtmlViewBuilderTests
             dir = dir.Parent;
         }
 
+        // A build with --artifacts-path puts the test host outside the source tree; fall back to
+        // this file's own location, which is the same wherever the output lands.
+        var fromSource = Path.Combine(SourceRoot(), "App.axaml");
+        if (File.Exists(fromSource))
+        {
+            return File.ReadAllText(fromSource);
+        }
+
         Assert.Fail("App.axaml should be somewhere above the test host.");
         return string.Empty;
     }
+
+    private static string SourceRoot([System.Runtime.CompilerServices.CallerFilePath] string thisFile = "")
+        => Path.GetFullPath(Path.Combine(Path.GetDirectoryName(thisFile) ?? ".", ".."));
 
     [Fact]
     public void The_copyright_logo_cannot_widen_the_column_it_sits_in()

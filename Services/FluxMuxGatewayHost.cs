@@ -4024,7 +4024,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 if (!string.IsNullOrWhiteSpace(block))
                 {
                     InjectEssenceBlock(payload, block);
-                    Log("essence: re-injected the preserved essence (" + block.Length + " chars) into the system prompt for this turn");
+                    Log("essence: re-injected the preserved essence (" + block.Length + " chars) at the end of the newest message for this turn");
                 }
                 else
                 {
@@ -4145,9 +4145,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
     }
 
     /// <summary>
-    /// Injects an essence block into the payload's system message (appended to the existing system
-    /// message, or inserted at the front if none exists — prefix-safe). Used by the essence
-    /// re-asserter on a compaction edge.
+    /// Injects an essence block at the END of the newest user message, the same place as the
+    /// VIBE_STATE note, so only the newest turn changes. It used to be appended to the system
+    /// message: on the turn the compaction cut moved, the system prompt — the first tokens of the
+    /// request — gained the block, and on the next turn lost it again, so that next turn reread
+    /// the whole prompt too (seen live: every cut move cost two full rereads instead of one).
+    /// Falls back to a system message only when the chat has no user message.
     /// </summary>
     private void InjectEssenceBlock(JsonObject payload, string block)
     {
@@ -4157,20 +4160,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return;
         }
 
-        for (var i = 0; i < messages.Count; i++)
+        var target = LastUserMessage(messages);
+        if (target is not null)
         {
-            if (messages[i] is not JsonObject msg)
-            {
-                continue;
-            }
-
-            var role = Str(msg, "role").Trim().ToLowerInvariant();
-            if (role is "system" or "developer")
-            {
-                var existing = MessageText(msg);
-                msg["content"] = existing.Length > 0 ? existing + "\n\n" + block : block;
-                return;
-            }
+            AppendTextToMessage(target, "\n\n" + block);
+            return;
         }
 
         messages.Insert(0, new JsonObject { ["role"] = "system", ["content"] = block });
@@ -4178,13 +4172,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
     /// <summary>
     /// Stage-0 VIBE_STATE re-injection: when the per-profile toggle is on and a
-    /// <c>VIBE_STATE.md</c> exists, prepends the session's persistent task/state/next to the
-    /// system prompt so the model always knows "where we are" even after the working context has
-    /// been paged away.
-    ///
-    /// This is a prefix-safe system suffix: it is appended to the existing system message (not
-    /// prepended, so the model's original system instructions keep their position and the KV-cache
-    /// prefix stays stable). The block is deliberately terse (a few lines) so it costs almost
+    /// <c>VIBE_STATE.md</c> exists, adds the session's persistent task/state/next to the END of
+    /// the newest user message, so the model always knows "where we are" even after the working
+    /// context has been paged away, and only the newest turn of the prompt changes. The block is deliberately terse (a few lines) so it costs almost
     /// nothing in tokens. No-op when the engine is not wired up, the toggle is off, or no
     /// VIBE_STATE.md exists yet. All I/O goes through the engine's <c>IContextIo</c> seam, so a
     /// locked or corrupt file never breaks a turn.
