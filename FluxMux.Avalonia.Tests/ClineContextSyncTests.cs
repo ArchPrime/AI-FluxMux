@@ -324,6 +324,64 @@ public sealed class ClineContextSyncTests
     }
 
     [Fact]
+    public void Auto_compact_turned_off_by_FluxMux_comes_back_when_FluxMux_stops_compacting()
+    {
+        using var dir = new TempDir();
+        var (modelsPath, providersPath) = WritePointedAtPort(dir);
+        var statePath = Path.Combine(dir.Path, "globalState.json");
+        var settingsPath = Path.Combine(dir.Path, "global-settings.json");
+        File.WriteAllText(statePath, """{ "useAutoCondense": true }""");
+        File.WriteAllText(settingsPath, """{ "autoCompactEnabled": true }""");
+
+        // Client style Other: FluxMux compacts, so Cline's own Auto compact is turned off.
+        ClineContextSync.MergeIntoModelsFile(
+            ClineContextSyncOptions.Create(5001, 65536), modelsPath, providersPath, statePath, settingsPath);
+        Assert.False(ReadBool(statePath, "useAutoCondense"));
+        Assert.False(ReadBool(settingsPath, "autoCompactEnabled"));
+
+        // Client style Cline-like: FluxMux stops compacting, so Cline's is put back on.
+        var result = ClineContextSync.MergeIntoModelsFile(
+            ClineContextSyncOptions.Create(5001, 65536, compactMode: "none"), modelsPath, providersPath, statePath, settingsPath);
+        Assert.True(ReadBool(statePath, "useAutoCondense"));
+        Assert.True(ReadBool(settingsPath, "autoCompactEnabled"));
+        Assert.Contains("turned back on", result.Message, StringComparison.Ordinal);
+        Assert.Null(JsonNode.Parse(File.ReadAllText(statePath))!["useAutoCondense" + ClineContextSync.TurnedOffMarkerSuffix]);
+    }
+
+    [Fact]
+    public void Auto_compact_the_user_turned_off_stays_off_when_FluxMux_stops_compacting()
+    {
+        using var dir = new TempDir();
+        var (modelsPath, providersPath) = WritePointedAtPort(dir);
+        var statePath = Path.Combine(dir.Path, "globalState.json");
+        var settingsPath = Path.Combine(dir.Path, "global-settings.json");
+        File.WriteAllText(statePath, """{ "useAutoCondense": false }""");
+        File.WriteAllText(settingsPath, """{ "autoCompactEnabled": false }""");
+
+        ClineContextSync.MergeIntoModelsFile(
+            ClineContextSyncOptions.Create(5001, 65536, compactMode: "none"), modelsPath, providersPath, statePath, settingsPath);
+
+        Assert.False(ReadBool(statePath, "useAutoCondense"));
+        Assert.False(ReadBool(settingsPath, "autoCompactEnabled"));
+    }
+
+    private static (string Models, string Providers) WritePointedAtPort(TempDir dir)
+    {
+        var modelsPath = Path.Combine(dir.Path, "models.json");
+        var providersPath = Path.Combine(dir.Path, "providers.json");
+        File.WriteAllText(providersPath, """
+            { "providers": { "openai-compatible": { "settings": { "baseUrl": "http://127.0.0.1:5001", "model": "local" } } } }
+            """);
+        File.WriteAllText(modelsPath, """
+            { "version": 1, "providers": { "openai-compatible": { "provider": { "baseUrl": "http://127.0.0.1:5001", "defaultModelId": "local" }, "models": {} } } }
+            """);
+        return (modelsPath, providersPath);
+    }
+
+    private static bool ReadBool(string path, string key)
+        => JsonNode.Parse(File.ReadAllText(path))![key]!.GetValue<bool>();
+
+    [Fact]
     public void Merge_writes_loaded_profile_name_and_keeps_model_id_local()
     {
         using var dir = new TempDir();

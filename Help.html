@@ -10,7 +10,7 @@ xmlns="http://www.w3.org/TR/REC-html40">
 <meta name=Generator content="Microsoft Word 15">
 <meta name=Originator content="Microsoft Word 15">
 <link rel=File-List href="Help_files/filelist.xml">
-<title>AI-FluxMux v0.3.2 beta — local and cloud models, one Endpoint address</title>
+<title>AI-FluxMux — local and cloud models, one Endpoint address</title>
 <!--[if gte mso 9]><xml>
  <o:DocumentProperties>
   <o:Author>Paul King</o:Author>
@@ -2587,8 +2587,7 @@ word-wrap:break-word'>
 <div class=WordSection1>
 
 <h1><span lang=EN style='font-family:"Calibri",sans-serif;mso-fareast-font-family:
-"Times New Roman";color:#111111;mso-ansi-language:EN'>AI-<span class=SpellE>FluxMux</span>
-v0.3.2 beta<o:p></o:p></span></h1>
+"Times New Roman";color:#111111;mso-ansi-language:EN'>AI-<span class=SpellE>FluxMux</span><o:p></o:p></span></h1>
 
 <h2><span lang=EN style='font-family:"Calibri",sans-serif;mso-fareast-font-family:
 "Times New Roman";color:#111111;mso-ansi-language:EN'>What is AI-<span
@@ -2629,8 +2628,7 @@ off to another during a chat.<o:p></o:p></span></p>
 class=SpellE>FluxMux</span><o:p></o:p></span></h2>
 
 <p><span lang=EN style='font-size:11.0pt;font-family:"Calibri",sans-serif;
-color:#111111;mso-ansi-language:EN'>Unzip AI-<span class=SpellE>FluxMux</span>
-0.3.2 beta to a folder you own (for example </span><code><span lang=EN
+color:#111111;mso-ansi-language:EN'>Unzip AI-<span class=SpellE>FluxMux</span> to a folder you own (for example </span><code><span lang=EN
 style='font-size:10.0pt;color:#111111;mso-ansi-language:EN'>C:\AI-FluxMux</span></code><span
 lang=EN style='font-size:11.0pt;font-family:"Calibri",sans-serif;color:#111111;
 mso-ansi-language:EN'>). Do not unzip into Program Files: Windows does not let
@@ -4082,8 +4080,7 @@ A</span></em>).<o:p></o:p></span></p>
 color:#111111;mso-ansi-language:EN'>AutoTune</span></span><span lang=EN
 style='font-size:11.0pt;font-family:"Calibri",sans-serif;color:#111111;
 mso-ansi-language:EN'> and the User priorities wizard can change many settings
-automatically, but both leave your hand-tuned temperature, max tokens, Context,
-reasoning, chat format, Compact, and multi-GPU choices alone. Images <span
+automatically, but both leave your hand-tuned temperature, reasoning, chat format, Compact, and multi-GPU choices alone, and never lower a Context or max tokens you set. Images <span
 class=GramE>is</span> a user setting that both will always work around rather
 than adjust.<o:p></o:p></span></p>
 
@@ -4368,10 +4365,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Only kicks in when the
-  loaded Context is genuinely filling, not on every turn. Your <span
-  class=GramE>Client</span> app <span class=GramE>still keeps</span> the full
-  chat. Unticked = never shorten forwarded history.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Only kicks in when the loaded Context is genuinely filling, not on every turn. Your Client app still keeps the full chat. Unticked = never shorten forwarded history. Greyed out when the client style box in the Diagnostics header is set to Cline-like, because that Client app resends the whole chat every turn and shortens it itself.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:10'>
@@ -4379,7 +4373,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Forward pruning<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Trim waste per turn (forward pruning)<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -4399,8 +4393,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
   mso-fareast-font-family:"Times New Roman";color:#111111'>On by default. Toggle
-  takes effect on the next turn, no reload needed. Greyed out for Cline-like
-  profiles.<o:p></o:p></span></p>
+  takes effect on the next turn, no reload needed. Greyed out when client style is Cline-like (see Compact).<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:11'>
@@ -4431,7 +4424,31 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
   mso-fareast-font-family:"Times New Roman";color:#111111'>On by default. Only
   matters when a tool result is genuinely large. Toggle takes effect on the next
-  turn, no reload needed. Greyed out for Cline-like profiles.<o:p></o:p></span></p>
+  turn, no reload needed. Greyed out when client style is Cline-like (see Compact).<o:p></o:p></span></p>
+  </td>
+ </tr>
+ <tr style='mso-yfti-irow:11'>
+  <td valign=top style='border:solid #CBD5E1 1.0pt;border-top:none;mso-border-top-alt:
+  solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Auto-compact<o:p></o:p></span></p>
+  </td>
+  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
+  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
+  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
+  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Summarises older turns when the prompt gets long, with no pause and no dialog. The model carries on with a shortened memory of the early work.<o:p></o:p></span></p>
+  </td>
+  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
+  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
+  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
+  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Your Client app still keeps the full chat. Greyed out when client style is Cline-like (see Compact).<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:12'>
@@ -5458,9 +5475,7 @@ Cloud profiles swap Fidelity for Token Cost Economy. Local goal tips talk about
 VRAM; cloud goal tips talk about token cost.<o:p></o:p></span></p>
 
 <p><span lang=EN style='font-size:11.0pt;font-family:"Calibri",sans-serif;
-color:#111111;mso-ansi-language:EN'>The list does not rearrange itself when you
-edit a setting by hand — it changes only when you use the arrows or run <span
-class=SpellE>AutoTune</span>.<o:p></o:p></span></p>
+color:#111111;mso-ansi-language:EN'>On a local profile the list also follows your hand edits: when a setting you change clearly favours a different order, the list moves to match, and the line under it says what the change trades. Use the arrows to put it back if you disagree.<o:p></o:p></span></p>
 
 <p><span class=SpellE><strong><span lang=EN style='font-size:11.0pt;font-family:
 "Calibri",sans-serif;color:#111111;mso-ansi-language:EN'>AutoTune</span></strong></span><span
@@ -6653,8 +6668,7 @@ provider as something you configured, so <strong>Context Window</strong> is a
 number you typed, and it defaults to 128000. Cline fetches the model list to
 fill its picker, but takes capacity from its own settings. Its <strong>Auto
 compact</strong> then decides when to summarise against that typed number rather
-than against the model actually loaded, which is why <strong>Launch</strong>
-turns Auto compact off and leaves shortening to FluxMux <strong>Compact</strong>.<o:p></o:p></span></p>
+than against the model actually loaded, which is why <strong>Launch</strong> turns Auto compact off and leaves shortening to FluxMux <strong>Compact</strong>. With client style set to Cline-like, AI-FluxMux does not shorten the chat, so <strong>Launch</strong> leaves Cline Auto compact on, and turns it back on if AI-FluxMux was the one that turned it off.<o:p></o:p></span></p>
 
 <p class=MsoNormal style='mso-margin-top-alt:auto;mso-margin-bottom-alt:auto;
 margin-left:36.0pt;text-indent:-18.0pt;mso-list:l15 level1 lfo16;tab-stops:
@@ -7302,10 +7316,7 @@ mso-fareast-font-family:Symbol;mso-bidi-font-family:Symbol'><span
 style='mso-list:Ignore'>·<span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
 </span></span></span><![endif]><strong><span style='mso-fareast-font-family:
 "Times New Roman"'>Launch</span></strong><span style='mso-fareast-font-family:
-"Times New Roman"'> also turns off the Cline <strong>Auto compact </strong><strong><span
-style='font-weight:normal'>function</span></strong>, because <span
-class=SpellE>FluxMux</span> Compact is what shortens forwarded history, and it
-leaves <strong>Supports Images</strong> ticked when a validated Images-on
+"Times New Roman"'> also turns off the Cline <strong>Auto compact</strong> function, because <span class=SpellE>FluxMux</span> Compact is what shortens forwarded history. With client style <strong>Cline-like</strong>, it leaves Cline <strong>Auto compact</strong> on instead. It also leaves <strong>Supports Images</strong> ticked when a validated Images-on
 profile exists.<o:p></o:p></span></p>
 
 <p class=MsoNormal style='mso-margin-top-alt:auto;mso-margin-bottom-alt:auto;
