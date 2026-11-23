@@ -75,6 +75,9 @@ public sealed class FluxMuxRuntimeService
 		/// <summary>llama-server's own generation rate from the reply's "timings" block, when present.</summary>
 		public double? PredictedPerSecond { get; init; }
 
+		/// <summary>llama-server's prompt-reading rate from the reply's "timings" block, when present.</summary>
+		public double? PromptPerSecond { get; init; }
+
 		public int AttemptsUsed { get; init; }
 
 		public long ProbeWindowMs { get; init; }
@@ -3597,6 +3600,47 @@ public sealed class FluxMuxRuntimeService
 	/// <summary>Reply length for <see cref="TimeLocalGenerationSpeedAsync"/>: long enough that generation, not start-up, dominates.</summary>
 	internal const int GenerationSpeedProbeTokens = 256;
 
+	/// <summary>
+	/// Measures prompt-reading (prefill) speed on the running llama-server, for AutoTune. This is
+	/// the stage Micro-batch / Batch size change (measured on one 32 GB card: ub256 3,937 tok/s
+	/// vs ub1024 5,577), and the one a long Client-app turn waits on before the first word. Sends
+	/// a fixed ~6K-token prompt with <c>cache_prompt: false</c> (so a cached prefix cannot
+	/// flatter a repeat run) and max_tokens 1, and reports llama-server's
+	/// <c>timings.prompt_per_second</c>.
+	/// </summary>
+	public async Task<LocalGenerationTimingResult> TimeLocalPromptReadingAsync(int publicGatewayPort, string model, CancellationToken cancellationToken = default(CancellationToken))
+	{
+		Process localServerProcess = _localServerProcess;
+		int probePort = ((localServerProcess != null && !localServerProcess.HasExited && _managedLocalPort > 0) ? _managedLocalPort : (publicGatewayPort + 1));
+		JsonArray messages = new JsonArray
+		{
+			new JsonObject
+			{
+				["role"] = "user",
+				["content"] = PromptReadingProbeText + "\n\nReply with the single word done."
+			}
+		};
+		ChatProbeResult probe = await SendChatProbeAsync(probePort, model, messages, 180000, cancellationToken, 1, extraFields: new JsonObject { ["cache_prompt"] = false });
+		double? promptPerSecond = probe.PromptPerSecond;
+		return new LocalGenerationTimingResult
+		{
+			IsSuccess = probe.IsSuccess && promptPerSecond > 0,
+			LatencyMs = probe.LatencyMs,
+			TokensPerSecond = promptPerSecond,
+			CompletionTokens = probe.PromptTokens,
+			Details = (probe.IsSuccess
+				? (promptPerSecond > 0
+					? $"Read a {probe.PromptTokens?.ToString() ?? "?"}-token prompt at {promptPerSecond:0} tokens/s."
+					: "The prompt was read but its speed could not be read back.")
+				: FirstNonEmpty(probe.Details, "The prompt-reading test did not complete."))
+		};
+	}
+
+	/// <summary>~6K tokens of fixed text: content does not affect prefill speed, only length does.</summary>
+	internal static readonly string PromptReadingProbeText = string.Concat(Enumerable.Repeat(
+		"The gateway forwards each request to the local model, measures the prompt, and decides whether the "
+		+ "conversation still fits in the loaded context window before any token is generated. ", 160));
+
 	public async Task<LocalGenerationTimingResult> TimeShortLocalReplyThroughPublicEndpointAsync(int publicGatewayPort, string model, CancellationToken cancellationToken = default(CancellationToken), int requestTimeoutMs = 60000)
 	{
 		return await TimeShortReadyReplyAsync(publicGatewayPort, model, "Public endpoint reply completed", "The public endpoint test did not complete.", cancellationToken, requestTimeoutMs, FluxMuxGatewayRouting.Local);
@@ -5646,7 +5690,7 @@ public sealed class FluxMuxRuntimeService
 		return false;
 	}
 
-	private async Task<ChatProbeResult> SendChatProbeAsync(int port, string model, JsonArray messages, int requestTimeoutMs, CancellationToken cancellationToken, int maxTokens = 256, string? forceRoute = null)
+	private async Task<ChatProbeResult> SendChatProbeAsync(int port, string model, JsonArray messages, int requestTimeoutMs, CancellationToken cancellationToken, int maxTokens = 256, string? forceRoute = null, JsonObject? extraFields = null)
 	{
 		string endpoint = $"http://127.0.0.1:{port}/v1/chat/completions";
 		if (!(await IsLocalEndpointReachableQuickAsync(port, cancellationToken)))
@@ -5667,6 +5711,13 @@ public sealed class FluxMuxRuntimeService
 			["max_tokens"] = Math.Clamp(maxTokens, 1, 4096),
 			["messages"] = messages.DeepClone()
 		};
+		if (extraFields is not null)
+		{
+			foreach (var field in extraFields)
+			{
+				payload[field.Key] = field.Value?.DeepClone();
+			}
+		}
 		using HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Post, endpoint)
 		{
 			Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
@@ -5711,7 +5762,8 @@ public sealed class FluxMuxRuntimeService
 				Content = TruncateTail(content, 1200),
 				PromptTokens = ParseNullableInt(parsed?["usage"]?["prompt_tokens"]?.ToString()),
 				CompletionTokens = ParseNullableInt(parsed?["usage"]?["completion_tokens"]?.ToString()),
-				PredictedPerSecond = ParseNullableDouble(parsed?["timings"]?["predicted_per_second"]?.ToString())
+				PredictedPerSecond = ParseNullableDouble(parsed?["timings"]?["predicted_per_second"]?.ToString()),
+				PromptPerSecond = ParseNullableDouble(parsed?["timings"]?["prompt_per_second"]?.ToString())
 			};
 		}
 		catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -6448,12 +6500,93 @@ public sealed class FluxMuxRuntimeService
 		IReadOnlyList<InstalledLocalServerCandidate> installedLocalServerCandidates = GetInstalledLocalServerCandidates();
 		if (installedLocalServerCandidates.Count > 0)
 		{
-			return installedLocalServerCandidates[0].ExecutablePath;
+			string picked = installedLocalServerCandidates[0].ExecutablePath;
+			if (!string.IsNullOrWhiteSpace(configuredPath) && !string.Equals(_lastLlamaPathRepairNote, picked, StringComparison.OrdinalIgnoreCase))
+			{
+				// Say once which exe replaced the missing one, so a folder move is visible.
+				_lastLlamaPathRepairNote = picked;
+				_supervisor?.LogLaunchMonitor("llama-server path repair: configured \"" + configuredPath + "\" does not exist; using \"" + picked + "\"");
+			}
+			return picked;
 		}
 		string configDir = Path.GetDirectoryName(_configPath) ?? AppContext.BaseDirectory;
 		string configParent = Directory.GetParent(configDir)?.FullName ?? configDir;
 		string path = Directory.GetParent(configParent)?.FullName ?? configParent;
 		return Path.Combine(path, "llama-server", "llama-server.exe");
+	}
+
+	private string? _lastLlamaPathRepairNote;
+
+	/// <summary>
+	/// llama-server.exe files one folder below the configured exe's folder and below the standard
+	/// "llama-server" folder, ordered with anything under a "backup" folder last.
+	///
+	/// Why: on 23 Nov 2026 the in-app updater left the new build in
+	/// <c>llama-server\llama-server\</c> and the old one in <c>llama-server\llama-server-backup\…</c>,
+	/// while a config still pointed at <c>llama-server\llama-server.exe</c>, which no longer
+	/// existed. The old search looked only at fixed paths and PATH, so local launches failed.
+	/// </summary>
+	internal static IReadOnlyList<string> NearbyLlamaServerCandidates(string? configuredPath, string standardDir)
+	{
+		var roots = new List<string>();
+		if (!string.IsNullOrWhiteSpace(configuredPath))
+		{
+			var configuredDir = Path.GetDirectoryName(configuredPath);
+			if (!string.IsNullOrWhiteSpace(configuredDir))
+			{
+				roots.Add(configuredDir);
+			}
+		}
+
+		roots.Add(standardDir);
+		var found = new List<string>();
+		foreach (var root in roots.Distinct(StringComparer.OrdinalIgnoreCase))
+		{
+			try
+			{
+				if (!Directory.Exists(root))
+				{
+					continue;
+				}
+
+				var direct = Path.Combine(root, "llama-server.exe");
+				if (File.Exists(direct))
+				{
+					found.Add(direct);
+				}
+
+				foreach (var sub in Directory.EnumerateDirectories(root))
+				{
+					var candidate = Path.Combine(sub, "llama-server.exe");
+					if (File.Exists(candidate))
+					{
+						found.Add(candidate);
+					}
+
+					// Updater backups sit one level deeper (llama-server-backup\<stamp>\).
+					if (Path.GetFileName(sub).Contains("backup", StringComparison.OrdinalIgnoreCase))
+					{
+						foreach (var stamped in Directory.EnumerateDirectories(sub).OrderByDescending(d => d, StringComparer.OrdinalIgnoreCase))
+						{
+							var backup = Path.Combine(stamped, "llama-server.exe");
+							if (File.Exists(backup))
+							{
+								found.Add(backup);
+							}
+						}
+					}
+				}
+			}
+			catch
+			{
+				// Unreadable folder: skip it.
+			}
+		}
+
+		return found
+			.Distinct(StringComparer.OrdinalIgnoreCase)
+			.OrderBy(p => p.Contains("backup", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+			.ToList();
 	}
 
 	private IReadOnlyList<InstalledLocalServerCandidate> GetInstalledLocalServerCandidates()
@@ -6471,6 +6604,9 @@ public sealed class FluxMuxRuntimeService
 		{
 			list.Insert(0, configuredPath);
 		}
+		// Self-repair after a folder change: look one level below the configured and standard
+		// folders too, backups last (see NearbyLlamaServerCandidates).
+		list.AddRange(NearbyLlamaServerCandidates(configuredPath, Path.Combine(path, "llama-server")));
 		string[] array = new string[1] { "llama-server.exe" };
 		foreach (string arguments in array)
 		{
@@ -7980,7 +8116,7 @@ public sealed class FluxMuxRuntimeService
 		int batchSize = SnapBatchSize(256.0 * Math.Sqrt(Math.Max(1.0, nvidia ? gpuGb : 4.0)) * Math.Clamp(headroom / 2.0, 0.55, 1.85));
 		// Micro-batch = batch, capped (see LocalPrioritySettingsCalculator.DeriveUbatch for the
 		// measurements); batch ÷ 4 left prompt reading ~30% slower.
-		int val = Math.Min(batchSize, LocalPrioritySettingsCalculator.MaxUbatch);
+		int val = Math.Min(batchSize, LocalPrioritySettingsCalculator.UbatchCapForGpu(gpuGb));
 		int maxTokens = SnapTokenOption((int)Math.Clamp((double)contextSafeDefault / 6.0, 4096.0, 16384.0));
 		double systemRamGb = (double)GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 1073741824.0;
 		string cacheRam = ((systemRamGb >= 24.0 || headroom >= Math.Max(6.0, fileGb * 0.4)) ? "Unlimited" : SnapCacheRamMb((int)Math.Round(Math.Max(4096.0, headroom * 1024.0 * 0.55))));

@@ -53,6 +53,13 @@ public sealed class EssenceReasserter
     /// Builds the essence re-injection block for a local endpoint (to prepend to the system
     /// prompt for this turn). Returns an empty string when there is no essence.
     /// </summary>
+    /// <summary>Bounded essence for a request trimmed by Hail Mary (see <see cref="Essence.ToRescueBlock"/>).</summary>
+    public string BuildRescueBlock()
+    {
+        var essence = _essence.Load();
+        return essence.HasContent() ? essence.ToRescueBlock() : string.Empty;
+    }
+
     public string BuildLocalInjectionBlock()
     {
         var essence = _essence.Load();

@@ -374,6 +374,36 @@ public sealed class Essence
 
     /// <summary>A short, terse block for system-prompt re-injection (much smaller than
     /// <see cref="ToClineSummary"/>): only the current snapshot + the most recent pivot.</summary>
+    /// <summary>
+    /// The block carried into a request after a Hail Mary middle-cut: the terse reinjection
+    /// block plus the most recent decisions and dead ends — the "meaning" the dropped turns held
+    /// that the terse block leaves out. Hard-capped at <paramref name="maxChars"/>, because it is
+    /// added to a request that was just trimmed to fit the context window; the full
+    /// <see cref="ToClineSummary"/> can run to tens of KB and would push it straight back over.
+    /// </summary>
+    public string ToRescueBlock(int maxChars = 3_000)
+    {
+        var sb = new System.Text.StringBuilder(ToReinjectionBlock());
+        void Section(string title, List<string> items)
+        {
+            if (items.Count == 0)
+            {
+                return;
+            }
+
+            sb.AppendLine(title);
+            foreach (var item in items.Skip(Math.Max(0, items.Count - 8)))
+            {
+                sb.AppendLine("- " + TruncateForReinjection(item, 240));
+            }
+        }
+
+        Section("Key decisions:", Decisions);
+        Section("Dead ends (do not retry):", DeadEnds);
+        var text = sb.ToString().TrimEnd();
+        return text.Length > maxChars ? text[..maxChars].TrimEnd() + "…" : text;
+    }
+
     public string ToReinjectionBlock()
     {
         var sb = new System.Text.StringBuilder();

@@ -105,7 +105,7 @@ public sealed class LocalPrioritySettingsCalculatorTests
                 ? LocalPrioritySettingsCalculator.ScaleWizardBatchUp(Advice.BatchSize)
                 : Advice.BatchSize;
         Assert.Equal(expectedBatch, settings["LocalBatchSize"]);
-        Assert.Equal(LocalPrioritySettingsCalculator.DeriveUbatch(expectedBatch), settings["LocalUbatchSize"]);
+        Assert.Equal(LocalPrioritySettingsCalculator.DeriveUbatch(expectedBatch, Advice.GpuTotalGb), settings["LocalUbatchSize"]);
     }
 
     [Fact]

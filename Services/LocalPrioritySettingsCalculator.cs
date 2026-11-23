@@ -215,7 +215,7 @@ public static class LocalPrioritySettingsCalculator
         var batch = context == 0
             ? SnapWizardBatchDown(advice.BatchSize)
             : speed == 0 && context > 1 ? ScaleWizardBatchUp(advice.BatchSize) : advice.BatchSize;
-        var ubatch = DeriveUbatch(batch);
+        var ubatch = DeriveUbatch(batch, advice.GpuTotalGb);
         var maxTokens = KeepHigherMaxTokens(
             reply == 0 ? 16384
             : reply == 1 ? 8192
@@ -741,16 +741,30 @@ public static class LocalPrioritySettingsCalculator
     /// speed or reply quality. Cards much smaller than 32 GB are untested; Fit VRAM still
     /// shrinks Context if the larger compute buffer does not fit.
     /// </summary>
-    public static string DeriveUbatch(string batch)
+    public static string DeriveUbatch(string batch, double gpuTotalGb = 0)
     {
+        var cap = UbatchCapForGpu(gpuTotalGb);
         if (!int.TryParse(batch, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
         {
-            return "512";
+            return Math.Min(512, cap).ToString(CultureInfo.InvariantCulture);
         }
 
-        return Math.Clamp(parsed, 64, MaxUbatch).ToString(CultureInfo.InvariantCulture);
+        return Math.Clamp(parsed, 64, cap).ToString(CultureInfo.InvariantCulture);
     }
 
     /// <summary>Largest micro-batch AutoTune proposes; 2048 measured no faster than 1024.</summary>
     public const int MaxUbatch = 1024;
+
+    /// <summary>
+    /// Micro-batch ceiling by GPU size. 1024 was measured only on a 32 GB card (+0.7 GiB VRAM
+    /// over 256); smaller cards have less room for the larger compute buffer, so the rule steps
+    /// down until Speed AutoTune measures that machine: ≥ 24 GB → 1024, ≥ 12 GB → 512, else 256
+    /// (the old batch ÷ 4 value for the usual batch 1024). Unknown VRAM (0) is treated as small.
+    /// </summary>
+    public static int UbatchCapForGpu(double gpuTotalGb) => gpuTotalGb switch
+    {
+        >= 24 => MaxUbatch,
+        >= 12 => 512,
+        _ => 256,
+    };
 }

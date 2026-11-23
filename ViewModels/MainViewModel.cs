@@ -22760,11 +22760,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         var trials = BuildLocalMeasuredAutoTuneTrials();
-        Dictionary<string, string>? winner = null;
-        string? winnerLabel = null;
-        var winnerTps = 0d;
-        double? settingsPassTps = null;
-        Dictionary<string, string>? settingsPass = null;
+        var results = new List<TuneTrialResult>();
         // The trial whose settings llama-server was last loaded with. Each trial has to be
         // written to the profile so the reload can read it, so without a final step the running
         // model would be the LAST trial, not the winner.
@@ -22832,20 +22828,22 @@ public partial class MainViewModel : ViewModelBase
                     continue;
                 }
 
-                notes.Add(trial.Label + ": " + tps.ToString("0.#", CultureInfo.InvariantCulture) + " tok/s");
                 ReportTuneProgress("Trial " + trialNumber + ": " + timing.Details);
-                if (trial.Label.Equals(UsualAutoTuneTrialLabel, StringComparison.OrdinalIgnoreCase))
-                {
-                    settingsPassTps = tps;
-                    settingsPass = new Dictionary<string, string>(trial.Settings, StringComparer.OrdinalIgnoreCase);
-                }
 
-                if (tps > winnerTps)
-                {
-                    winnerTps = tps;
-                    winnerLabel = trial.Label;
-                    winner = new Dictionary<string, string>(trial.Settings, StringComparer.OrdinalIgnoreCase);
-                }
+                // Prompt reading is what Micro-batch changes and what a long Client-app turn
+                // waits on; measured on every trial so each is compared like for like.
+                ReportTuneProgress("Trial " + trialNumber + ": timing prompt reading.");
+                LocalQuickAutoTuneInfoText = "Trial " + trialNumber + " of " + trials.Count + ": measuring prompt reading.";
+                await FlushUiAsync();
+                var reading = await _runtimeService.TimeLocalPromptReadingAsync(
+                    (int)OrchestratorPort,
+                    FirstNonEmpty(SelectedLocalProfile, SelectedSelection1LocalProfile),
+                    cancellationToken);
+                double? promptTps = reading.IsSuccess ? reading.TokensPerSecond : null;
+                ReportTuneProgress("Trial " + trialNumber + ": " + reading.Details);
+                notes.Add(trial.Label + ": " + tps.ToString("0.#", CultureInfo.InvariantCulture) + " tok/s"
+                    + (promptTps is double p ? ", prompt " + p.ToString("0", CultureInfo.InvariantCulture) + " tok/s" : string.Empty));
+                results.Add(new TuneTrialResult(trial, tps, promptTps));
             }
         }
         catch (OperationCanceledException)
@@ -22856,16 +22854,27 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        // A trial must beat the usual settings by a clear margin to replace them; otherwise
-        // run-to-run noise (about ±1% here) would pick a "winner" at random.
-        if (winner is not null
-            && settingsPass is not null
-            && settingsPassTps is double baseTps
-            && !IsMeaningfulSpeedGain(baseTps, winnerTps))
+        // A trial must beat the usual settings by a clear margin to replace them (run-to-run
+        // noise was about ±1%); see CombineTuneResults. Without a measured baseline, fall back
+        // to the fastest generation trial.
+        var combined = CombineTuneResults(results);
+        Dictionary<string, string>? winner;
+        string winnerLabel;
+        string combinedSummary;
+        if (combined is { } c)
         {
-            winner = settingsPass;
-            winnerLabel = UsualAutoTuneTrialLabel;
-            winnerTps = baseTps;
+            winner = c.Settings;
+            winnerLabel = c.Chosen.Count > 0 ? string.Join(" + ", c.Chosen) : UsualAutoTuneTrialLabel;
+            combinedSummary = BuildCombinedTuneSummary(c.Baseline, c.BestGeneration, c.BestPrompt);
+        }
+        else
+        {
+            var fastest = results.OrderByDescending(r => r.GenerationTps).FirstOrDefault();
+            winner = fastest is null ? null : new Dictionary<string, string>(fastest.Trial.Settings, StringComparer.OrdinalIgnoreCase);
+            winnerLabel = fastest?.Trial.Label ?? UsualAutoTuneTrialLabel;
+            combinedSummary = fastest is null
+                ? string.Empty
+                : BuildLocalTuneResultSummary(fastest.GenerationTps, fastest.Trial.Label, null, extraTrialsRan: trials.Count > 1);
         }
 
         if (winner is not null)
@@ -22900,7 +22909,7 @@ public partial class MainViewModel : ViewModelBase
                 }
             }
 
-            var summary = BuildLocalTuneResultSummary(winnerTps, winnerLabel, settingsPassTps, extraTrialsRan: trials.Count > 1)
+            var summary = combinedSummary
                 + (runningWinner
                     ? " The model is running that mix now."
                     : " The model could not be reloaded with that mix; click Launch after saving to run it.");
@@ -22926,8 +22935,28 @@ public partial class MainViewModel : ViewModelBase
             new(
                 UsualAutoTuneTrialLabel,
                 new Dictionary<string, string>(baseline, StringComparer.OrdinalIgnoreCase),
-                "No extra change: times the usual AutoTune mix already in the form.")
+                "No extra change: times the usual AutoTune mix already in the form.",
+                TuneTrialKind.Baseline)
         };
+
+        // Micro-batch: measured per machine instead of trusting the fixed VRAM rule (which was
+        // measured on one 32 GB card only). A size that does not fit simply fails to load and is
+        // skipped. Batch is raised to at least the micro-batch, since llama-server needs b ≥ ub.
+        var currentUbatch = ParseInt(baseline.GetValueOrDefault("LocalUbatchSize"), 0);
+        var currentBatch = ParseInt(baseline.GetValueOrDefault("LocalBatchSize"), 0);
+        foreach (var ubatch in MicroBatchTrialValues(currentUbatch))
+        {
+            var extra = new Dictionary<string, string>(baseline, StringComparer.OrdinalIgnoreCase)
+            {
+                ["LocalUbatchSize"] = ubatch.ToString(CultureInfo.InvariantCulture),
+                ["LocalBatchSize"] = Math.Max(currentBatch, ubatch).ToString(CultureInfo.InvariantCulture)
+            };
+            trials.Add(new(
+                "Micro-batch " + ubatch,
+                extra,
+                "Testing Micro-batch " + ubatch + " (prompt tokens read per GPU step), was " + (currentUbatch > 0 ? currentUbatch.ToString(CultureInfo.InvariantCulture) : "unset") + ".",
+                TuneTrialKind.PromptReading));
+        }
 
         // No Batch-size trial. Trials are scored by generation speed, which batch size does not
         // affect (~131 tok/s at every batch/micro-batch measured), and with micro-batch = batch
@@ -22980,10 +23009,14 @@ public partial class MainViewModel : ViewModelBase
             }
         }
 
-        // Each trial reloads the model (~15 s here), so keep the run short: the usual settings,
-        // the batch trial, and up to two draft lengths.
-        return trials.Take(4).ToList();
+        // Each trial reloads the model (~15 s on a fast PC), so keep the run bounded: the usual
+        // settings, up to two Micro-batch sizes and up to two draft lengths.
+        return trials.Take(5).ToList();
     }
+
+    /// <summary>Micro-batch sizes to try: 512 and 1024, minus the current value.</summary>
+    internal static IReadOnlyList<int> MicroBatchTrialValues(int currentUbatch)
+        => new[] { 512, LocalPrioritySettingsCalculator.MaxUbatch }.Where(value => value != currentUbatch).ToList();
 
     /// <summary>
     /// Copies the validation stamp and warning from <paramref name="live"/> onto
@@ -23160,7 +23193,100 @@ public partial class MainViewModel : ViewModelBase
             : ((int)Math.Round(seconds)).ToString(CultureInfo.InvariantCulture) + " seconds";
     }
 
-    private sealed record LocalMeasuredTuneTrial(string Label, Dictionary<string, string> Settings, string SettingUnderTest);
+    /// <summary>What a Speed AutoTune trial is judged on.</summary>
+    internal enum TuneTrialKind
+    {
+        /// <summary>The settings already in the form; every other trial is compared with it.</summary>
+        Baseline,
+
+        /// <summary>Judged on generation speed (draft length, speculative method).</summary>
+        Generation,
+
+        /// <summary>Judged on prompt-reading speed, and must not slow generation (Micro-batch).</summary>
+        PromptReading,
+    }
+
+    internal sealed record LocalMeasuredTuneTrial(
+        string Label,
+        Dictionary<string, string> Settings,
+        string SettingUnderTest,
+        TuneTrialKind Kind = TuneTrialKind.Generation);
+
+    /// <summary>One measured trial: generation and prompt-reading speed in tokens/s.</summary>
+    internal sealed record TuneTrialResult(LocalMeasuredTuneTrial Trial, double GenerationTps, double? PromptTps);
+
+    /// <summary>
+    /// Picks the Speed AutoTune result from measured trials. The best Generation trial (≥3%
+    /// faster generation than the baseline) and the best PromptReading trial (≥3% faster prompt
+    /// reading, generation no more than 3% slower) are combined onto the baseline: draft length
+    /// and Micro-batch act on different stages, so each is judged on its own stage. With no
+    /// clear gain the baseline is kept. Returns null when the baseline itself was not measured.
+    /// </summary>
+    internal static (Dictionary<string, string> Settings, List<string> Chosen, TuneTrialResult Baseline, TuneTrialResult? BestGeneration, TuneTrialResult? BestPrompt)?
+        CombineTuneResults(IReadOnlyList<TuneTrialResult> results)
+    {
+        var baseline = results.FirstOrDefault(r => r.Trial.Kind == TuneTrialKind.Baseline);
+        if (baseline is null)
+        {
+            return null;
+        }
+
+        var bestGeneration = results
+            .Where(r => r.Trial.Kind == TuneTrialKind.Generation && IsMeaningfulSpeedGain(baseline.GenerationTps, r.GenerationTps))
+            .OrderByDescending(r => r.GenerationTps)
+            .FirstOrDefault();
+        var bestPrompt = results
+            .Where(r => r.Trial.Kind == TuneTrialKind.PromptReading
+                && baseline.PromptTps is double basePrompt
+                && r.PromptTps is double prompt
+                && IsMeaningfulSpeedGain(basePrompt, prompt)
+                && r.GenerationTps >= baseline.GenerationTps * (1 - MeaningfulSpeedGainFraction))
+            .OrderByDescending(r => r.PromptTps)
+            .FirstOrDefault();
+
+        var settings = new Dictionary<string, string>(baseline.Trial.Settings, StringComparer.OrdinalIgnoreCase);
+        var chosen = new List<string>();
+        foreach (var pick in new[] { bestGeneration, bestPrompt })
+        {
+            if (pick is null)
+            {
+                continue;
+            }
+
+            foreach (var pair in pick.Trial.Settings)
+            {
+                if (!string.Equals(baseline.Trial.Settings.GetValueOrDefault(pair.Key), pair.Value, StringComparison.OrdinalIgnoreCase))
+                {
+                    settings[pair.Key] = pair.Value;
+                }
+            }
+
+            chosen.Add(pick.Trial.Label);
+        }
+
+        return (settings, chosen, baseline, bestGeneration, bestPrompt);
+    }
+
+    /// <summary>Plain summary of a combined Speed AutoTune result.</summary>
+    internal static string BuildCombinedTuneSummary(TuneTrialResult baseline, TuneTrialResult? bestGeneration, TuneTrialResult? bestPrompt)
+    {
+        static string Rate(double value) => value.ToString("#,0.#", CultureInfo.InvariantCulture) + " tok/s";
+        var parts = new List<string>
+        {
+            bestGeneration is null
+                ? "Generation: no trial was clearly faster than " + Rate(baseline.GenerationTps) + "."
+                : "Generation: " + Rate(baseline.GenerationTps) + " → " + Rate(bestGeneration.GenerationTps) + " with " + bestGeneration.Trial.Label + ".",
+        };
+        if (baseline.PromptTps is double basePrompt)
+        {
+            parts.Add(bestPrompt?.PromptTps is double prompt
+                ? "Prompt reading: " + Rate(basePrompt) + " → " + Rate(prompt) + " with " + bestPrompt.Trial.Label + "."
+                : "Prompt reading: no trial was clearly faster than " + Rate(basePrompt) + ".");
+        }
+
+        parts.Add("**Save profile** keeps these settings; **Revert changes** puts back the ones you had before AutoTune (Launch again to run them). Max tokens, temperature, reasoning, and chat format you already set were left alone.");
+        return string.Join(" ", parts);
+    }
 
     private void MoveSelectedLocalPriority(int delta)
     {

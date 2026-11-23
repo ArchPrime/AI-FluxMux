@@ -1125,6 +1125,22 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     if (hailMary.MiddleCutDropped > 0 || hailMary.ImagesStripped > 0)
                     {
                         Log("hail-mary (" + hailStop + (hailStripImages ? ", strip-img" : "") + "): " + hailMary.DiagnosticsLine);
+                        if (hailMary.MiddleCutDropped > 0)
+                        {
+                            // Carry the dropped turns' meaning forward. The middle-cut keeps only
+                            // the system prompt, the last real user task and the active tool pair,
+                            // so goal changes, decisions and dead ends recorded in the essence log
+                            // would otherwise be lost — for every Client app, not just Cline (whose
+                            // rescue path writes Cline's own compaction file instead).
+                            var essenceBlock = EssenceReasserter?.BuildRescueBlock();
+                            var newestUser = payload["messages"] is JsonArray hailMessages ? LastUserMessage(hailMessages) : null;
+                            if (!string.IsNullOrWhiteSpace(essenceBlock) && newestUser is not null)
+                            {
+                                AppendTextToMessage(newestUser, "\n\n" + HailMaryEssenceHeader + "\n" + essenceBlock);
+                                Log("hail-mary: carried the preserved session essence (" + essenceBlock.Length + " chars) into the trimmed request");
+                            }
+                        }
+
                         if (hailMary.MiddleCutStillOver)
                         {
                             Log("hail-mary: still over after trimming to the protected floor — the turn itself is too large to fit");
@@ -4236,6 +4252,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
         return result;
     }
+
+    /// <summary>Marks the essence added after a Hail Mary middle-cut.</summary>
+    internal const string HailMaryEssenceHeader = "[AI-FluxMux: earlier turns were removed to fit the context window; this is what they established — background, not part of the user's message]";
 
     /// <summary>Marks the injected text so the model does not read it as the person's words.</summary>
     internal const string VibeBlockHeader = "[AI-FluxMux session note — background, not part of the user's message]";

@@ -95,15 +95,18 @@ public sealed class AutoTuneGenerationSpeedTests
     }
 
     [Theory]
-    [InlineData("256", "256")]
-    [InlineData("512", "512")]
-    [InlineData("1024", "1024")]   // was 256 (batch ÷ 4): measured ~40% slower prompt reading
-    [InlineData("2048", "1024")]   // capped: 2048 measured no faster than 1024
-    [InlineData("32", "64")]
-    [InlineData("not a number", "512")]
-    public void Micro_batch_follows_batch_up_to_the_cap(string batch, string expected)
+    [InlineData("256", 32, "256")]
+    [InlineData("512", 32, "512")]
+    [InlineData("1024", 32, "1024")]   // 32 GB: was 256 (batch ÷ 4), measured ~40% slower prompt reading
+    [InlineData("2048", 32, "1024")]   // capped: 2048 measured no faster than 1024
+    [InlineData("1024", 16, "512")]    // 12-24 GB: one step down until measured
+    [InlineData("1024", 8, "256")]     // small card: the old value
+    [InlineData("1024", 0, "256")]     // unknown VRAM: treated as small
+    [InlineData("32", 32, "64")]
+    [InlineData("not a number", 32, "512")]
+    public void Micro_batch_follows_batch_up_to_a_vram_based_cap(string batch, double gpuGb, string expected)
     {
-        Assert.Equal(expected, LocalPrioritySettingsCalculator.DeriveUbatch(batch));
+        Assert.Equal(expected, LocalPrioritySettingsCalculator.DeriveUbatch(batch, gpuGb));
     }
 
     [Fact]
