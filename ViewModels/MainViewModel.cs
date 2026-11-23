@@ -10133,7 +10133,14 @@ public partial class MainViewModel : ViewModelBase
             // "Use a smaller context" action.
             var advice = CurrentLocalHardwareAdvice();
             string suggestedTarget = "Auto";
-            if (advice.ModelMaxCtx > 0)
+            // A profile without "Extend into RAM" (YaRN) must not be offered a YaRN target
+            // (512K / 768K / 1M): the old code always did, and accepting it silently turned
+            // YaRN on, which is the opposite of "smaller". For those profiles suggest a smaller
+            // *native* Context instead (the VRAM-safe default, else half the current value),
+            // and hide the button when nothing smaller is left to offer.
+            bool yarnProfile = LocalVariantExtendContextIntoRam;
+            int nativeSmallerTokens = yarnProfile ? 0 : SuggestSmallerNativeContext((int)LocalVariantContext, advice.ContextSafeDefault);
+            if (yarnProfile && advice.ModelMaxCtx > 0)
             {
                 int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(
                     advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
@@ -10144,9 +10151,12 @@ public partial class MainViewModel : ViewModelBase
                 else suggestedTarget = "Auto";
             }
 
-            var smallerContextLabel = suggestedTarget == "Auto"
-                ? "Use a smaller context"
-                : $"Use {suggestedTarget} context";
+            var smallerContextLabel = !yarnProfile
+                ? $"Use {nativeSmallerTokens / 1024}K context"
+                : suggestedTarget == "Auto"
+                    ? "Use a smaller context"
+                    : $"Use {suggestedTarget} context";
+            bool smallerContextAvailable = yarnProfile || nativeSmallerTokens > 0;
 
             string title;
             string message;
@@ -10191,14 +10201,21 @@ public partial class MainViewModel : ViewModelBase
                 title,
                 message,
                 smallerContextLabel,
-                showSmallerContext: showSmallerContext,
+                showSmallerContext: showSmallerContext && smallerContextAvailable,
                 showStop: true,
                 showWaitLonger: showWaitLonger);
 
             switch (action)
             {
                 case Views.LocalLaunchRecoveryAction.UseSmallerContext:
-                    await ApplySmallerContextAndRelaunchAsync(model, variant, suggestedTarget);
+                    if (yarnProfile)
+                    {
+                        await ApplySmallerContextAndRelaunchAsync(model, variant, suggestedTarget);
+                    }
+                    else
+                    {
+                        await ApplySmallerNativeContextAndRelaunchAsync(model, variant, nativeSmallerTokens);
+                    }
                     break;
                 case Views.LocalLaunchRecoveryAction.RetryAsIs:
                     StatusMessage = "Retrying local launch...";
@@ -10240,8 +10257,52 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
+    /// Smaller native Context to offer after a failed launch of a profile without YaRN.
+    /// Prefers the VRAM-safe default from the hardware advice; if that is not actually
+    /// smaller than what just failed, falls back to half the current Context. Snapped down
+    /// to a 4096-token multiple, floor 4096. Returns 0 when nothing smaller is possible,
+    /// which hides the button rather than offering a "smaller" value that is not.
+    /// </summary>
+    internal static int SuggestSmallerNativeContext(int currentContext, int safeDefault)
+    {
+        const int step = 4096;
+        if (currentContext <= step)
+        {
+            return 0;
+        }
+
+        int target = safeDefault > 0 && safeDefault < currentContext
+            ? safeDefault
+            : currentContext / 2;
+        target = Math.Max(step, target / step * step);
+        return target < currentContext ? target : 0;
+    }
+
+    /// <summary>
+    /// "Use a smaller context" for a profile without YaRN: lowers the native Context only and
+    /// leaves "Extend into RAM" off, then re-launches. Locked variants get the same
+    /// make-a-new-variant guidance as the YaRN path.
+    /// </summary>
+    private async Task ApplySmallerNativeContextAndRelaunchAsync(string model, string variant, int contextTokens)
+    {
+        if (!IsLocalVariantEditable)
+        {
+            StatusMessage = "This profile variant is locked. Make a new variant, then lower its Context to "
+                + contextTokens.ToString("N0") + " in the local model profile editor.";
+            return;
+        }
+
+        LocalVariantContext = contextTokens;
+        SaveLocalVariant();
+        StatusMessage = $"Context set to {contextTokens:N0}. Re-launching local model...";
+        await LaunchLocalRouteAsync("Smaller-context retry", model, variant);
+    }
+
+    /// <summary>
     /// Sets the variant's context to the suggested (smaller) target and re-launches.
     /// If the variant is not editable, directs the user to make a new variant instead.
+    /// Only for profiles that already use "Extend into RAM" (YaRN); profiles without it go
+    /// through <see cref="ApplySmallerNativeContextAndRelaunchAsync"/>.
     /// </summary>
     private async Task ApplySmallerContextAndRelaunchAsync(string model, string variant, string suggestedTarget)
     {

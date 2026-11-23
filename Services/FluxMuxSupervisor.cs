@@ -61,7 +61,6 @@ public sealed class FluxMuxSupervisor : IDisposable
                 ["recommendations"] = BuildRecommendations(scenario, verdict),
                 ["risks"] = BuildRisks(scenario),
                 ["portRules"] = BuildPortRules(scenario),
-                ["lastServed"] = ReadLastServed(),
                 ["updatedUtc"] = DateTime.UtcNow.ToString("o")
             };
             var verdictStr = verdict.ToString().ToLowerInvariant();
@@ -70,6 +69,10 @@ public sealed class FluxMuxSupervisor : IDisposable
                 if (verdictStr != _lastVerdict)
                 {
                     _lastVerdict = verdictStr;
+                    // Read Proxy_Last_Served.json only when the health file is actually written
+                    // (verdict changed). Reading and parsing it on every tick was needless I/O on
+                    // the hot path; the value is consumed only by this write.
+                    health["lastServed"] = ReadLastServed();
                     AtomicWriteAllText(_supervisorHealthPath, health.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
                 }
             }

@@ -10422,13 +10422,41 @@ private List<GpuProcessUse> CollectGpuProcessUses()
 		return CollectWindowsGpuLocalUsageCore();
 	}
 
+	/// <summary>
+	/// <see cref="PerformanceCounterCategory.Exists(string)"/> can block indefinitely when the
+	/// Windows performance-counter subsystem is wedged (seen after driver updates), which froze
+	/// the GPU scan. Bound it to 5 s and treat a timeout as "category missing", so the scan
+	/// falls back to the nvidia-smi rows alone instead of hanging.
+	/// </summary>
+	[System.Runtime.Versioning.SupportedOSPlatform("windows")]
+	private static bool PerformanceCounterCategoryExistsWithTimeout(string category)
+	{
+		var existsTask = Task.Run(() =>
+		{
+			try
+			{
+				return PerformanceCounterCategory.Exists(category);
+			}
+			catch
+			{
+				return false;
+			}
+		});
+		if (!existsTask.Wait(TimeSpan.FromSeconds(5)))
+		{
+			System.Diagnostics.Debug.WriteLine($"[GpuScan] PerformanceCounterCategory.Exists('{category}') timed out after 5s; skipping.");
+			return false;
+		}
+		return existsTask.Result;
+	}
+
 	[System.Runtime.Versioning.SupportedOSPlatform("windows")]
 	private static List<GpuProcessUse> CollectWindowsGpuLocalUsageCore()
 	{
 		List<GpuProcessUse> result = new List<GpuProcessUse>();
 		try
 		{
-			if (!PerformanceCounterCategory.Exists("GPU Process Memory"))
+			if (!PerformanceCounterCategoryExistsWithTimeout("GPU Process Memory"))
 			{
 				return result;
 			}
@@ -10537,7 +10565,7 @@ private List<GpuProcessUse> CollectGpuProcessUses()
 		var result = new Dictionary<string, (long DedicatedBytes, long SharedBytes)>(StringComparer.OrdinalIgnoreCase);
 		try
 		{
-			if (!PerformanceCounterCategory.Exists("GPU Adapter Memory"))
+			if (!PerformanceCounterCategoryExistsWithTimeout("GPU Adapter Memory"))
 			{
 				return result;
 			}
