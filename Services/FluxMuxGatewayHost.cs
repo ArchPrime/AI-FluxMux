@@ -189,6 +189,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// </summary>
     public FluxMux.Avalonia.Services.ContextEngine.EssenceReasserter? EssenceReasserter { get; set; }
 
+    /// <summary>Keeps VIBE_STATE.md / essence.json to the current conversation (null = old global behaviour).</summary>
+    public FluxMux.Avalonia.Services.ContextEngine.VibeConversationScope? VibeScope { get; set; }
+
     /// <summary>
     /// The MCP control plane (update_vibe_state, read_swap_log, git_checkpoint). Injected by the
     /// runtime service; null when not wired up. Handles <c>POST /mcp</c> requests.
@@ -932,6 +935,26 @@ public sealed class FluxMuxGatewayHost : IDisposable
         var turnStart = DateTime.Now;
         int? measuredPromptTokens = null;
         string? forwardPruneSummary = null;
+        // VIBE_STATE bookkeeping for this turn. It used to run twice on some turns (once in the
+        // measured-token path and again in the reinflating-client path), recording everything
+        // twice; this flag makes it once per request.
+        var vibeUpdatedThisTurn = false;
+        if (!isProbeRequest)
+        {
+            // Switch the VIBE_STATE files to this conversation BEFORE reading or writing them, so
+            // one chat's task is never injected into another chat or another Client app.
+            EnsureVibeConversationScope(payload);
+        }
+
+        if (routeKind == "cloud" && !isProbeRequest)
+        {
+            // Cloud turns are part of the same conversation: record them too, so the state is
+            // still current when the chat comes back to a local model. Injection stays local-only
+            // (a cloud model receives the Client app's full history anyway).
+            UpdateVibeStateAfterTurn(payload, model, string.Empty);
+            vibeUpdatedThisTurn = true;
+        }
+
         if (routeKind == "local")
         {
             await PrepareLocalChatPayloadAsync(payload, state).ConfigureAwait(false);
@@ -989,6 +1012,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     // survives the context reset. Never throws; no-op when the reasserter is not
                     // wired up or there is no essence.
                     UpdateVibeStateAfterTurn(payload, model, Str(state, "local_variant"));
+                    vibeUpdatedThisTurn = true;
                     ObserveEssenceEdge(payload, state, measuredPromptTokens.Value, hotContext);
                 }
             }
@@ -1000,7 +1024,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // reasserter is not wired up or there is no essence.
             if (!isProbeRequest && GetUserClientReinflatesContext?.Invoke() == true)
             {
-                UpdateVibeStateAfterTurn(payload, model, Str(state, "local_variant"));
+                if (!vibeUpdatedThisTurn)
+                {
+                    UpdateVibeStateAfterTurn(payload, model, Str(state, "local_variant"));
+                    vibeUpdatedThisTurn = true;
+                }
+
                 ObserveClineEssenceEdge(payload);
             }
 
@@ -4087,36 +4116,134 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return;
         }
 
-        // Find the first system/developer message and append the block to it. If none exists,
-        // insert a new system message at the front (prefix-safe: it becomes the first message).
-        for (var i = 0; i < messages.Count; i++)
+        // Append the block to the END of the newest user message — never to the system prompt.
+        //
+        // The block's State line changes almost every turn (it is read from the latest reply);
+        // measured: the injected text changed on 359 of 399 consecutive turns. Appended to the
+        // system prompt — the very first tokens — that rewrote the start of every request, so
+        // llama-server's prefix cache could reuse almost nothing and re-read the whole chat each
+        // turn (cache similarity ~0.79, 8-11 s per 25K-token Cline turn). The Client app resends
+        // earlier turns WITHOUT the block, so at the tail only the newest turn differs and the
+        // cached prefix before it is reused. A separate system message is not used here because
+        // Qwen-style chat templates reject a system message after the first position.
+        var target = LastUserMessage(messages);
+        if (target is null)
         {
-            if (messages[i] is not JsonObject msg)
+            return;
+        }
+
+        AppendTextToMessage(target, "\n\n" + VibeBlockHeader + "\n" + block);
+        // "vibe-state-dbg:" prefix: stays in the log file, not forwarded to the live UI (per-turn noise).
+        Log("vibe-state-dbg: appended " + block.Length + " chars to the newest user message (blockHash=" + StableHash(block) + ")");
+    }
+
+    /// <summary>
+    /// A chat with at most this many human messages whose opening message differs from the
+    /// current conversation's is treated as a NEW conversation. A longer chat whose opening
+    /// changed is the same conversation after the Client app compacted it (the opening is then a
+    /// summary), unless that opening belongs to a conversation seen before.
+    /// </summary>
+    internal const int NewConversationMaxUserMessages = 2;
+
+    /// <summary>
+    /// Points the VIBE_STATE files at the conversation this request belongs to. Key: the Cline
+    /// session id when the request matches one (stable across Cline's own compaction), else a
+    /// hash of the first human-written message. Never throws.
+    /// </summary>
+    private void EnsureVibeConversationScope(JsonObject payload)
+    {
+        var scope = VibeScope;
+        if (scope is null || payload["messages"] is not JsonArray messages || messages.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            string? key = null;
+            if (GetUserClientReinflatesContext?.Invoke() == true)
             {
-                continue;
+                var sessionId = ClineCompactionWriter.MatchSessionIdForRequest(messages);
+                if (!string.IsNullOrEmpty(sessionId))
+                {
+                    key = "cline-" + sessionId;
+                }
             }
 
-            var role = Str(msg, "role").Trim().ToLowerInvariant();
-            if (role is "system" or "developer")
+            if (key is null)
             {
-                var existing = MessageText(msg);
-                msg["content"] = existing.Length > 0 ? existing + "\n\n" + block : block;
-                // DIAG (temporary): hash the injected block so we can see from the log whether the
-                // VIBE_STATE block is changing between turns. A changing block changes the system
-                // prompt, which breaks the KV cache prefix and forces a large re-prefill every turn.
-                // If this hash is stable across turns, the VIBE_STATE block is NOT the cause of the
-                // repeated prefilling. Remove this once the prefill behavior is understood.
-                // NOTE: uses the "vibe-state-dbg:" prefix so it stays in the log file but is NOT
-                // forwarded to the live UI terminal (this fires every turn and would be noise).
-                Log("vibe-state-dbg: re-injected " + block.Length + " chars into the system prompt (blockHash=" + StableHash(block) + ")");
-                return;
+                var humanMessages = HumanUserTexts(messages);
+                if (humanMessages.Count == 0)
+                {
+                    return; // nothing a person wrote yet: keep the current conversation
+                }
+
+                key = FluxMux.Avalonia.Services.ContextEngine.VibeConversationScope.KeyFor("chat-", humanMessages[0]);
+                var isNewChat = humanMessages.Count <= NewConversationMaxUserMessages;
+                if (!isNewChat && scope.CurrentKey is not null && !scope.HasArchive(key))
+                {
+                    return; // long chat with an unfamiliar opening = this chat after compaction
+                }
+            }
+
+            if (scope.Ensure(key))
+            {
+                Log("vibe-state: switched VIBE_STATE to conversation " + key + " (the previous conversation's state was archived)");
+            }
+        }
+        catch
+        {
+            // Scoping must never break a turn.
+        }
+    }
+
+    private static List<string> HumanUserTexts(JsonArray messages)
+    {
+        var result = new List<string>();
+        foreach (var node in messages)
+        {
+            if (node is JsonObject msg && Str(msg, "role").Trim().Equals("user", StringComparison.OrdinalIgnoreCase))
+            {
+                var text = FluxMux.Avalonia.Services.ContextEngine.ConversationText.HumanPart(MessageText(msg));
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    result.Add(text);
+                }
             }
         }
 
-        // No system message present: insert one at the front so the block is prefix-stable.
-        messages.Insert(0, new JsonObject { ["role"] = "system", ["content"] = block });
-        // "vibe-state-dbg:" prefix: stays in the log file, not forwarded to the live UI (per-turn noise).
-        Log("vibe-state-dbg: inserted a system message with " + block.Length + " chars at the front (blockHash=" + StableHash(block) + ")");
+        return result;
+    }
+
+    /// <summary>Marks the injected text so the model does not read it as the person's words.</summary>
+    internal const string VibeBlockHeader = "[AI-FluxMux session note — background, not part of the user's message]";
+
+    private static JsonObject? LastUserMessage(JsonArray messages)
+    {
+        for (var i = messages.Count - 1; i >= 0; i--)
+        {
+            if (messages[i] is JsonObject msg && Str(msg, "role").Trim().Equals("user", StringComparison.OrdinalIgnoreCase))
+            {
+                return msg;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Appends text to a message whose content is a string or an array of parts.</summary>
+    internal static void AppendTextToMessage(JsonObject message, string text)
+    {
+        if (message["content"] is JsonArray parts)
+        {
+            parts.Add(new JsonObject { ["type"] = "text", ["text"] = text });
+            return;
+        }
+
+        var existing = message["content"]?.GetValueKind() == System.Text.Json.JsonValueKind.String
+            ? message["content"]!.GetValue<string>()
+            : MessageText(message);
+        message["content"] = existing + text;
     }
 
     /// <summary>
@@ -4192,7 +4319,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 var role = Str(msg, "role").Trim().ToLowerInvariant();
                 if (role == "user")
                 {
-                    var text = MessageText(msg);
+                    // Only what a person wrote: Client apps also send tool results, environment
+                    // dumps and resume/summarise requests as "user" (see ConversationText).
+                    var text = FluxMux.Avalonia.Services.ContextEngine.ConversationText.HumanPart(MessageText(msg));
                     if (string.IsNullOrEmpty(firstUser) && !string.IsNullOrWhiteSpace(text))
                     {
                         firstUser = text;

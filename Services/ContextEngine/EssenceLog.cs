@@ -107,7 +107,10 @@ public sealed class EssenceLog
     /// Bounded (oldest dropped first). Never throws.</summary>
     public void RecordEvolution(string from, string to, string why)
     {
-        if (string.IsNullOrWhiteSpace(to))
+        // A "change" to the same goal is not a change. 55 of 64 saved entries were exactly that
+        // (the same task label recorded as a pivot on every turn of a long agent loop).
+        if (string.IsNullOrWhiteSpace(to)
+            || ConversationText.Normalize(Truncate(from)) == ConversationText.Normalize(Truncate(to)))
         {
             return;
         }
@@ -137,6 +140,14 @@ public sealed class EssenceLog
         }
 
         var e = Load();
+        // Client apps resend the whole chat every turn, so the same user message reaches this
+        // point again and again; one was stored 30 times. Keep each message once.
+        var normalized = ConversationText.Normalize(Truncate(verbatim));
+        if (e.IntentShifts.Exists(shift => ConversationText.Normalize(shift.Verbatim) == normalized))
+        {
+            return;
+        }
+
         e.IntentShifts.Add(new EssenceIntentShift(
             Truncate(verbatim), Truncate(priorTask), DateTimeOffset.UtcNow));
         while (e.IntentShifts.Count > MaxIntentShifts)

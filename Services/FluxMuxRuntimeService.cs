@@ -939,6 +939,7 @@ public sealed class FluxMuxRuntimeService
 			new FluxMux.Avalonia.Services.ContextEngine.FileSystemContextIo(),
 			essenceLogPath);
 		host.EssenceLog = essenceLog;
+		host.VibeScope = new FluxMux.Avalonia.Services.ContextEngine.VibeConversationScope(_vibeStatePath, essenceLogPath);
 		host.EssenceReasserter = new FluxMux.Avalonia.Services.ContextEngine.EssenceReasserter(essenceLog);
 
 		var mcpPlane = new FluxMux.Avalonia.Services.ContextEngine.McpControlPlane(
