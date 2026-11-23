@@ -4161,7 +4161,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
         try
         {
             string? key = null;
-            if (GetUserClientReinflatesContext?.Invoke() == true)
+            // Use the Cline session id only when the request carries message ids it can really be
+            // matched on. Without ids MatchSessionIdForRequest falls back to the most recently
+            // written Cline session — whichever chat the request came from — so a Harness or other
+            // OpenAI-format chat would have been filed under the latest Cline task. Everything
+            // else is keyed by its first human message, which works for every Client app.
+            if (GetUserClientReinflatesContext?.Invoke() == true && RequestCarriesMessageIds(messages))
             {
                 var sessionId = ClineCompactionWriter.MatchSessionIdForRequest(messages);
                 if (!string.IsNullOrEmpty(sessionId))
@@ -4195,6 +4200,23 @@ public sealed class FluxMuxGatewayHost : IDisposable
         {
             // Scoping must never break a turn.
         }
+    }
+
+    /// <summary>True when any of the last three messages has an "id" (as Cline's stored messages do).</summary>
+    internal static bool RequestCarriesMessageIds(JsonArray messages)
+    {
+        for (var i = Math.Max(0, messages.Count - 3); i < messages.Count; i++)
+        {
+            if (messages[i] is JsonObject msg
+                && msg["id"] is JsonValue id
+                && id.TryGetValue<string>(out var text)
+                && !string.IsNullOrWhiteSpace(text))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static List<string> HumanUserTexts(JsonArray messages)

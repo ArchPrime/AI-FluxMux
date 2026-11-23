@@ -103,6 +103,22 @@ public sealed class VibeStateFidelityTests
     }
 
     [Fact]
+    public void Plain_openai_messages_are_not_matched_to_a_cline_session()
+    {
+        var plain = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "s" },
+            new JsonObject { ["role"] = "user", ["content"] = "hi" }
+        };
+        var withIds = new JsonArray
+        {
+            new JsonObject { ["role"] = "user", ["content"] = "hi", ["id"] = "msg_123" }
+        };
+        Assert.False(FluxMuxGatewayHost.RequestCarriesMessageIds(plain));
+        Assert.True(FluxMuxGatewayHost.RequestCarriesMessageIds(withIds));
+    }
+
+    [Fact]
     public void Block_is_appended_to_string_and_multipart_messages()
     {
         var text = new JsonObject { ["role"] = "user", ["content"] = "hello" };
