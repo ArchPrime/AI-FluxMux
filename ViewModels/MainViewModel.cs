@@ -302,6 +302,8 @@ public partial class MainViewModel : ViewModelBase
     private string _localLaunchPhase = "Loading model";
     private int _localLaunchPhaseVersion;
     private readonly List<string> _diagnosticEntries = [];
+    private readonly object _diagnosticGate = new();
+    private bool _diagnosticRefreshQueued;
     private string _lastDiagnosticPayload = string.Empty;
     private bool _isHydratingCloudVariantForm;
     private bool _isApplyingCloudPriorityWizard;
@@ -7033,23 +7035,51 @@ public partial class MainViewModel : ViewModelBase
 
         var sourceName = FirstNonEmpty(entity, InferDiagnosticEntity(category, normalized));
         var payload = category + "|" + sourceName + "|" + normalized;
-        if (payload.Equals(_lastDiagnosticPayload, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        _lastDiagnosticPayload = payload;
         var indented = normalized
             .Replace("\r\n", "\n", StringComparison.Ordinal)
             .Replace("\n", Environment.NewLine + "    ", StringComparison.Ordinal);
         var source = string.IsNullOrWhiteSpace(sourceName) ? string.Empty : " [" + sourceName + "]";
-        _diagnosticEntries.Add($"[{DateTime.Now:HH:mm:ss}] {category,-6}{source} {indented}");
-        if (_diagnosticEntries.Count > 300)
+        var line = $"[{DateTime.Now:HH:mm:ss}] {category,-6}{source} {indented}";
+
+        lock (_diagnosticGate)
         {
-            _diagnosticEntries.RemoveRange(0, _diagnosticEntries.Count - 300);
+            if (payload.Equals(_lastDiagnosticPayload, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _lastDiagnosticPayload = payload;
+            _diagnosticEntries.Add(line);
+            if (_diagnosticEntries.Count > 300)
+            {
+                _diagnosticEntries.RemoveRange(0, _diagnosticEntries.Count - 300);
+            }
+
+            // Coalesce: rebuilding the terminal text joins up to 300 lines and makes the view
+            // redraw (and scroll), and this ran on EVERY log line — per gateway event during a
+            // chat. Now entries are added at once and one rebuild is queued on the UI thread;
+            // everything that arrives before it runs is picked up by that single rebuild.
+            if (_diagnosticRefreshQueued)
+            {
+                return;
+            }
+
+            _diagnosticRefreshQueued = true;
         }
 
-        DiagnosticTerminalText = string.Join(Environment.NewLine, _diagnosticEntries);
+        Dispatcher.UIThread.Post(FlushDiagnosticTerminalText, DispatcherPriority.Background);
+    }
+
+    private void FlushDiagnosticTerminalText()
+    {
+        string text;
+        lock (_diagnosticGate)
+        {
+            _diagnosticRefreshQueued = false;
+            text = string.Join(Environment.NewLine, _diagnosticEntries);
+        }
+
+        DiagnosticTerminalText = text;
     }
 
     private static string InferDiagnosticEntity(string category, string message)
@@ -11745,8 +11775,12 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand]
     private void ClearDiagnosticTerminal()
     {
-        _diagnosticEntries.Clear();
-        _lastDiagnosticPayload = string.Empty;
+        lock (_diagnosticGate)
+        {
+            _diagnosticEntries.Clear();
+            _lastDiagnosticPayload = string.Empty;
+        }
+
         DiagnosticTerminalText = "Diagnostic log cleared.";
     }
 

@@ -1737,7 +1737,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // (503 retries) the measurement is null, and logging "n/a tokens" is just noise.
             if (measuredPromptTokens is not null)
             {
-                SharedTurnCounter++;
+                // Requests can be handled concurrently; a plain ++ could give two turns one number.
+                Interlocked.Increment(ref SharedTurnCounter);
                 // Only include the forward-prune summary if the client doesn't reinflate the context.
                 // When the client reinflates (e.g. Cline), forward pruning is disabled, so the
                 // summary would be misleading.
