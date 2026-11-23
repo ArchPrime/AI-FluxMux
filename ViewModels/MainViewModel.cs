@@ -8327,11 +8327,11 @@ public partial class MainViewModel : ViewModelBase
                         continue;
                     }
 
-                    // Exclude options that exceed physical hardware limits
-                    if (tokens > physicalCeiling)
-                    {
-                        continue;
-                    }
+                    // Sizes beyond the physical limit stay in the list (red) instead of being
+                    // dropped. Dropping them made a selection silently revert to Auto: the limit
+                    // depends on the KV type, the KV helper can change that type right after a
+                    // large size is picked, and the rebuilt list then no longer held the choice
+                    // (1M "disappeared"). The advisory below says it cannot fit.
 
                     // Compute the actual VRAM/RAM split for this option. The VRAM-resident portion
                     // is capped at the hardware window; the rest overflows to system RAM (slower).
@@ -8502,9 +8502,8 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Builds the "may not fit" advisory for the "How far" options. Returns an empty string when
-    /// all fixed targets should fit, or a short list of the targets that exceed the RAM-bounded
-    /// ceiling.
+    /// Builds the "may not fit" advisory for the selected "How far" option, using this PC's
+    /// RAM-bounded YaRN ceiling.
     /// </summary>
     private string BuildYarnMaxContextAdvisoryText()
     {
@@ -8518,24 +8517,59 @@ public partial class MainViewModel : ViewModelBase
 
             int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(
                 advice, advice.ModelMaxCtx, ComputeEffectiveKvBytesPerToken());
-
-            var risky = new List<string>();
-            if (512 * 1024 > ramBounded) risky.Add("512K");
-            if (768 * 1024 > ramBounded) risky.Add("768K");
-            if (1024 * 1024 > ramBounded) risky.Add("1M");
-
-            if (risky.Count == 0)
-            {
-                return string.Empty;
-            }
-
-            return "⚠ May not fit on this PC: " + string.Join(", ", risky)
-                + ". You can still try them — if the model runs out of memory, AI-FluxMux will offer a smaller context.";
+            return BuildYarnFitAdvisory(LocalVariantYarnMaxContext, advice.ModelMaxCtx, ramBounded, PhysicalYarnCeiling(advice));
         }
         catch
         {
             return string.Empty;
         }
+    }
+
+    /// <summary>
+    /// The advisory for ONE selected YaRN size. It used to list every fixed size that would not
+    /// fit ("May not fit on this PC: 1M") whatever was selected, which read as if the chosen
+    /// Context were always 1M. Now: nothing for Auto (it already picks the largest size that
+    /// fits), nothing when the selected size fits, and otherwise the selected size and roughly
+    /// how much does fit.
+    /// </summary>
+    internal static string BuildYarnFitAdvisory(string? selectedOption, int nativeContext, int ramBoundedContext, int physicalCeiling = int.MaxValue)
+    {
+        if (string.IsNullOrWhiteSpace(selectedOption)
+            || selectedOption.Equals("Auto", StringComparison.OrdinalIgnoreCase)
+            || ramBoundedContext <= 0)
+        {
+            return string.Empty;
+        }
+
+        var target = LocalPrioritySettingsCalculator.YarnTargetFromOption(selectedOption, nativeContext);
+        if (target == int.MaxValue || target <= ramBoundedContext)
+        {
+            return string.Empty;
+        }
+
+        var fitsK = Math.Max(1, ramBoundedContext / 1024).ToString("N0", CultureInfo.InvariantCulture);
+        if (target > physicalCeiling)
+        {
+            return "⚠ " + selectedOption.Trim() + " is larger than this PC's memory can hold — about " + fitsK
+                + "K fits. The model will most likely fail to load; choose a smaller size or Auto.";
+        }
+
+        return "⚠ " + selectedOption.Trim() + " may not fit on this PC — about " + fitsK
+            + "K fits in memory. You can still try it; if the model runs out of memory, AI-FluxMux will offer a smaller context.";
+    }
+
+    /// <summary>
+    /// The largest Context the PC can physically hold: the VRAM window plus what total RAM
+    /// (minus an OS reserve) can store at the current KV type. Same formula as the size list.
+    /// </summary>
+    private int PhysicalYarnCeiling(FluxMuxRuntimeService.LocalHardwareLaunchAdvice advice)
+    {
+        double totalRamGb = advice.TotalRamGb;
+        double physicalAvailableGb = Math.Max(0.0, totalRamGb - Math.Min(4.0, totalRamGb * 0.10));
+        long kvBytesPerToken = Math.Max(1L, ComputeEffectiveKvBytesPerToken());
+        long tokens = Math.Max(advice.ModelMaxCtx, advice.ContextPriorityFirst)
+            + (long)(physicalAvailableGb * 1073741824.0 / kvBytesPerToken);
+        return (int)Math.Min(int.MaxValue, tokens);
     }
 
     /// <summary>Wizard KV cache choices, filtered to what the hardware can actually handle.</summary>
@@ -15104,7 +15138,11 @@ public partial class MainViewModel : ViewModelBase
         UpdateLocalKvCacheWizardInfo();
     }
     partial void OnLocalVariantYarnMaxContextChanged(string value)
-        => AcceptLocalComboChange("LocalYarnMaxContext", value, restored => LocalVariantYarnMaxContext = restored);
+    {
+        AcceptLocalComboChange("LocalYarnMaxContext", value, restored => LocalVariantYarnMaxContext = restored);
+        // The advisory is about the selected size, so it must follow the selection.
+        LocalYarnMaxContextAdvisoryText = BuildYarnMaxContextAdvisoryText();
+    }
     partial void OnSelectedYarnContextOptionChanged(YarnContextOption? value)
     {
         // Sync the short value (not the long display string) when the user picks a new option.
@@ -15269,16 +15307,101 @@ public partial class MainViewModel : ViewModelBase
         UpdateProfileFootprintIndicators();
         if (_isApplyingLocalPriorityWizard)
         {
+            // The wizard is writing these settings from the priority list; follow it, so the
+            // next manual edit is compared with what the wizard left.
+            RememberLocalDetailedSnapshot();
             return;
         }
 
-        var inferred = RankPrioritiesByScore(LocalPriorityNames, ComputeLocalPriorityScores());
-        var orderChanged = inferred.Count > 0
-            && !LocalPriorityOrder.SequenceEqual(inferred, StringComparer.OrdinalIgnoreCase);
-        LocalQuickAutoTuneInfoText = orderChanged
-            ? "These settings no longer match the priority list. Use the arrows or AutoTune if you want the list and settings aligned."
-            : "The detailed settings changed. The priority list is unchanged until you move it or run AutoTune.";
+        // Two-way sync: a manual edit moves the priority list when the settings now clearly
+        // favour a different order (same margin as "infer from settings"), and the info line
+        // says what the edit trades and how the list moved. Before, the list stayed put with
+        // "These settings no longer match the priority list", so the two drifted apart and the
+        // operator got no feel for the consequence of a manual change.
+        var before = _lastLocalDetailedSnapshot ?? CaptureLocalDetailedSettings();
+        var after = CaptureLocalDetailedSettings();
+        _lastLocalDetailedSnapshot = after;
+        var oldOrder = LocalPriorityOrder.ToList();
+        var scores = ComputeLocalPriorityScores();
+        var inferred = RankPrioritiesByScore(LocalPriorityNames, scores);
+        if (ShouldAdoptInferredPriorityOrder(oldOrder, inferred, scores, margin: 3))
+        {
+            SetLocalPriorityOrder(inferred, persistToConfig: false);
+        }
+
+        LocalQuickAutoTuneInfoText = BuildManualChangeConsequence(before, after, oldOrder, LocalPriorityOrder.ToList());
         RefreshProfileEndpointStatusSurfaces();
+    }
+
+    /// <summary>Settings as last loaded or last written by the wizard; compared with each manual edit.</summary>
+    private Dictionary<string, string>? _lastLocalDetailedSnapshot;
+
+    private void RememberLocalDetailedSnapshot() => _lastLocalDetailedSnapshot = CaptureLocalDetailedSettings();
+
+    /// <summary>What each setting trades, in plain words, for the manual-edit consequence line.</summary>
+    internal static readonly IReadOnlyDictionary<string, string> LocalSettingTradeOffs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["OverrideContext"] = "more Context keeps more of the chat in mind but uses more VRAM",
+        ["LocalExtendContextIntoRam"] = "extending into RAM allows far more Context, but the part beyond VRAM is much slower",
+        ["LocalKvCacheTypeK"] = "lower KV precision fits roughly twice the Context in the same VRAM, with weaker recall of earlier turns",
+        ["LocalKvCacheTypeV"] = "lower KV precision fits roughly twice the Context in the same VRAM, with weaker recall of earlier turns",
+        ["LocalSpecType"] = "draft-mtp roughly doubles generation speed on an MTP model without changing the output",
+        ["LocalSpecDraftNMax"] = "draft length changes generation speed only, never the output",
+        ["LocalUbatchSize"] = "a larger Micro-batch reads prompts faster for a little more VRAM",
+        ["LocalBatchSize"] = "Batch size bounds the Micro-batch; larger uses a little more VRAM",
+        ["LocalReasoning"] = "thinking first gives deeper answers but a slower start",
+        ["LocalReasoningBudget"] = "a thinking cap starts replies sooner but limits depth",
+        ["OverrideMaxTokens"] = "Max tokens is the longest single reply",
+        ["LocalTemperature"] = "higher temperature gives more varied, less repeatable wording",
+        ["LocalGpuOffloadMode"] = "more on the GPU is faster; GPU + CPU or CPU only fits more but runs slower",
+        ["GpuLayers"] = "more layers on the GPU is faster but leaves less VRAM for Context",
+        ["LocalFit"] = "Fit VRAM shrinks settings to keep the model on the GPU",
+        ["LocalCacheRam"] = "Cache RAM keeps earlier prompt work in system memory for faster follow-ups",
+    };
+
+    /// <summary>
+    /// "KV key q8_0 → q4_0 — lower KV precision fits roughly twice the Context… Priorities:
+    /// Context length moved up to 1st." Uses the page's own labels; empty changes give a neutral line.
+    /// </summary>
+    internal static string BuildManualChangeConsequence(
+        IReadOnlyDictionary<string, string> before,
+        IReadOnlyDictionary<string, string> after,
+        IReadOnlyList<string> oldOrder,
+        IReadOnlyList<string> newOrder)
+    {
+        var changedKeys = LocalDetailedSettingLabels
+            .Where(entry => after.ContainsKey(entry.Key)
+                && !string.Equals(before.GetValueOrDefault(entry.Key) ?? string.Empty, after[entry.Key] ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+            .Select(entry => entry.Key)
+            .ToList();
+        var text = new List<string>();
+        var changeList = BuildLabelledChangeList(before, after);
+        if (changeList.Length > 0)
+        {
+            text.Add(changeList + ".");
+        }
+
+        var tradeOffs = changedKeys
+            .Select(key => LocalSettingTradeOffs.GetValueOrDefault(key))
+            .Where(line => !string.IsNullOrEmpty(line))
+            .Distinct()
+            .Take(2)
+            .ToList();
+        if (tradeOffs.Count > 0)
+        {
+            text.Add(char.ToUpperInvariant(tradeOffs[0]![0]) + string.Join("; ", tradeOffs)[1..] + ".");
+        }
+
+        static string Ordinal(int n) => n switch { 1 => "1st", 2 => "2nd", 3 => "3rd", _ => n + "th" };
+        var moves = newOrder
+            .Select((name, index) => (name, index, oldIndex: oldOrder.ToList().FindIndex(o => o.Equals(name, StringComparison.OrdinalIgnoreCase))))
+            .Where(item => item.oldIndex >= 0 && item.index < item.oldIndex)
+            .Select(item => item.name + " moved up to " + Ordinal(item.index + 1))
+            .ToList();
+        text.Add(moves.Count > 0
+            ? "Priorities: " + string.Join(", ", moves) + "."
+            : "Priority order unchanged.");
+        return string.Join(" ", text);
     }
 
     private void AcceptLocalComboChange(string key, string? value, Action<string> restore)
@@ -21422,6 +21545,7 @@ public partial class MainViewModel : ViewModelBase
         {
             _isHydratingCloudVariantForm = false;
             _isHydratingLocalVariantForm = false;
+            RememberLocalDetailedSnapshot();
         }
 
         if (!_isValidatingLocalProfile)
@@ -21462,6 +21586,7 @@ public partial class MainViewModel : ViewModelBase
             finally
             {
                 _isHydratingLocalVariantForm = false;
+                RememberLocalDetailedSnapshot();
             }
         }, DispatcherPriority.Loaded);
     }
@@ -22590,6 +22715,7 @@ public partial class MainViewModel : ViewModelBase
         finally
         {
             _isHydratingLocalVariantForm = false;
+            RememberLocalDetailedSnapshot();
             RememberAcceptedLocalComboValues();
         }
         UpdateLocalPrioritySummaryTexts();
@@ -23443,10 +23569,13 @@ public partial class MainViewModel : ViewModelBase
             ["LocalVisionMaxImageEdge"] = ((int)LocalVariantVisionMaxImageEdge).ToString(CultureInfo.InvariantCulture)
         };
         ResolveWizardAutoSettings(settings);
-        settings["LocalKvCacheTypeK"] = LocalPrioritySettingsCalculator.ClampKvCacheTypeAtOrAboveMinimum(
-            settings.GetValueOrDefault("LocalKvCacheTypeK"));
-        settings["LocalKvCacheTypeV"] = LocalPrioritySettingsCalculator.ClampKvCacheTypeAtOrAboveMinimum(
-            settings.GetValueOrDefault("LocalKvCacheTypeV", settings["LocalKvCacheTypeK"]));
+        // The q8_0 KV floor follows the priority order (KvMinimumApplies): with Context length
+        // ranked above Fidelity, the calculator's q5/q4 choice for a larger Context is kept.
+        var kvOrder = ResolveLocalPriorityOrder(LocalPriorityOrder);
+        settings["LocalKvCacheTypeK"] = LocalPrioritySettingsCalculator.ClampKvCacheTypeForPriorities(
+            settings.GetValueOrDefault("LocalKvCacheTypeK"), kvOrder);
+        settings["LocalKvCacheTypeV"] = LocalPrioritySettingsCalculator.ClampKvCacheTypeForPriorities(
+            settings.GetValueOrDefault("LocalKvCacheTypeV", settings["LocalKvCacheTypeK"]), kvOrder);
         var imagesOn = LocalVariantVisionEnabled.Equals("Enabled", StringComparison.OrdinalIgnoreCase);
         LocalPrioritySettingsCalculator.PreserveHandTunedReplySettings(
             settings,
@@ -23688,11 +23817,19 @@ public partial class MainViewModel : ViewModelBase
             scores["Stability"] += 1;
         }
 
-        if (LocalVariantSpecType.Equals("Disabled", StringComparison.OrdinalIgnoreCase))
+        // Speculative decoding is lossless (the model checks every drafted token), so turning it
+        // off is NOT a Fidelity choice — that rule (+3 Fidelity for Disabled) taught the list
+        // the same wrong lesson AutoTune used to apply. draft-mtp roughly doubles generation on
+        // an MTP model (71 → 135-152 tok/s measured), so it reads as a strong Speed choice.
+        if (LocalVariantSpecType.Equals("draft-mtp", StringComparison.OrdinalIgnoreCase))
         {
-            scores["Fidelity"] += 3;
+            scores["Speed"] += 4;
+            if (int.TryParse(LocalVariantSpecDraftNMax, out var draft) && draft >= 3)
+            {
+                scores["Speed"] += 1;
+            }
         }
-        else
+        else if (!LocalVariantSpecType.Equals("Disabled", StringComparison.OrdinalIgnoreCase))
         {
             scores["Speed"] += 1;
         }
@@ -23762,6 +23899,55 @@ public partial class MainViewModel : ViewModelBase
         {
             scores["Stability"] += 2;
             scores["Reasoning depth"] -= 1;
+        }
+
+        // Settings the scorer used to ignore, so the list could not follow them (Nov 2026).
+        // Extending Context into RAM is the strongest Context-over-Speed choice there is: the
+        // part beyond VRAM is read from system memory and is much slower.
+        if (LocalVariantExtendContextIntoRam)
+        {
+            scores["Context length"] += 10;
+            scores["Speed"] -= 4;
+        }
+        else if (advice.ModelMaxCtx > 0 && ctx > advice.ModelMaxCtx)
+        {
+            scores["Context length"] += 4;
+        }
+
+        // Micro-batch: larger reads prompts faster (ub1024 ~40% over ub256 measured) for a
+        // little more VRAM; small leaves that VRAM for Context.
+        if (int.TryParse(LocalVariantUbatchSize, out var ubatch))
+        {
+            if (ubatch >= 1024)
+            {
+                scores["Speed"] += 2;
+            }
+            else if (ubatch <= 256)
+            {
+                scores["Context length"] += 1;
+            }
+        }
+
+        // Thinking budget only matters while Reasoning is on: a cap trades depth for a faster start.
+        if (LocalVariantReasoning == "On")
+        {
+            if (int.TryParse(LocalVariantReasoningBudget, out var budget))
+            {
+                if (budget == 0)
+                {
+                    scores["Reasoning depth"] -= 5;
+                    scores["Speed"] += 2;
+                }
+                else if (budget <= 2048)
+                {
+                    scores["Reasoning depth"] -= 2;
+                    scores["Speed"] += 1;
+                }
+            }
+            else
+            {
+                scores["Reasoning depth"] += 2; // Unlimited
+            }
         }
 
         return scores;
@@ -23983,9 +24169,11 @@ public partial class MainViewModel : ViewModelBase
             kvK = merged["LocalKvCacheTypeK"];
         }
 
-        // Priorities wizard never keeps KV below q8_0 — fidelity loss outweighs Context gain.
-        kvK = LocalPrioritySettingsCalculator.ClampKvCacheTypeAtOrAboveMinimum(kvK);
-        kvV = LocalPrioritySettingsCalculator.ClampKvCacheTypeAtOrAboveMinimum(kvV);
+        // The q8_0 KV floor applies only when Fidelity ranks above Context length
+        // (KvMinimumApplies). It used to apply to every order ("fidelity loss outweighs Context
+        // gain"), but for an operator who ranks Context first, maximum Context is the point.
+        kvK = LocalPrioritySettingsCalculator.ClampKvCacheTypeForPriorities(kvK, resolved);
+        kvV = LocalPrioritySettingsCalculator.ClampKvCacheTypeForPriorities(kvV, resolved);
         merged["LocalKvCacheTypeK"] = kvK;
         if (!kvV.Equals(kvK, StringComparison.OrdinalIgnoreCase) || (fidelity == 0 && KvFidelity(kvV) < 2))
             merged["LocalKvCacheTypeV"] = kvK;
@@ -24816,6 +25004,7 @@ public partial class MainViewModel : ViewModelBase
         finally
         {
             _isHydratingLocalVariantForm = false;
+            RememberLocalDetailedSnapshot();
         }
     }
 

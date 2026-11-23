@@ -190,7 +190,7 @@ public static class LocalPrioritySettingsCalculator
                 ? "0"
                 : "Auto";
         var kv = kvCacheChoice is not null
-            ? ClampKvCacheTypeAtOrAboveMinimum(kvCacheChoice)
+            ? ClampKvCacheTypeForPriorities(kvCacheChoice, resolved)
             : fidelity == 0 && advice.PreferFitEnabled == false
                 ? "f16"
                 : PickKvTypeForYarnFit(advice, int.TryParse(ctx, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ctxInt) ? ctxInt : 0, extendContextIntoRam, effectiveKvBytesPerToken);
@@ -553,6 +553,40 @@ public static class LocalPrioritySettingsCalculator
             _ => true
         };
     }
+
+    /// <summary>
+    /// True when the q8_0 KV minimum should apply: Fidelity ranks above Context length. Lower
+    /// precision KV is a real trade — roughly twice the Context in the same VRAM, weaker recall
+    /// of earlier turns — and when the operator ranks Context length higher, maximum Context is
+    /// the point. The minimum used to apply to every order, which undid the YaRN-fit choice of
+    /// q5/q4 for Context-first profiles.
+    /// </summary>
+    public static bool KvMinimumApplies(IReadOnlyList<string> resolvedOrder)
+    {
+        int Rank(string name)
+        {
+            for (var i = 0; i < resolvedOrder.Count; i++)
+            {
+                if (resolvedOrder[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+
+            return int.MaxValue;
+        }
+
+        return Rank("Fidelity") < Rank("Context length");
+    }
+
+    /// <summary>
+    /// <see cref="ClampKvCacheTypeAtOrAboveMinimum"/> when <see cref="KvMinimumApplies"/>; otherwise
+    /// the type is kept as chosen (blank falls back to the minimum).
+    /// </summary>
+    public static string ClampKvCacheTypeForPriorities(string? kvType, IReadOnlyList<string> resolvedOrder)
+        => KvMinimumApplies(resolvedOrder) || string.IsNullOrWhiteSpace(kvType)
+            ? ClampKvCacheTypeAtOrAboveMinimum(kvType)
+            : kvType.Trim();
 
     public static string ClampKvCacheTypeAtOrAboveMinimum(string? kvType)
         => IsBelowMinimumKvCacheType(kvType) ? MinimumKvCacheType : kvType!.Trim();

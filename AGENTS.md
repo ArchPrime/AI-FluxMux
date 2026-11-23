@@ -169,6 +169,15 @@ AI-FluxMux must work for other OpenAI-compatible clients and other hardware, not
 - **llama-server path self-repair** (`NearbyLlamaServerCandidates`): when the configured exe is missing, look one level below the configured and standard folders, backups last, and log once which exe was used.
 - **Hail Mary for every Client app.** Cline-like clients get `/smol` or the external rescue (Cline's own compaction file). Every other client gets the FluxMux middle-cut, which now appends a bounded essence block (`Essence.ToRescueBlock`, ≤ 3,000 chars: task/state/next, latest goal change, recent decisions and dead ends) to the trimmed request, so what the dropped turns established is not lost. The full `ToClineSummary` is deliberately not used there: it can run to tens of KB and would undo the trim.
 
+## Priority list ↔ detailed settings (two-way sync)
+
+The goal is that the priority list and the detailed settings always describe each other, so an operator gets an intuitive feel for the consequence of a manual change. Contradictions only arise from manual edits, so there are no separate "profile checks".
+
+- **Priorities → settings:** the arrows and AutoTune write the settings (unchanged), leaving hand-set reply settings alone.
+- **Settings → priorities (live):** every manual edit re-scores the settings (`ComputeLocalPriorityScores`) and moves the list when the settings clearly favour another order (`ShouldAdoptInferredPriorityOrder`, margin 3, so small tweaks do not make it jump). The info line says what changed, what it trades and how the list moved (`BuildManualChangeConsequence`, page labels, `LocalSettingTradeOffs`). A snapshot taken when the form finishes loading and after every wizard write (`RememberLocalDetailedSnapshot`) is what each edit is compared with; wizard writes never trigger re-scoring, so the two cannot loop.
+- **Scorer additions:** Extend into RAM (+Context, −Speed), Context beyond the native window, Micro-batch, Draft length, Thinking budget. **Speculative Disabled no longer scores +Fidelity** — speculative decoding is lossless; draft-mtp scores as Speed.
+- **KV q8_0 floor follows the order** (`KvMinimumApplies`: only when Fidelity ranks above Context length), in the calculator, `ApplyCanonicalLocalPrioritySettings` and `ReconcileLocalSettingsWithPriorityOrder`. Lower-precision KV is a legitimate choice when maximum Context matters more than Fidelity; the tooltips describe it as a trade-off, not a rule.
+
 ## Local coding + Client app (operator)
 
 On this RTX 5090 (32 GB VRAM, 64 GB RAM), the daily local model is **`Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf`**. Keep spec type **draft-mtp** with draft length **3** (measured 152 tok/s against 135 at 2 and 71 with MTP off; see *Profile editor* above). Max tokens **16384**. With Images on, use projector **`mmproj-Qwen3.8-27B-NVFP4-BF16.gguf`** and Context **163840**. Text-only: Images off, Context **213056**. **Qwen 3.8 27B Q4** at Context **131072** is the fallback if this NVFP4 file or llama-server build is fussy. Q8 of the same 27B still cuts Context roughly in half. Flash-Next does not replace this 27B on this PC (hybrid RAM/NVMe, not the FluxMux daily path).
