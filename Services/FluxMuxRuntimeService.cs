@@ -7912,7 +7912,9 @@ public sealed class FluxMuxRuntimeService
 		double weightsOnGpuGb = (offloadMode.Equals("GPU only", StringComparison.OrdinalIgnoreCase) ? fileGb : Math.Min((fileGb <= 0.0) ? (gpuGb * 0.5) : fileGb, gpuGb * 0.48));
 		double headroom = (nvidia ? Math.Max(0.2, gpuGb - weightsOnGpuGb - KvGb(contextSafeDefault) - overheadGb) : 1.0);
 		int batchSize = SnapBatchSize(256.0 * Math.Sqrt(Math.Max(1.0, nvidia ? gpuGb : 4.0)) * Math.Clamp(headroom / 2.0, 0.55, 1.85));
-		int val = SnapBatchSize((double)batchSize / 4.0);
+		// Micro-batch = batch, capped (see LocalPrioritySettingsCalculator.DeriveUbatch for the
+		// measurements); batch ÷ 4 left prompt reading ~30% slower.
+		int val = Math.Min(batchSize, LocalPrioritySettingsCalculator.MaxUbatch);
 		int maxTokens = SnapTokenOption((int)Math.Clamp((double)contextSafeDefault / 6.0, 4096.0, 16384.0));
 		double systemRamGb = (double)GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 1073741824.0;
 		string cacheRam = ((systemRamGb >= 24.0 || headroom >= Math.Max(6.0, fileGb * 0.4)) ? "Unlimited" : SnapCacheRamMb((int)Math.Round(Math.Max(4096.0, headroom * 1024.0 * 0.55))));

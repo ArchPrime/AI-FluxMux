@@ -1,0 +1,79 @@
+{\rtf1\ansi\deff0\deftab720
+{\fonttbl{\f0\fswiss\fcharset0 Segoe UI;}{\f1\fmodern\fcharset0 Consolas;}}
+{\colortbl ;\red0\green0\blue0;\red44\green95\blue138;\red224\green224\blue224;\red244\green244\blue244;}
+\f0\fs24
+\pard\sb200\sa100\b\fs44 AI-FluxMux\b0\fs24\par
+\pard\sb100\sa60\b\cf2\fs30 An endpoint-agnostic, OpenAI-compatible router for local and cloud models.\b0\cf0\fs24\par
+\pard\sa100 AI-FluxMux is a Windows desktop app that sits between your AI client (Cline, DeepSeek Harness, or any OpenAI-compatible app) and your models \endash  local GGUF via llama-server, cloud via API. One endpoint: {\f1\cf4 http://127.0.0.1:5001}. No proprietary protocol. No vendor lock-in.\par
+\pard\sa60\b\fs32 Key features\b0\fs24\par
+\pard\sb200\sa60\b\fs28 1. Visibility\b0\fs24\par
+\pard\sa60 Keep tabs on what\u39 \u8217 s happening. Prefill time, VRAM pressure, context fill, model speed, why a turn routed where it did. Without AI-FluxMux, it\u39 \u8217 s a black box \endash  you send a prompt and wait, and when something goes wrong you often have to start again.\par
+\pard\sa40 \u8226   {\b Prefill progress bar} \endash  accurate, because it learned your hardware\u39 \u8217 s actual prefill speed (cold, warm, and RAM-spill). No more staring at a blank chat for 90 seconds wondering if it\u39 \u8217 s stuck.\par
+\pard\sa40 \u8226   {\b VRAM, RAM, CPU, and context gauges} \endash  live telemetry. See that your model is at 92% VRAM and the next turn will spill to RAM (slower). See the context filling toward the limit.\par
+\pard\sa40 \u8226   {\b Throughput/latency graph} \endash  every turn plotted as it happens. Token speed, turn timing, prefill vs. generation phases.\par
+\pard\sa40 \u8226   {\b Routing explanations} \endash  every routing decision is logged: \u8220 model not ready,\u8221  \u8220 context filling,\u8221  \u8220 vision needed,\u8221  \u8220 VRAM pressure.\u8221  No black-box routing.\par
+\pard\sa40 \u8226   {\b Model statistics} \endash  measured VRAM footprint, prefill speed, generation speed. The numbers match what you\u39 \u8217 re about to run, not what the model\u39 \u8217 s README claims.\par
+\pard\sb200\sa60\b\fs28 2. Intervention\b0\fs24\par
+\pard\sa60 Port rules pause {\i before} the token burn. Model switch offer {\i before} the context loss. Without AI-FluxMux, you find out about problems after they\u39 \u8217 ve already happened.\par
+\pard\sa40 \u8226   {\b Overflow warning} \endash  before the turn fails: \u8220 This turn will exceed context. Options: compact, switch model, or send anyway.\u8221  Not a 400 error. A choice.\par
+\pard\sa40 \u8226   {\b Hang watchdog} \endash  if the model goes quiet mid-generation: \u8220 Model appears stuck. Options: wait, stop, or switch to cloud.\u8221  Not an infinite wait. A choice.\par
+\pard\sa40 \u8226   {\b Port rules} \endash  if your client app is tool-milling (running the same command 5 times): \u8220 This looks like a loop. Send anyway, end turn, or steer?\u8221  Not a 10-minute token burn. A choice.\par
+\pard\sa40 \u8226   {\b Model switch mid-chat} \endash  \u8220 Your local model\u39 \u8217 s context is too small for this chat. Switch to [bigger model]? The chat continues.\u8221  Not a new chat and lost context. A choice.\par
+\pard\sa40 \u8226   {\b Operator override} \endash  force any turn to local or cloud from the UI, regardless of what the router would choose.\par
+\pard\sb200\sa60\b\fs28 3. Continuity\b0\fs24\par
+\pard\sa60 The chat keeps working. Without AI-FluxMux, every problem can become a hard stop.\par
+\pard\sa40 \u8226   {\b Context overflowed?} \endash  compact \u0026  resurrect. Hail Mary compaction shrinks just enough to fit. Essence-preserving compaction re-asserts the mission (goal evolution, decisions, dead ends) after the transcript is gone.\par
+\pard\sa40 \u8226   {\b Local model can\u8217 t take the turn?} \endash  cloud or a different local picks up, don\u8217 t stall. Dynamic routing re-evaluates on every turn. Local model loading? Turn goes to cloud. VRAM full? Turn goes to cloud. Ready again? Back to local. You don\u8217 t switch anything.\par
+\pard\sa40 \u8226   {\b Model switches mid-chat?} \endash  conversation continues, don\u8217 t restart. Maintain a pool of local model profiles. When the loaded model can\u8217 t cover a turn (context too small, no vision, no reasoning), AI-FluxMux offers to switch. You approve, it reloads, the chat continues.\par
+\pard\sa40 \u8226   {\b Compaction happens?} \endash  essence survives, don\u8217 t lose the mission. A durable log captures the {\i meaning} of your session and re-asserts it after compaction. Cline\u39 \u8217 s own auto-compact still works as the first line of defence; AI-FluxMux adds the layer that survives {\i hard} compaction.\par
+\pard\sa40 \u8226   {\b Context too big for VRAM?} \endash  YaRN extends it into system RAM (up to 1M tokens). The model keeps working; it just gets slower.\par
+\pard\sa40 \u8226   {\b Tool result too big for the prompt?} \endash  paged context spills it to disk with a pointer. The model reads it back via MCP. Nothing is lost.\par
+\pard\sb200\sa60\b\fs28 4. Customisation\b0\fs24\par
+\pard\sa60 Extensive local model tuning and saved hot-swappable profiles. The same model can have multiple variants that you switch into the chat to address multiple scenarios.\par
+\pard\sa60 Each profile carries {\b 30+ settings} in the UI, all persisted, all overridable:\par
+\pard\sa40 \u8226   {\b Context} \endash  context window size, YaRN extension into RAM (up to 1M tokens), allow or prevent VRAM\u2192 RAM spill, fit-to-VRAM auto-sizing\par
+\pard\sa40 \u8226   {\b Vision} \endash  on/off, max image size, vision projector (mmproj) file\par
+\pard\sa40 \u8226   {\b KV cache} \endash  quantisation type for K and V separately (f16, q8_0, q4_0), cache strategy (Auto/Full/PrefixCheckpoints/Minimal), cache RAM for prefix reuse\par
+\pard\sa40 \u8226   {\b GPU} \endash  offload mode (auto, all, none), GPU layers, flash attention, multi-GPU (auto/manual split, tensor split, main GPU)\par
+\pard\sa40 \u8226   {\b Reasoning} \endash  Off / Low / Medium / XHigh\par
+\pard\sa40 \u8226   {\b Generation} \endash  temperature, max tokens, speculative decoding (MTP draft)\par
+\pard\sa40 \u8226   {\b Performance} \endash  thread count, batch threads, batch size, ubatch size\par
+\pard\sa40 \u8226   {\b Compaction} \endash  auto-compact on/off\par
+\pard\sa40 \u8226   {\b Chat format} \endash  chat template, chat parser, unban tokens\par
+\pard\sa40 \u8226   {\b Concurrency} \endash  multi-user mode (allow parallel requests)\par
+\pard\sa60 {\b Hot-swappable variants} \endash  the same GGUF model can have multiple profiles with different settings. A \u8220 fast\u8221  variant (small context, no YaRN, f16 cache, reasoning off) for quick turns. A \u8220 deep\u8221  variant (YaRN extended, q8_0 cache, reasoning XHigh) for long sessions. A \u8220 vision\u8221  variant (images on, larger context, projector loaded) for multimodal work. Switch between them mid-chat without restarting the model.\par
+\pard\sa60 The {\b model tuning wizard} recommends starting values based on your hardware (VRAM, RAM, GPU count), but every setting is yours to override.\par
+\pard\sb200\sa60\b\fs32 Under the hood\b0\fs24\par
+\pard\sa40 \u8226   {\b OpenAI-compatible} \endash  {\f1\cf4 /v1/chat/completions} (streaming and non-streaming), {\f1\cf4 /v1/models}, {\f1\cf4 /v1/health}. Any OpenAI-compatible client app works.\par
+\pard\sa40 \u8226   {\b Cloud providers} \endash  Gemini, Anthropic, OpenAI, GitHub Copilot, Groq, DeepSeek, OpenRouter, Together, or any custom OpenAI-compatible endpoint.\par
+\pard\sa40 \u8226   {\b Hardware learning} \endash  prefill performance model (cold, warm, RAM-spill), VRAM footprint estimation, cache strategy advisor.\par
+\pard\sa40 \u8226   {\b Cline integration} \endash  context window sync, compaction file writing (native rich format), tool-call healing, Cline-specific essence re-assertion.
+\pard\sa40 \u8226   {\b DeepSeek Harness integration} \endash  launches and stops the Harness web UI, writes Harness settings (base URL, context window, max tokens, images, reasoning) from the loaded local profile, keeps Harness in sync when you switch profiles.\par
+\pard\sa40 \u8226   {\b ~82,000 lines} of C# / Avalonia, 140+ service files, {\b 1,075 unit tests} across 100+ test files.\par
+\pard\sa40 \u8226   {\b Self-contained} \endash  bundles the .NET 10 runtime. No .NET install needed. Windows 10/11 x64.\par
+\pard\sa40 \u8226   {\b PolyForm Noncommercial License 1.0.0} \endash  free for personal and non-commercial use. Commercial licensing available from Architecture Prime Ltd.\par
+\pard\sb200\sa60\b\fs32 Why not just use X?\b0\fs24\par
+\pard\sb100\sa40\b Why not point Cline directly at llama-server?\b0\par
+\pard\sa60 You can. Cline has its own auto-compact, and it works fine for straightforward sessions. But when the context overflows hard, the model stalls, or VRAM runs out, Cline\u39 \u8217 s compaction is all-or-nothing \endash  it shortens the transcript but doesn\u8217 t preserve the {\i meaning} of your session. It also doesn\u8217 t route to a cloud fallback mid-chat, doesn\u8217 t monitor VRAM pressure, and doesn\u8217 t offer port rules to intervene before a turn goes off the rails. AI-FluxMux adds that layer \endash  while Cline\u39 \u8217 s own compaction still works as the first line of defence.\par
+\pard\sb100\sa40\b Why not use Ollama?\b0\par
+\pard\sa60 Ollama is a model manager \endash  it downloads and serves GGUF models. It doesn\u8217 t do context compaction, doesn\u8217 t route between local and cloud mid-chat, doesn\u8217 t monitor VRAM pressure, doesn\u8217 t offer port rules, and doesn\u8217 t preserve session meaning across compaction. AI-FluxMux adds the intelligence layer on top.\par
+\pard\sb100\sa40\b Why not use a cloud API directly?\b0\par
+\pard\sa60 Cloud APIs are convenient but: every token costs money, your prompts leave your machine, and you\u39 \u8217 re at the mercy of rate limits and outages. AI-FluxMux lets you run local models for free and private, and only fall back to cloud when you need to. You control the cost. You control the privacy.\par
+\pard\sb100\sa40\b Why not build this yourself?\b0\par
+\pard\sa60 You could. It\u39 \u8217 s ~82,000 lines of C# with 1,075 tests. The hard parts \endash  VRAM pressure detection, context compaction that preserves meaning, YaRN RAM-spill management, per-turn routing decisions, Cline\u39 \u8217 s compaction file format \endash  are all solved here. If you want to tinker, the source is on GitHub. If you just want it to work, download the zip.\par
+\pard\sb100\sa40\b Why not use a different local AI router?\b0\par
+\pard\sa60 Most local AI tools are either model managers (Ollama, LM Studio) or chat UIs (Open WebUI, LibreChat). AI-FluxMux is neither. It\u39 \u8217 s an {\b infrastructure layer} that sits between your existing client app and your models. It doesn\u8217 t replace your workflow \endash  it makes your existing workflow more resilient.\par
+\pard\sb200\sa60\b\fs32 What it\u39 \u8217 s not\b0\fs24\par
+\pard\sa40 \u8226   It\u39 \u8217 s not a chat app. It\u39 \u8217 s the {\b infrastructure layer} between your client app and your models.\par
+\pard\sa40 \u8226   It doesn\u8217 t replace llama-server. It {\b manages} it.\par
+\pard\sa40 \u8226   It doesn\u8217 t replace Cline\u39 \u8217 s compaction. It {\b survives} what Cline\u39 \u8217 s compaction can\u8217 t.\par
+\pard\sa40 \u8226   It doesn\u8217 t pick models for you. It gives you the {\b telemetry and controls} to make informed decisions.\par
+\pard\sa40 \u8226   It\u39 \u8217 s not a cloud service. Everything runs on your machine. Your prompts, your models, your data.\par
+\pard\sb200\sa60\b\fs32 Get started\b0\fs24\par
+\pard\sa40 1. Download the latest release zip from GitHub Releases.\par
+\pard\sa40 2. Unzip to a folder you own (not Program Files).\par
+\pard\sa40 3. Double-click {\f1\cf4 FluxMux.Avalonia.exe}.\par
+\pard\sa40 4. Open the {\b Help} tab: install llama-server, nominate your GGUF folder, point your client app at {\f1\cf4 http://127.0.0.1:5001}.\par
+\pard\sa100 {\i That\u39 \u8217 s it. Your local AI, with the safety net.}\par
+}\par
+

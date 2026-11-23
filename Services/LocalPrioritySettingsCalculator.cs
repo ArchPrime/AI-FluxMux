@@ -732,13 +732,25 @@ public static class LocalPrioritySettingsCalculator
         return Math.Min(2048, parsed * 2).ToString(CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// Micro-batch (-ub) for a Batch size (-b): the batch itself, capped at
+    /// <see cref="MaxUbatch"/>. It used to be batch ÷ 4 (1024 → 256), which was measured on the
+    /// RTX 5090 with the 27B NVFP4 MTP model (Images on, Context 163840, ~16.7K-token prompt) to
+    /// read prompts ~30% slower than it could: ub256 3,937 tok/s, ub512 5,196, ub1024 5,577,
+    /// ub2048 5,557 — no gain past 1024 — for +0.7 GiB VRAM at 1024 and no change to generation
+    /// speed or reply quality. Cards much smaller than 32 GB are untested; Fit VRAM still
+    /// shrinks Context if the larger compute buffer does not fit.
+    /// </summary>
     public static string DeriveUbatch(string batch)
     {
         if (!int.TryParse(batch, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
         {
-            return "128";
+            return "512";
         }
 
-        return Math.Max(64, parsed / 4).ToString(CultureInfo.InvariantCulture);
+        return Math.Clamp(parsed, 64, MaxUbatch).ToString(CultureInfo.InvariantCulture);
     }
+
+    /// <summary>Largest micro-batch AutoTune proposes; 2048 measured no faster than 1024.</summary>
+    public const int MaxUbatch = 1024;
 }

@@ -22895,30 +22895,10 @@ public partial class MainViewModel : ViewModelBase
                 "No extra change: times the usual AutoTune mix already in the form.")
         };
 
-        var order = ResolveLocalPriorityOrder(LocalPriorityOrder);
-        var speedRank = IndexOfPriority(order, "Speed");
-        var contextRank = IndexOfPriority(order, "Context length");
-
-        if (speedRank <= 1
-            && contextRank > 0)
-        {
-            var largerBatch = ScaleWizardBatchUp(CurrentLocalHardwareAdvice().BatchSize);
-            if (!string.Equals(baseline.GetValueOrDefault("LocalBatchSize"), largerBatch, StringComparison.OrdinalIgnoreCase))
-            {
-                var extra = new Dictionary<string, string>(baseline, StringComparer.OrdinalIgnoreCase)
-                {
-                    ["LocalBatchSize"] = largerBatch,
-                    ["LocalUbatchSize"] = DeriveUbatch(largerBatch)
-                };
-
-                trials.Add(new(
-                    "Batch size " + largerBatch,
-                    extra,
-                    "Testing Batch size " + extra["LocalBatchSize"] +
-                    " (prompt processed in larger chunks), was " + (baseline.GetValueOrDefault("LocalBatchSize") ?? "unset") +
-                    ". Micro-batch " + extra.GetValueOrDefault("LocalUbatchSize") + "."));
-            }
-        }
+        // No Batch-size trial. Trials are scored by generation speed, which batch size does not
+        // affect (~131 tok/s at every batch/micro-batch measured), and with micro-batch = batch
+        // capped at 1024 a bigger batch also stopped helping prompt reading (b2048/ub1024 5,625
+        // vs b1024/ub1024 5,577 tok/s). The trial cost a ~15 s reload and could not win fairly.
 
         // Speculative decoding is lossless (the model checks every guessed token), so these
         // trials are not gated on the Fidelity priority. A profile set to Disabled is the
@@ -24806,11 +24786,6 @@ public partial class MainViewModel : ViewModelBase
     private static string SnapWizardBatchDown(string value)
         => LocalPrioritySettingsCalculator.SnapWizardBatchDown(value);
 
-    private static string ScaleWizardBatchUp(string value)
-        => LocalPrioritySettingsCalculator.ScaleWizardBatchUp(value);
-
-    private static string DeriveUbatch(string batch)
-        => LocalPrioritySettingsCalculator.DeriveUbatch(batch);
 
     private string SanitizeLocalChatTemplate(string? configured)
         => FluxMuxRuntimeService.SanitizeStoredChatTemplate(configured, SelectedLocalProfile);
