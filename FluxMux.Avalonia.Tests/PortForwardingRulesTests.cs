@@ -292,20 +292,18 @@ public sealed class PortForwardingRulesTests
     }
 
     [Fact]
-    public void Compact_always_sets_cache_prompt_false()
+    public void Compact_does_not_turn_the_prompt_cache_off()
     {
-        var payload = new JsonObject();
-        LocalPrefixCachePolicy.ApplyAfterCompact(payload, compactApplied: true);
-        Assert.False(payload["cache_prompt"]!.GetValue<bool>());
+        var messages = new JsonArray { new JsonObject { ["role"] = "system", ["content"] = "rules" } };
+        for (var i = 0; i < 30; i++)
+        {
+            messages.Add(new JsonObject { ["role"] = "user", ["content"] = "Question " + i + new string('q', 400) });
+            messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = "Decision: answer " + i + ". " + new string('a', 400) });
+        }
 
-        // Even with the rule explicitly off, the cache is always skipped after a compact
-        // because reusing the old KV cache after a prefix change is never safe.
-        var keep = new JsonObject();
-        LocalPrefixCachePolicy.ApplyAfterCompact(
-            keep,
-            compactApplied: true,
-            PortForwardingRules.Defaults with { SkipPrefixCacheAfterCompact = false });
-        Assert.False(keep["cache_prompt"]!.GetValue<bool>());
+        var payload = new JsonObject { ["messages"] = messages };
+        Assert.True(LocalHistoryCompaction.TryCompactPayloadStable(payload, PortForwardingRules.Defaults, _ => true));
+        Assert.Null(payload["cache_prompt"]);
     }
 
     [Fact]

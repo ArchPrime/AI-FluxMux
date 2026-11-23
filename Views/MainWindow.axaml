@@ -1601,11 +1601,6 @@
                                                             <NumericUpDown Grid.Row="1" Grid.Column="3" Minimum="500" Maximum="20000"
                                                                            Value="{Binding PortRules.CompactPreservedUserChars}" 
                                                                                       ToolTip.Tip="How much of an older user task Compact may pin when that turn would otherwise drop." />
-                                                            <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="6"
-                                                                      VerticalAlignment="Center"
-                                                                      Content="After Compact, skip prefix cache this turn"
-                                                                      IsChecked="{Binding PortRules.SkipPrefixCacheAfterCompact}"
-                                                                      ToolTip.Tip="Compact changes the start of the prompt, so this turn cannot reuse the model's cached work and takes longer to start." />
                                                         </Grid>
                                                     </StackPanel>
                                                 </Border>
@@ -1647,10 +1642,10 @@
                                                                            Value="{Binding PortRules.MinResultCharsToClear}" 
                                                                                   ToolTip.Tip="Tool output shorter than this is always sent in full." />
                                                              <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Tool result clearing"
-                                                                        ToolTip.Tip="On: older tool results are shortened to keep Context small. Off: all tool results are kept in full, which lets the model reuse more cached work but fills Context faster." />
+                                                                        ToolTip.Tip="On: older tool results are shortened to keep Context small, and a result identical to one still shown in full (a file read again unchanged) becomes a short pointer to it. Off: all tool results are kept in full, which fills Context faster." />
                                                              <CheckBox Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
                                                                        IsChecked="{Binding PortRules.ToolResultClearingEnabled}"
-                                                                       ToolTip.Tip="On: older tool results are shortened to keep Context small. Off: all tool results are kept in full, which lets the model reuse more cached work but fills Context faster." />
+                                                                       ToolTip.Tip="On: older tool results are shortened to keep Context small, and a result identical to one still shown in full (a file read again unchanged) becomes a short pointer to it. Off: all tool results are kept in full, which fills Context faster." />
                                                         </Grid>
                                                     </StackPanel>
                                                 </Border>
@@ -1713,35 +1708,6 @@
                                                                        Text="{Binding PortRules.ClosedLoopCeilingTally}" />
                                                         </StackPanel>
                                                     </Border>
-                                                    <Border Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Classes="portRuleGroup">
-                                                        <StackPanel Spacing="8">
-                                                            <DockPanel>
-                                                                <views:HelpTopicLink DockPanel.Dock="Right"
-                                                                                     TopicId="{x:Static svc:HelpTopicIds.PortRules}"
-                                                                                     ToolTip.Tip="Open the Port rules Help topic." />
-                                                                <CheckBox FontWeight="SemiBold"
-                                                                          Content="Rapid-churn"
-                                                                          IsChecked="{Binding PortRules.RapidChurnEnabled}"
-                                                                          ToolTip.Tip="Ends this Client-app turn when tool calls arrive less than Seconds apart this many times in a row, once Mill at omitted has been reached: a sign of a fast loop." />
-                                                            </DockPanel>
-                                                            <TextBlock FontSize="11" Opacity="0.75"
-                                                                       IsVisible="{Binding PortRules.RapidChurnTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
-                                                                       Text="{Binding PortRules.RapidChurnTally}" />
-                                                            <Grid ColumnSpacing="8" ColumnDefinitions="Auto,*,Auto,*"
-                                                                  IsEnabled="{Binding PortRules.RapidChurnEnabled}">
-                                                                <TextBlock VerticalAlignment="Center" Text="Seconds"
-                                                                           ToolTip.Tip="Tool calls closer together than this count towards Rapid-churn." />
-                                                                <NumericUpDown Grid.Column="1" Minimum="1" Maximum="15"
-                                                                               Value="{Binding PortRules.RapidChurnSeconds}" 
-                                                                              ToolTip.Tip="Tool calls closer together than this count towards Rapid-churn." />
-                                                                <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Consecutive"
-                                                                           ToolTip.Tip="How many fast tool calls in a row end this Client-app turn, even if the recent tools look like real progress." />
-                                                                <NumericUpDown Grid.Column="3" Minimum="2" Maximum="12"
-                                                                               Value="{Binding PortRules.RapidChurnConsecutive}" 
-                                                                                  ToolTip.Tip="How many fast tool calls in a row end this Client-app turn, even if the recent tools look like real progress." />
-                                                            </Grid>
-                                                        </StackPanel>
-                                                    </Border>
                                                     <Border Grid.Row="1" Grid.Column="2" Classes="portRuleGroup">
                                                         <StackPanel Spacing="4">
                                                             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
@@ -1788,7 +1754,7 @@
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />
                                                                 <CheckBox VerticalAlignment="Center" Content="Repeated command"
                                                                           IsChecked="{Binding PortRules.RepeatedCommandEnabled}"
-                                                                          ToolTip.Tip="End this Client-app turn when the Client app sends the same shell command again without reading the last result." />
+                                                                          ToolTip.Tip="When the model runs the same command twice in a row, AI-FluxMux first tells it the result will not change and to try something different. Only if it runs it a third time is this Client-app turn paused for you." />
                                                             </DockPanel>
                                                             <TextBlock FontSize="11" Opacity="0.75"
                                                                        IsVisible="{Binding PortRules.RepeatedCommandTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"

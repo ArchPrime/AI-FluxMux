@@ -503,6 +503,12 @@ public sealed class FluxMuxSupervisor : IDisposable
             if (enableCompact)
             {
                 root["forward_compact"] = true;
+                // The operator clicked Compact: compact the next turn whatever its size. Kept apart
+                // from forward_compact, which also means "Compact is on for this profile" and is
+                // set on every Launch — read as "compact now", it force-compacted the first turn
+                // after each launch and was then cleared, which switched automatic compaction off
+                // for the rest of the session.
+                root["compact_now"] = true;
                 root["compactRecommended"] = false;
             }
             else if (!loadSuggested)

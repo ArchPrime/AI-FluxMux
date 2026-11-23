@@ -25,6 +25,14 @@ public sealed class CompactionEdgeDetector
     /// meaningful (avoids false edges from tiny early-chat counts).</summary>
     public const int MinPreviousTokens = 2_000;
 
+    /// <summary>Requests smaller than this are not chat turns of a session — a Client app's
+    /// connection or title check, a readiness probe — and are ignored entirely (neither an edge
+    /// nor a sample). Without this, the 59-token request a Client app sends right after AI-FluxMux
+    /// starts was taken as a "restart" of the most recent Cline session, and its compaction file
+    /// was rewritten although Cline still held the whole chat. A real Cline turn carries Cline's
+    /// own system prompt, far above this.</summary>
+    public const int MinObservedTokens = 1_000;
+
     private sealed record Sample(int PromptTokens, int ContextLimit, string Model);
 
     private readonly Dictionary<string, Sample> _lastBySession = new(StringComparer.Ordinal);
@@ -35,7 +43,21 @@ public sealed class CompactionEdgeDetector
     /// for <paramref name="sessionKey"/>. Safe to call every turn.
     /// </summary>
     public bool Observe(int promptTokens, int contextLimit, string sessionKey, string model)
+        => ObserveEdge(promptTokens, contextLimit, sessionKey, model) != CompactionEdge.None;
+
+    /// <summary>
+    /// As <see cref="Observe"/>, but says which kind of edge it was. Only
+    /// <see cref="CompactionEdge.Drop"/> means the chat itself was shortened; a
+    /// <see cref="CompactionEdge.Start"/> only means this is the first turn seen for the session
+    /// (for example after AI-FluxMux restarted), when the Client app may still hold all of it.
+    /// </summary>
+    public CompactionEdge ObserveEdge(int promptTokens, int contextLimit, string sessionKey, string model)
     {
+        if (promptTokens < MinObservedTokens)
+        {
+            return CompactionEdge.None;
+        }
+
         if (string.IsNullOrWhiteSpace(sessionKey))
         {
             sessionKey = "_default";
@@ -46,21 +68,21 @@ public sealed class CompactionEdgeDetector
         Sample? previous;
         var isNewSession = !_lastBySession.TryGetValue(sessionKey, out previous);
 
-        bool edge;
+        CompactionEdge edge;
         if (isNewSession || !_anySampleSeen)
         {
             // First turn for this session (or first turn since process start) → cold resume / start.
-            edge = true;
+            edge = CompactionEdge.Start;
         }
         else
         {
             // Sharp token drop (compaction) OR context-limit jump (profile/model reset).
-            var drop = previous.PromptTokens >= MinPreviousTokens
+            var drop = previous!.PromptTokens >= MinPreviousTokens
                 && promptTokens < previous.PromptTokens * (1.0 - DropFraction);
             var limitJump = previous.ContextLimit > 0
                 && contextLimit > 0
                 && Math.Abs(contextLimit - previous.ContextLimit) > previous.ContextLimit * 0.25;
-            edge = drop || limitJump;
+            edge = drop ? CompactionEdge.Drop : limitJump ? CompactionEdge.LimitJump : CompactionEdge.None;
         }
 
         _lastBySession[sessionKey] = current;
@@ -78,4 +100,19 @@ public sealed class CompactionEdgeDetector
 
     /// <summary>True when at least one turn has been observed (used to distinguish cold start).</summary>
     public bool HasObserved => _anySampleSeen;
+}
+
+/// <summary>What kind of context edge <see cref="CompactionEdgeDetector"/> saw on a turn.</summary>
+public enum CompactionEdge
+{
+    None,
+
+    /// <summary>First turn seen for this session (new chat, or AI-FluxMux restarted).</summary>
+    Start,
+
+    /// <summary>The prompt shrank sharply: the chat was compacted.</summary>
+    Drop,
+
+    /// <summary>The context window changed size (profile or model switch).</summary>
+    LimitJump
 }

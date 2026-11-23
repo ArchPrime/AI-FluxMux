@@ -89,6 +89,11 @@ public sealed record PortForwardingRules
 
     public int LoadingRetryCount { get; init; } = LocalLoadingRetryPolicy.DefaultRetryCount;
     public int LoadingRetryDelaySeconds { get; init; } = LocalLoadingRetryPolicy.DefaultDelaySeconds;
+    /// <summary>
+    /// Kept only so existing settings files and packs still load. Nothing reads it: the prompt
+    /// cache always stays on after a compact, because llama-server rereads only from the first
+    /// changed token, so reuse is always safe.
+    /// </summary>
     public bool SkipPrefixCacheAfterCompact { get; init; } = true;
     public string ClientMaxTokensMode { get; init; } = ClientMaxTokensProfile;
     public string StopHygieneMode { get; init; } = StopPassThrough;

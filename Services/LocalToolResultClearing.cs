@@ -122,6 +122,44 @@ public static class LocalToolResultClearing
         => ClearOlderResults(payload, PortForwardingRules.Defaults with { KeepRecentResults = keepRecent });
 
     public static int ClearOlderResults(JsonObject payload, PortForwardingRules rules)
+        => ClearOlderResults(payload, rules, keepFromStep: 1);
+
+    /// <summary>Stubbing waits until the forwarded prompt reaches this share of the loaded Context.</summary>
+    public const double OmitFromContextShare = 0.5;
+
+    /// <summary>The stub point moves in steps of this many results.</summary>
+    public const int OmitStep = 8;
+
+    /// <summary>
+    /// Omit as the gateway runs it. Measured with the plain form on a long tool session: each new
+    /// result pushed one more old result past "keep the newest N", so the stub point moved every
+    /// turn and changed the prompt early on — llama-server prompt similarity 0.13, ~39K of ~41K
+    /// tokens reread every turn (~8.5 s), with the chat at only 25 % of its Context. Two changes:
+    /// nothing is stubbed until the prompt reaches half the loaded Context (full results are
+    /// better for the model while there is room), and the stub point moves in steps of
+    /// <see cref="OmitStep"/> results, so it stays put for several turns. <paramref name="eligible"/>
+    /// is how many older results lie beyond the keep count whether or not they were stubbed, so
+    /// the Mill at omitted loop rule keeps working on a chat that is not yet half full.
+    /// </summary>
+    public static int ClearOlderResultsWhenFilling(JsonObject payload, PortForwardingRules rules, int contextTokens, out int eligible)
+    {
+        eligible = 0;
+        var live = (rules ?? PortForwardingRules.Defaults).Clamp();
+        if (payload["messages"] is JsonArray all)
+        {
+            eligible = Math.Max(0, all.OfType<JsonObject>().Count(IsToolResult) - live.KeepRecentResults);
+        }
+
+        if (contextTokens > 0
+            && LocalRequestOverlayRouting.EstimatePromptTokens(payload) < contextTokens * OmitFromContextShare)
+        {
+            return 0;
+        }
+
+        return ClearOlderResults(payload, rules, OmitStep);
+    }
+
+    private static int ClearOlderResults(JsonObject payload, PortForwardingRules rules, int keepFromStep)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
         if (!live.OmitEnabled)
@@ -151,6 +189,12 @@ public static class LocalToolResultClearing
 
         var pinned = new HashSet<int>();
         var keepFrom = Math.Max(0, resultIndexes.Count - keepRecent);
+        if (keepFromStep > 1)
+        {
+            // Round down: keeps between keepRecent and keepRecent + step - 1 results in full, and
+            // the first kept result stays the same until `step` more results have arrived.
+            keepFrom = keepFrom / keepFromStep * keepFromStep;
+        }
         for (var n = keepFrom; n < resultIndexes.Count; n++)
         {
             pinned.Add(resultIndexes[n]);

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
@@ -230,6 +231,323 @@ public static class LocalChatPayloadSignals
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Note added to the newest message the first time the model repeats a command, so the
+    /// model is told what the operator would otherwise have to type. Seen in practice: a
+    /// listing whose filter excluded every file returned nothing, and the model kept running
+    /// the identical command, waiting for a different answer.
+    /// </summary>
+    public const string RepeatedCommandNudge =
+        "Note from AI-FluxMux: you just ran exactly the same command as your previous step. "
+        + "If its result did not give you what you need, running it again will not either. "
+        + "Work out why it returned what it did (for example a filter that excludes everything, "
+        + "a wrong path, or output that is not captured) and try a different command.";
+
+    /// <summary>
+    /// The note for a run of <paramref name="times"/> identical commands: the plain nudge for the
+    /// first repeat, a firmer one after that. It goes with every repeat, including a turn the
+    /// operator chose to send anyway, so the model is told each time rather than only once.
+    /// </summary>
+    public static string RepeatedCommandNote(int times)
+        => times <= 2
+            ? RepeatedCommandNudge
+            : "Note from AI-FluxMux: you have now run exactly the same command "
+              + times.ToString(System.Globalization.CultureInfo.InvariantCulture)
+              + " times in a row, and it cannot return anything different. Do not run it again. "
+              + "Say what you expected it to show, check why it did not (for example a filter that "
+              + "excludes everything, or a wrong path), and take a different step.";
+
+    /// <summary>A run of this many failed tool calls in a row gets a note to the model.</summary>
+    public const int FailedToolRunNoteAt = 3;
+
+    /// <summary>
+    /// The note for <paramref name="failed"/> failed tool calls in a row. In the operator's Cline
+    /// history there were 93 runs of three or more failures in a row (longest 11), and Cline stops
+    /// a task after six errors in a row. Different commands each time, so the repeat note does
+    /// not catch it; what helps is telling the model to read the errors and change approach.
+    /// </summary>
+    public static string FailedToolRunNote(int failed)
+        => "Note from AI-FluxMux: your last "
+           + failed.ToString(System.Globalization.CultureInfo.InvariantCulture)
+           + " tool calls all failed. "
+           + (failed >= 5
+               ? "Stop and read the error messages above before doing anything else. "
+               : "Read the error messages above before the next step. ")
+           + "Trying the same thing again, or a small variation of it, is unlikely to work. "
+           + "Change approach: check that the path, command or tool you are using exists and is "
+           + "spelled correctly, or take a smaller step that you can confirm works.";
+
+    /// <summary>
+    /// How many of the newest tool results failed in a row. Counting stops at the first result that
+    /// succeeded, or at a message the person wrote (new guidance resets the run).
+    /// </summary>
+    public static int CountTrailingFailedToolResults(JsonObject payload)
+    {
+        if (payload["messages"] is not JsonArray messages)
+        {
+            return 0;
+        }
+
+        var failed = 0;
+        for (var i = messages.Count - 1; i >= 0; i--)
+        {
+            if (messages[i] is not JsonObject message)
+            {
+                continue;
+            }
+
+            if (LocalToolResultClearing.IsToolResult(message))
+            {
+                if (!IsFailedToolResult(MessageText(message)))
+                {
+                    break;
+                }
+
+                failed++;
+                continue;
+            }
+
+            if (Str(message, "role").Equals("user", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(ContextEngine.ConversationText.HumanPart(MessageText(message))))
+            {
+                break;
+            }
+        }
+
+        return failed;
+    }
+
+    /// <summary>
+    /// A tool result that reports failure. Cline (OpenAI Compatible) sends each result as the JSON of
+    /// its result list — <c>[{"query":…,"result":…,"error":…,"success":false}]</c> — and a plain
+    /// error as its text or <c>{"error":…}</c>. A list counts as failed only when no entry succeeded.
+    /// </summary>
+    public static bool IsFailedToolResult(string? text)
+    {
+        var trimmed = (text ?? string.Empty).Trim();
+        if (trimmed.Length == 0)
+        {
+            return false;
+        }
+
+        var compact = trimmed.Replace("\": ", "\":", StringComparison.Ordinal);
+        if (compact.Contains("\"success\":false", StringComparison.Ordinal))
+        {
+            return !compact.Contains("\"success\":true", StringComparison.Ordinal);
+        }
+
+        return compact.StartsWith("{\"error\":", StringComparison.Ordinal)
+            || trimmed.StartsWith("Error:", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("[ERROR]", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("tool_execution_failed", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// How many times in a row the latest tool command was issued (1 = not repeated), each in a
+    /// separate assistant turn. Commands that normally repeat for good reason — tests, builds,
+    /// python runs, reads and anything naming a file path — count only when their results are
+    /// identical too: the same call with the same answer is no new information, whatever the
+    /// tool. Seen: the model ran one python listing five times with the same output and Cline
+    /// stopped the task, while the old blanket exemption kept AI-FluxMux silent.
+    /// </summary>
+    public static int CountRepeatedToolCommand(JsonObject payload, out string command)
+    {
+        command = string.Empty;
+        var calls = CollectToolFingerprintsInOrder(payload);
+        if (calls.Count == 0)
+        {
+            return 0;
+        }
+
+        var run = RepeatRunMessages(payload, calls);
+        if (run.Count >= 2)
+        {
+            command = calls[^1].Fingerprint;
+        }
+
+        return run.Count;
+    }
+
+    // The assistant messages of the trailing run of identical calls, newest first.
+    private static List<int> RepeatRunMessages(JsonObject payload, List<(string Fingerprint, int Message)> calls)
+    {
+        var run = new List<int>();
+        if (calls.Count == 0 || payload["messages"] is not JsonArray messages)
+        {
+            return run;
+        }
+
+        var objects = messages.OfType<JsonObject>().ToList();
+        var (last, lastMessage) = calls[^1];
+        var needSameResult = IsClosedLoopFingerprint(last);
+        var lastResult = needSameResult ? ResultTextAfter(objects, lastMessage) : null;
+        run.Add(lastMessage);
+        for (var i = calls.Count - 2; i >= 0; i--)
+        {
+            var (fingerprint, message) = calls[i];
+            if (message == run[^1])
+            {
+                continue; // another call in the same assistant message
+            }
+
+            if (!string.Equals(fingerprint, last, StringComparison.Ordinal)
+                || (needSameResult && !string.Equals(ResultTextAfter(objects, message), lastResult, StringComparison.Ordinal)))
+            {
+                break;
+            }
+
+            run.Add(message);
+        }
+
+        return run;
+    }
+
+    // The tool results that answer the assistant message at `index` (the messages right after it).
+    private static string ResultTextAfter(List<JsonObject> objects, int index)
+    {
+        var sb = new StringBuilder();
+        for (var j = index + 1; j < objects.Count && LocalToolResultClearing.IsToolResult(objects[j]); j++)
+        {
+            sb.Append(MessageText(objects[j])).Append('');
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// In the forwarded pack, keeps only the first of a run of identical tool calls (and its
+    /// result) and drops the later repeats. Measured: with seven identical attempts in the chat
+    /// the model ignored a note and repeated an eighth time — the run itself is the strongest
+    /// example in its context. One attempt plus the note (which states the count) reads as a dead
+    /// end instead. An assistant message that also made other calls is left alone, so no call is
+    /// ever separated from its result. The Client app still has every attempt. Returns the
+    /// number of attempts dropped. Uses the same run as <see cref="CountRepeatedToolCommand"/>.
+    /// </summary>
+    public static int CollapseRepeatedToolRun(JsonObject payload)
+    {
+        if (payload["messages"] is not JsonArray messages)
+        {
+            return 0;
+        }
+
+        var calls = CollectToolFingerprintsInOrder(payload);
+        var runMessages = RepeatRunMessages(payload, calls);
+        if (runMessages.Count < 2)
+        {
+            return 0;
+        }
+
+        var callsPerMessage = calls.GroupBy(c => c.Message).ToDictionary(g => g.Key, g => g.Count());
+        var objects = messages.OfType<JsonObject>().ToList();
+        var drop = new HashSet<JsonObject>(ReferenceEqualityComparer.Instance);
+        // runMessages is newest first; keep the oldest (the first attempt).
+        foreach (var index in runMessages.Take(runMessages.Count - 1))
+        {
+            if (callsPerMessage.GetValueOrDefault(index) != 1 || index >= objects.Count)
+            {
+                continue;
+            }
+
+            drop.Add(objects[index]);
+            for (var j = index + 1; j < objects.Count && LocalToolResultClearing.IsToolResult(objects[j]); j++)
+            {
+                drop.Add(objects[j]);
+            }
+        }
+
+        if (drop.Count == 0)
+        {
+            return 0;
+        }
+
+        for (var i = messages.Count - 1; i >= 0; i--)
+        {
+            if (messages[i] is JsonObject obj && drop.Contains(obj))
+            {
+                messages.RemoveAt(i);
+            }
+        }
+
+        return drop.Count(o => Str(o, "role").Equals("assistant", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Appends <paramref name="note"/> to the newest message (the latest tool result), which is
+    /// the only place an addition leaves llama-server's cached prompt untouched. Returns false
+    /// when the payload has no messages or the note is already there.
+    /// </summary>
+    public static bool AppendNoteToNewestMessage(JsonObject payload, string note)
+    {
+        if (payload["messages"] is not JsonArray messages
+            || messages.Count == 0
+            || messages[^1] is not JsonObject newest)
+        {
+            return false;
+        }
+
+        if (MessageText(newest).Contains(note, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        switch (newest["content"])
+        {
+            case JsonArray parts:
+                parts.Add(new JsonObject { ["type"] = "text", ["text"] = note });
+                break;
+            case JsonValue value when value.TryGetValue<string>(out var text):
+                newest["content"] = string.IsNullOrEmpty(text) ? note : text + "\n\n" + note;
+                break;
+            default:
+                newest["content"] = note;
+                break;
+        }
+
+        return true;
+    }
+
+    private static List<(string Fingerprint, int Message)> CollectToolFingerprintsInOrder(JsonObject payload)
+    {
+        var found = new List<(string, int)>();
+        if (payload["messages"] is not JsonArray messages)
+        {
+            return found;
+        }
+
+        var index = 0;
+        foreach (var msg in messages.OfType<JsonObject>())
+        {
+            if (Str(msg, "role").Equals("assistant", StringComparison.OrdinalIgnoreCase))
+            {
+                var foundCalls = false;
+                if (msg["tool_calls"] is JsonArray calls)
+                {
+                    foreach (var node in calls.OfType<JsonObject>())
+                    {
+                        var fingerprint = FingerprintToolCall(node);
+                        if (!string.IsNullOrWhiteSpace(fingerprint))
+                        {
+                            found.Add((fingerprint, index));
+                            foundCalls = true;
+                        }
+                    }
+                }
+
+                if (!foundCalls)
+                {
+                    foreach (var fingerprint in FingerprintXmlToolCalls(MessageText(msg)))
+                    {
+                        found.Add((fingerprint, index));
+                    }
+                }
+            }
+
+            index++;
+        }
+
+        return found;
     }
 
     public static bool HasRepeatedToolCommand(JsonObject payload, out string command)

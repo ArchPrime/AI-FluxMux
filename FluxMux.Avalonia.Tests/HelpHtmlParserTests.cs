@@ -591,7 +591,7 @@ public sealed class HelpHtmlParserTests
                      "Closed-loop lookback",
                      "Closed-loop mill ceiling",
                      "Observe-only mill",
-                     "Rapid-churn",
+                     "Failed calls",
                      "Repeated command",
                      "Diagnostic dump",
                      "Hang",

@@ -37,7 +37,27 @@ public static class ConversationText
         "This session is being continued",
         "<tool_result",
         "<explicit_instructions",
+        // AI-FluxMux's own inserted text: the compaction summary, the essence summary written
+        // into Cline's compaction file, and the notes added to a tool result. None is a person's
+        // words, and reading the summary as one made a compacted chat look like a new chat.
+        "Compressed prior conversation context",
+        "Context summary:",
+        "Note from AI-FluxMux",
+        "[AI-FluxMux:",
     ];
+
+    /// <summary>
+    /// True for an assistant-role message that AI-FluxMux wrote itself — the pause notice sent
+    /// back when the operator clicks "Let me steer". The Client app keeps it in the chat as if the
+    /// model had said it, so the session state was read from it: VIBE_STATE's State became
+    /// "To break a mill, raise Temperature…" and was handed back to the model every turn.
+    /// </summary>
+    public static bool IsAiFluxMuxNotice(string? text)
+    {
+        var trimmed = (text ?? string.Empty).TrimStart();
+        return trimmed.StartsWith(PortRulesPostMortem.SteerNoticeLead.Trim(), StringComparison.Ordinal)
+            || trimmed.StartsWith(PortRulesPostMortem.ChatTurnCannotContinue.Trim(), StringComparison.Ordinal);
+    }
 
     /// <summary>
     /// The human-written part of a user-role message, or an empty string when the message is

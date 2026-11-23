@@ -24,6 +24,9 @@ public sealed class VibeStateFidelityTests
     [InlineData("<environment_details>only the environment</environment_details>", "")]
     [InlineData("are vision models made slower by this fix?", "are vision models made slower by this fix?")]
     [InlineData("  plain Harness message  ", "plain Harness message")]
+    [InlineData("Compressed prior conversation context (older turns):\n- read Settings.cs", "")]
+    [InlineData("Context summary:\n\n## Goal\nmake me a 3d rpg game", "")]
+    [InlineData("Note from AI-FluxMux: you just ran exactly the same command as your previous step.", "")]
     public void Human_part_drops_client_control_text(string input, string expected)
     {
         Assert.Equal(expected, ConversationText.HumanPart(input));

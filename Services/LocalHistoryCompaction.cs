@@ -110,7 +110,48 @@ public static class LocalHistoryCompaction
     public static JsonArray? CompactMessages(JsonArray messages, int keepTurns = KeepTurns, bool force = false)
         => CompactMessages(messages, PortForwardingRules.Defaults with { CompactKeepTurns = keepTurns }, force);
 
+    /// <summary>
+    /// Compacts with a cut point that moves in steps rather than one message per turn, so the
+    /// forwarded prompt keeps the same start (system, summary, kept turns) for several turns
+    /// and llama-server's prompt cache only rereads the newest turn. A Client app resends its
+    /// whole chat every turn, so the cut is recomputed each time; with a one-message slide the
+    /// summary and the first kept turn changed on every request and almost nothing after the
+    /// system prompt could be reused. The stepped cut keeps up to one step more of recent turns,
+    /// so <paramref name="fits"/> is checked and today's tighter cut is used if it does not fit.
+    /// </summary>
+    public static bool TryCompactPayloadStable(JsonObject payload, PortForwardingRules rules, Func<JsonObject, bool> fits)
+    {
+        if (payload["messages"] is not JsonArray messages)
+        {
+            return false;
+        }
+
+        var stable = CompactMessages(messages, rules, force: true, steppedCut: true);
+        if (stable is not null)
+        {
+            var trial = new JsonObject { ["messages"] = stable };
+            foreach (var (key, value) in payload)
+            {
+                if (key != "messages")
+                {
+                    trial[key] = value?.DeepClone();
+                }
+            }
+
+            if (fits(trial))
+            {
+                payload["messages"] = trial["messages"]!.DeepClone();
+                return true;
+            }
+        }
+
+        return TryCompactPayload(payload, rules, force: true);
+    }
+
     public static JsonArray? CompactMessages(JsonArray messages, PortForwardingRules rules, bool force = false)
+        => CompactMessages(messages, rules, force, steppedCut: false);
+
+    private static JsonArray? CompactMessages(JsonArray messages, PortForwardingRules rules, bool force, bool steppedCut)
     {
         if (messages.Count < 4)
         {
@@ -138,7 +179,16 @@ public static class LocalHistoryCompaction
         }
 
         var split = Math.Min(keepTurns, Math.Max(1, messages.Count - 1));
-        var keepStart = AlignKeepStart(messages, messages.Count - split);
+        var rawStart = messages.Count - split;
+        if (steppedCut && split > 1)
+        {
+            // Round the cut down to a multiple of the keep count: it then stays at the same
+            // message while the next `split` messages arrive, and the kept tail runs from
+            // `split` up to just under twice that.
+            rawStart = Math.Max(1, rawStart / split * split);
+        }
+
+        var keepStart = AlignKeepStart(messages, rawStart);
         if (keepStart < 1)
         {
             return null;
@@ -376,7 +426,9 @@ public static class LocalHistoryCompaction
                 var start = idx;
                 var end = Math.Min(text.Length, start + 250);
                 // Try to find a natural break (period + space, or newline)
-                var periodIdx = text.IndexOf(". ", end - 50, StringComparison.Ordinal);
+                // Search from 50 chars before the cap, but never before the marker: a short
+                // message ("I'll read it.") used to make this start index negative and throw.
+                var periodIdx = text.IndexOf(". ", Math.Max(start, end - 50), StringComparison.Ordinal);
                 if (periodIdx > start && periodIdx < end)
                 {
                     end = periodIdx + 1;

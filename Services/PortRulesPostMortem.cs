@@ -217,8 +217,18 @@ public static class PortRulesPostMortem
     public static string FormatPausePrompt(string? finding)
         => WithoutStopLeads(finding);
 
+    /// <summary>Closer for a finding that says the fault is in the Client-app chat (a repeated
+    /// command, a diagnostic dump). Offering to "raise the Port rule" there contradicted the line
+    /// just before it, "Changing Port rules will not fix this".</summary>
+    public const string SteerNoticeClientCloser =
+        "Or send another message in this chat that tells the model what to do differently.";
+
     public static string FormatSteerNotice(string? finding)
-        => JoinClientError(SteerNoticeLead + WithoutStopLeads(finding), SteerNoticeCloser);
+        => JoinClientError(
+            SteerNoticeLead + WithoutStopLeads(finding),
+            (finding ?? string.Empty).Contains(ClientAppFaultLead, StringComparison.Ordinal)
+                ? SteerNoticeClientCloser
+                : SteerNoticeCloser);
 
     public static string WithStopAdvice(string? body)
         => JoinClientError(body, PortRuleStopAdvice);
@@ -251,9 +261,11 @@ public static class PortRulesPostMortem
         return body + " " + extra;
     }
 
-    public static string FormatRepeatedCommand()
+    public static string FormatRepeatedCommand(int times = 3)
         => ChatTurnCannotContinue
-            + "the Client app ran the same command twice. "
+            + "the model in the Client app ran exactly the same command "
+            + Math.Max(2, times).ToString(CultureInfo.InvariantCulture)
+            + " times in a row. AI-FluxMux tells it each time that the result will not change, so it is stuck. "
             + ClientAppFaultLead
             + " "
             + MillBreakAdvice;

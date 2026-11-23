@@ -259,6 +259,28 @@ public sealed class EssencePreservationTests
         Assert.False(d.Observe(5400, 128000, "s1", "m"));
     }
 
+    [Fact]
+    public void EdgeDetector_TinyProbeAfterStartUp_IsIgnored_AndTheRealTurnIsAStartNotADrop()
+    {
+        // Seen in the log after every relaunch: a 59-token request arrives first, then the
+        // Client app's full chat. The probe must not count as a turn of the chat at all.
+        var d = new CompactionEdgeDetector();
+        Assert.Equal(CompactionEdge.None, d.ObserveEdge(59, 524288, "s1", "m"));
+        Assert.False(d.HasObserved);
+        Assert.Equal(CompactionEdge.Start, d.ObserveEdge(78710, 524288, "s1", "m"));
+        Assert.Equal(CompactionEdge.None, d.ObserveEdge(81608, 524288, "s1", "m"));
+    }
+
+    [Fact]
+    public void EdgeDetector_TinyProbeMidChat_DoesNotLookLikeACompaction()
+    {
+        var d = new CompactionEdgeDetector();
+        d.ObserveEdge(80000, 524288, "s1", "m");
+        Assert.Equal(CompactionEdge.None, d.ObserveEdge(59, 524288, "s1", "m"));
+        // A real compaction afterwards is still caught, measured against the real turn.
+        Assert.Equal(CompactionEdge.Drop, d.ObserveEdge(20000, 524288, "s1", "m"));
+    }
+
     // ── EssenceReasserter ────────────────────────────────────────────────────────
 
     [Fact]

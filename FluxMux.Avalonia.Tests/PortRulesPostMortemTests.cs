@@ -341,7 +341,7 @@ public sealed class PortRulesPostMortemTests
     public void Repeated_command_and_diagnostic_dump_name_the_Client_app_and_no_Port_rule()
     {
         var repeated = PortRulesPostMortem.FormatRepeatedCommand();
-        Assert.Contains("the Client app ran the same command twice", repeated);
+        Assert.Contains("the model in the Client app ran exactly the same command 3 times in a row", repeated);
         Assert.Contains(PortRulesPostMortem.ClientAppFaultLead, repeated);
         Assert.Contains(PortRulesPostMortem.MillBreakAdvice, repeated);
         Assert.StartsWith(PortRulesPostMortem.ChatTurnCannotContinue, repeated);
@@ -369,7 +369,16 @@ public sealed class PortRulesPostMortemTests
 
             var steer = PortRulesPostMortem.FormatSteerNotice(finding);
             Assert.Contains(PortRulesPostMortem.SteerNoticeLead.Trim(), steer, StringComparison.Ordinal);
-            Assert.Contains(PortRulesPostMortem.SteerNoticeCloser, steer, StringComparison.Ordinal);
+            // A finding that blames the Client-app chat must not then suggest raising a Port rule.
+            var clientFault = finding.Contains(PortRulesPostMortem.ClientAppFaultLead, StringComparison.Ordinal);
+            Assert.Contains(
+                clientFault ? PortRulesPostMortem.SteerNoticeClientCloser : PortRulesPostMortem.SteerNoticeCloser,
+                steer,
+                StringComparison.Ordinal);
+            if (clientFault)
+            {
+                Assert.DoesNotContain("raise the Port rule", steer, StringComparison.Ordinal);
+            }
             Assert.DoesNotContain(PortRulesPostMortem.PortRuleStopAdvice, steer, StringComparison.Ordinal);
             Assert.DoesNotContain("400", steer, StringComparison.Ordinal);
             Assert.DoesNotContain("This Client-app turn is over", steer, StringComparison.Ordinal);

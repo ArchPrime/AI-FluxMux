@@ -3988,7 +3988,7 @@ test, build, or run, including looking at the project afterward.</p>
 <td><strong>Omit</strong></td>
 <td>Full tool results on the pack</td>
 <td>Older tool bodies are large</td>
-<td>Stubs older bodies so llama-server still sees that the call ran. Does not end the turn. The Client app still has the full output.</td>
+<td>Stubs older bodies so llama-server still sees that the call ran. A result identical to an earlier one still shown in full, such as a file read again unchanged, becomes a one-line pointer to it. Does not end the turn. The Client app still has the full output.</td>
 </tr>
 <tr>
 <td><strong>Max pictures</strong></td>
@@ -4021,16 +4021,16 @@ test, build, or run, including looking at the project afterward.</p>
 <td>Pauses even on a short chat.</td>
 </tr>
 <tr>
-<td><strong>Rapid-churn</strong></td>
-<td>Pace after the pack is deep</td>
-<td>Several turns closer together than Seconds</td>
-<td>Pauses on pace, not on usefulness.</td>
+<td><strong>Repeated command</strong></td>
+<td>Latest shell commands</td>
+<td>The same command again</td>
+<td>Tells the model first that the result will not change. Pauses this Client-app turn only if it runs the command a third time.</td>
 </tr>
 <tr>
-<td><strong>Repeated command</strong></td>
-<td>Last two shell commands</td>
-<td>The same command again without reading the last result</td>
-<td>Pauses this Client-app turn.</td>
+<td><strong>Failed calls</strong></td>
+<td>Latest tool results</td>
+<td>Three or more failed in a row, even with different commands</td>
+<td>Tells the model to read the errors and change approach. Does not pause.</td>
 </tr>
 <tr>
 <td><strong>Diagnostic dump</strong></td>

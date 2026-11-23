@@ -60,9 +60,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private int _port;
     private readonly IdleSessionCoordinator _idleSession;
     private GenerationSpeedTracker? _generationSpeed;
-    private readonly object _churnLock = new();
-    private DateTime _lastLocalToolTurnUtc;
-    private int _rapidLocalToolTurns;
     private readonly object _portRulesLock = new();
     private PortForwardingRules _portRules = PortForwardingRules.Defaults;
     private PortRulesTelemetry _lastPortRulesTelemetry = PortRulesTelemetry.Empty;
@@ -715,6 +712,17 @@ public sealed class FluxMuxGatewayHost : IDisposable
         var isProbeRequest = context.Request.Headers[CloudEndpointValidationProbe.ProbeRequestHeader]?.Any() ?? false;
         var requestId = Guid.NewGuid().ToString("N")[..8];
         string? overlayVariant = null;
+
+        // Choose this request's VIBE_STATE conversation from the chat exactly as the Client app
+        // sent it, before Omit, compaction or anything else rewrites it, and before the files are
+        // read or written. Done after compaction, the summary became the "first human message", so
+        // a compacted turn looked like a new chat and the note was archived and swapped back and
+        // forth between consecutive turns (seen 8 s apart in the log).
+        if (!isProbeRequest)
+        {
+            EnsureVibeConversationScope(payload);
+        }
+
         // If the user's client reinflates the context (forwards the full chat each turn, e.g. Cline),
         // skip session artifact stripping entirely. The client will resend the full history on the next
         // turn anyway, so stripping tool results here would modify the prompt and prevent KV cache reuse.
@@ -738,12 +746,20 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
         var portRules = CurrentRules();
         int clearedResults = 0;
+        // How deep the pack is for the Mill rules: older results beyond the keep count, counted
+        // even while Omit is still waiting for the Context to fill, so the loop rules keep working.
+        int millDepth = 0;
         // If the client reinflates the context (e.g., Cline), skip tool-result-clearing too.
         // The client resends the full history each turn, so clearing results here would modify
         // the prompt and prevent KV cache reuse — the same reasoning as the session-artifact skip above.
         if (portRules.ToolResultClearingEnabled && GetUserClientReinflatesContext?.Invoke() != true)
         {
-            clearedResults = LocalToolResultClearing.ClearOlderResults(payload, portRules);
+            clearedResults = LocalToolResultClearing.ClearOlderResultsWhenFilling(
+                payload,
+                portRules,
+                ParseInt(Str(state, "local_context"), 0),
+                out var eligibleResults);
+            millDepth = Math.Max(clearedResults, eligibleResults);
         }
         if (clearedResults > 0)
         {
@@ -768,28 +784,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 + " most recent. The Client app still has the full album.");
         }
 
-        var haltAsToolMill = LocalToolResultClearing.ShouldHaltAsToolMill(payload, clearedResults, portRules);
+        var haltAsToolMill = LocalToolResultClearing.ShouldHaltAsToolMill(payload, millDepth, portRules);
+        // Rapid-churn is retired. It paused a deep pack when four tool turns came < 3 s apart, which
+        // only ever meant a runaway loop while each turn spent ~9 s rereading its prompt. With the
+        // prompt cache working a turn takes ~1 s, so it paused ordinary fast work; and everything it
+        // alone caught (fast, varied, useful-looking calls) is not a loop. Repeats, failure runs and
+        // unproductive deep packs have their own notes and Mill rules. The JSON keys stay so older
+        // settings files load.
         var rapidChurn = false;
         var rapidStreak = 0;
-        lock (_churnLock)
-        {
-            var now = DateTime.UtcNow;
-            var since = _lastLocalToolTurnUtc == default
-                ? TimeSpan.MaxValue
-                : now - _lastLocalToolTurnUtc;
-            _rapidLocalToolTurns = LocalToolResultClearing.NextRapidChurnStreak(
-                clearedResults,
-                since,
-                _rapidLocalToolTurns,
-                portRules);
-            _lastLocalToolTurnUtc = now;
-            rapidStreak = _rapidLocalToolTurns;
-            rapidChurn = LocalToolResultClearing.ShouldHaltAsRapidChurn(_rapidLocalToolTurns, portRules);
-            if (rapidChurn)
-            {
-                _rapidLocalToolTurns = 0;
-            }
-        }
 
         haltAsToolMill = haltAsToolMill || rapidChurn;
         if (haltAsToolMill && ConsumePortRuleSendAnywayGrace())
@@ -803,7 +806,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         PublishPortRulesTelemetry(new PortRulesTelemetry
         {
             HasLocalTurn = true,
-            Omitted = clearedResults,
+            Omitted = millDepth,
             ObserveOnly = LocalChatPayloadSignals.CountRecentObserveOnlyTools(
                 payload,
                 portRules.ObserveOnlyMillCount),
@@ -812,14 +815,17 @@ public sealed class FluxMuxGatewayHost : IDisposable
             DumpCount = sessionArtifacts.ArtifactCount,
             RepeatedCommandThisTurn = repeatedThisTurn
         });
-        var compactOn = ParseBool(Str(LoadLocalReload(), "forward_compact"));
+        var localReload = LoadLocalReload();
+        var compactOn = ParseBool(Str(localReload, "forward_compact"));
+        // Only the Compact button sets compact_now; forward_compact alone means "Compact is on".
+        var compactNow = ParseBool(Str(localReload, "compact_now"));
         // Probe/stress-test requests must reach the model at their INTENDED fill level. If the
         // gateway auto-compacted them, the model would see a shrunken prompt and the test's
         // TTFT/tok/s readings would be meaningless (and the context gauge would disagree with
         // the test's fill %). So skip forward-compaction for probes; the ShouldBlockLocalForward
         // safety check below still runs so the test can observe the real "context too small"
         // behavior at high fill.
-        var compactApplied = isProbeRequest ? false : TryApplyForwardCompact(payload, state, compactOn, forceCompact: compactOn);
+        var compactApplied = isProbeRequest ? false : TryApplyForwardCompact(payload, state, compactOn, forceCompact: compactNow);
 
         OfferDocumentContextDialogIfNeeded(state, payload, compactApplied, isProbeRequest);
         var reloadOffered = false;
@@ -938,12 +944,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
         // measured-token path and again in the reinflating-client path), recording everything
         // twice; this flag makes it once per request.
         var vibeUpdatedThisTurn = false;
-        if (!isProbeRequest)
-        {
-            // Switch the VIBE_STATE files to this conversation BEFORE reading or writing them, so
-            // one chat's task is never injected into another chat or another Client app.
-            EnsureVibeConversationScope(payload);
-        }
+        // The VIBE_STATE conversation was already chosen at the top of this request, from the
+        // Client app's own chat, so one chat's task is never injected into another.
 
         if (routeKind == "cloud" && !isProbeRequest)
         {
@@ -1456,13 +1458,48 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 }
             }
 
-            if (routeKind == "local"
-                && portRules.RepeatedCommandEnabled
-                && FluxMuxGatewayRouting.AllowsOperatorRouting(forceRoute)
-                && LocalChatPayloadSignals.HasRepeatedToolCommand(payload, out var repeatedCommand))
+            // A repeated command: the first repeat is the model's to fix, so tell it rather than
+            // the operator — a note on the newest tool result saying the same command will give
+            // the same answer. Only when it repeats again after that note is the turn paused.
+            var repeatedCommand = string.Empty;
+            var repeatRun = routeKind == "local" && portRules.RepeatedCommandEnabled
+                ? LocalChatPayloadSignals.CountRepeatedToolCommand(payload, out repeatedCommand)
+                : 0;
+            if (repeatRun >= 2)
+            {
+                // Send the model one attempt plus a note with the count, not the whole run: the
+                // run itself is what it copies. Gated like Omit, since it rewrites the pack.
+                var collapsed = portRules.ToolResultClearingEnabled && GetUserClientReinflatesContext?.Invoke() != true
+                    ? LocalChatPayloadSignals.CollapseRepeatedToolRun(payload)
+                    : 0;
+                if (LocalChatPayloadSignals.AppendNoteToNewestMessage(payload, LocalChatPayloadSignals.RepeatedCommandNote(repeatRun)))
+                {
+                    Log("local chat: Client app ran the same command " + repeatRun.ToString(CultureInfo.InvariantCulture)
+                        + " times in a row; told the model"
+                        + (collapsed > 0 ? " and sent it the first attempt only (" + collapsed.ToString(CultureInfo.InvariantCulture) + " repeats left out)" : string.Empty)
+                        + ": " + Truncate(repeatedCommand, 80));
+                }
+            }
+
+            // Several failed tool calls in a row, even with different commands: tell the model to
+            // read the errors and change approach. Never pauses — it is the model's to fix, and
+            // Cline itself stops a task after six errors in a row.
+            if (routeKind == "local")
+            {
+                var failedRun = LocalChatPayloadSignals.CountTrailingFailedToolResults(payload);
+                if (failedRun >= LocalChatPayloadSignals.FailedToolRunNoteAt
+                    && LocalChatPayloadSignals.AppendNoteToNewestMessage(payload, LocalChatPayloadSignals.FailedToolRunNote(failedRun)))
+                {
+                    Log("local chat: the last " + failedRun.ToString(CultureInfo.InvariantCulture)
+                        + " tool calls failed; told the model to read the errors and change approach");
+                }
+            }
+
+            if (repeatRun >= 3
+                && FluxMuxGatewayRouting.AllowsOperatorRouting(forceRoute))
             {
                 Log("local chat: Client app repeated the same command: " + Truncate(repeatedCommand, 80));
-                var finding = PortRulesPostMortem.FormatRepeatedCommand();
+                var finding = PortRulesPostMortem.FormatRepeatedCommand(repeatRun);
                 var pause = await AskPortRulePauseAsync(finding, portRules).ConfigureAwait(false);
                 if (pause == FluxMuxGatewayRouting.Cloud)
                 {
@@ -1508,7 +1545,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 && haltAsToolMill)
             {
                 var finding = PortRulesPostMortem.FormatMill(
-                    clearedResults,
+                    millDepth,
                     rapidChurn,
                     rapidStreak,
                     portRules);
@@ -1541,21 +1578,21 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         context.Response,
                         FluxMuxGatewayRouting.FormatToolMillMessage(
                             state,
-                            clearedResults,
+                            millDepth,
                             rapidChurn,
                             rapidStreak,
                             portRules),
                         400,
                         FluxMuxGatewayRouting.ToolMillType).ConfigureAwait(false);
                     Log("cline_tool_mill: llama-server was not asked after omitting "
-                        + clearedResults.ToString(CultureInfo.InvariantCulture)
+                        + millDepth.ToString(CultureInfo.InvariantCulture)
                         + " older tool result(s)"
                         + (rapidChurn ? " (rapid churn)" : string.Empty));
                     EmitContextEvent(
                         FluxMuxGatewayRouting.ToolMillType,
                         "provider=" + provider
                         + " model=" + model
-                        + " n_omitted=" + clearedResults.ToString(CultureInfo.InvariantCulture)
+                        + " n_omitted=" + millDepth.ToString(CultureInfo.InvariantCulture)
                         + " status=400");
                     ReportPortRulesFinding(finding);
                     return;
@@ -1675,7 +1712,24 @@ public sealed class FluxMuxGatewayHost : IDisposable
         if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
         {
             LocalStopHygiene.Apply(payload, portRules.StopHygieneMode);
-            LocalPrefixCachePolicy.ApplyAfterCompact(payload, compactApplied, portRules);
+
+            // Last change to the pack before it is sent, so every earlier copy a pointer refers to
+            // has survived Omit and compaction. Same gate as Omit: the Cline-like client style asks
+            // AI-FluxMux to leave the prompt alone.
+            if (portRules.ToolResultClearingEnabled && GetUserClientReinflatesContext?.Invoke() != true)
+            {
+                var deduped = LocalToolResultDedup.Apply(payload);
+                if (deduped > 0)
+                {
+                    Log("local chat: " + deduped.ToString(CultureInfo.InvariantCulture)
+                        + " tool result(s) identical to an earlier one were replaced by a pointer to it. The Client app still has the full output.");
+                }
+            }
+
+            // The prompt cache stays on after a compact. llama-server compares the new prompt
+            // with what it holds token by token and rereads only from the first difference, so
+            // a shortened prompt is always safe to send with the cache; turning it off made
+            // every compacted turn reread the whole prompt.
         }
 
         if (upstreamMode == "anthropic")
@@ -2750,6 +2804,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             ["compactRecommended"] = offer.CompactRecommended,
             ["betterChance"] = offer.BetterChance,
             ["forward_compact"] = compactAlreadyOn,
+            ["compact_now"] = ParseBool(Str(existing, "compact_now")),
             ["candVision"] = candidate is null ? string.Empty : Str(candidate, "vision"),
             ["candReasoning"] = candidate is null ? string.Empty : Str(candidate, "reasoning"),
             ["candContext"] = candidate is null ? 0 : ParseInt(Str(candidate, "context"), 0),
@@ -2920,17 +2975,19 @@ public sealed class FluxMuxGatewayHost : IDisposable
     }
 
     /// <summary>
-    /// Clears the forward_compact flag so the force-compact is a one-off action.
+    /// Clears the one-off compact_now flag so the Compact button compacts one turn only.
+    /// forward_compact ("Compact is on") is left alone: clearing it here is what used to switch
+    /// automatic compaction off for the rest of a session after the first turn.
     /// </summary>
     private void ClearForwardCompactFlag()
     {
         var existing = LoadLocalReload();
-        if (ParseBool(Str(existing, "forward_compact")))
+        if (ParseBool(Str(existing, "compact_now")))
         {
-            existing["forward_compact"] = false;
+            existing["compact_now"] = false;
             existing["updatedUtc"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
             SaveLocalReload(existing);
-            Log("local reload: forward_compact flag cleared after force-compact");
+            Log("local reload: one-off Compact request done");
         }
     }
 
@@ -3088,7 +3145,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
                             CompactToolKeepTurns = keepToolResults,
                             CompactPreservedUserChars = pinUserChars
                         };
-                        if (LocalHistoryCompaction.TryCompactPayload(payload, autoRules, force: true))
+                        if (LocalHistoryCompaction.TryCompactPayloadStable(
+                                payload,
+                                autoRules,
+                                trial => !LocalRequestOverlayRouting.PromptExceedsContext(trial, autoContext, rules.CompactHeadroom)))
                         {
                             Log("auto-compact: prompt " + autoPromptTokens.ToString(CultureInfo.InvariantCulture)
                                 + " tokens exceeded trigger " + triggerThreshold.ToString(CultureInfo.InvariantCulture)
@@ -3133,7 +3193,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return false;
         }
 
-        if (!LocalHistoryCompaction.TryCompactPayload(payload, rules, force: true))
+        if (!LocalHistoryCompaction.TryCompactPayloadStable(
+                payload,
+                rules,
+                trial => !LocalRequestOverlayRouting.PromptExceedsContext(trial, hotContext, rules.CompactHeadroom)))
         {
             // Forward-compaction bailed out: "too few turns, or one over-full turn".
             // The over-full-turn case is exactly what Hail Mary's non-destructive prune
@@ -3350,6 +3413,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             ["compactRecommended"] = true,
             ["betterChance"] = false,
             ["forward_compact"] = compactAlreadyOn,
+            ["compact_now"] = ParseBool(Str(existing, "compact_now")),
             ["spillCompact"] = true,
             ["spillUrgency"] = urgency,
             ["allow_until"] = 0,
@@ -3468,6 +3532,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             ["compactRecommended"] = false,
             ["betterChance"] = false,
             ["forward_compact"] = ParseBool(Str(existing, "forward_compact")),
+            ["compact_now"] = ParseBool(Str(existing, "compact_now")),
             ["spillCompact"] = false,
             ["allow_until"] = 0,
             ["suppress_until"] = 0,
@@ -3901,22 +3966,33 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 ? (ClineCompactionWriter.GetMostRecentSessionId() ?? "_cline")
                 : ("local:" + Str(state, "local_preferred_model"));
 
-            var edge = _essenceEdgeDetector.Observe(
+            var edge = _essenceEdgeDetector.ObserveEdge(
                 promptTokens, contextLimit, sessionKey, Str(state, "local_preferred_model"));
-            if (!edge)
+            if (edge == FluxMux.Avalonia.Services.ContextEngine.CompactionEdge.None)
             {
                 return;
             }
 
-            Log("essence: context was compacted/restarted (session=" + sessionKey
+            var what = edge switch
+            {
+                FluxMux.Avalonia.Services.ContextEngine.CompactionEdge.Drop => "context was compacted",
+                FluxMux.Avalonia.Services.ContextEngine.CompactionEdge.LimitJump => "context window changed size",
+                _ => "first turn seen for this chat since start-up"
+            };
+            Log("essence: " + what + " (session=" + sessionKey
                 + ", now " + promptTokens + " tokens, limit " + contextLimit
                 + ") — re-asserting the preserved session essence so the model keeps its place");
 
             if (isClineLike)
             {
                 // Cline: rewrite the compaction file with the essence (rich format) so Cline
-                // assimilates it on its next turn.
-                var sessionId = ClineCompactionWriter.GetMostRecentSessionId();
+                // assimilates it on its next turn — but only when Cline really shortened the chat.
+                // On a first turn after start-up, or a window change, Cline still holds the whole
+                // chat, and rewriting its compaction file there would hand it a summary it never
+                // asked for.
+                var sessionId = edge == FluxMux.Avalonia.Services.ContextEngine.CompactionEdge.Drop
+                    ? ClineCompactionWriter.GetMostRecentSessionId()
+                    : null;
                 if (!string.IsNullOrEmpty(sessionId))
                 {
                     var messagesPath = Path.Combine(
@@ -3984,6 +4060,16 @@ public sealed class FluxMuxGatewayHost : IDisposable
         {
             var messages = payload["messages"] as JsonArray;
             if (messages is null || messages.Count == 0)
+            {
+                return;
+            }
+
+            // A tiny request (a connection check after a profile switch, a title request) is not
+            // a turn of any Cline task. It carries no message ids, so the session match below
+            // falls back to the most recent task, and its one message read as "392 → 1" — a
+            // compaction that never happened — and rewrote that task's compaction file. A real
+            // Cline turn, even straight after Cline compacts, carries Cline's own system prompt.
+            if (LocalRequestOverlayRouting.EstimatePromptTokens(payload) < FluxMux.Avalonia.Services.ContextEngine.CompactionEdgeDetector.MinObservedTokens)
             {
                 return;
             }
@@ -4376,7 +4462,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 else if (role == "assistant")
                 {
                     var text = MessageText(msg);
-                    if (!string.IsNullOrWhiteSpace(text))
+                    // AI-FluxMux's own pause notice sits in the chat as an assistant message; it is
+                    // not the model's progress and must not become the session state.
+                    if (!string.IsNullOrWhiteSpace(text)
+                        && !FluxMux.Avalonia.Services.ContextEngine.ConversationText.IsAiFluxMuxNotice(text))
                     {
                         lastAssistant = text;
                     }
