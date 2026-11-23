@@ -174,7 +174,7 @@
                                                                     <StackPanel Spacing="4">
                                                                         <Button HorizontalAlignment="Left"
                                                                                 Content="AutoTune"
-                                                                                ToolTip.Tip="After you changed settings by hand, try to use leftover cloud ability without ignoring your goal list."
+                                                                                ToolTip.Tip="Sets this cloud profile's options to match your priority list above. **Save profile** keeps the result; **Revert changes** discards it."
                                                                                 Command="{Binding ApplyCloudIntentPresetCommand}" />
                                                                         <TextBlock FontSize="11" TextWrapping="Wrap" views:MarkedText.Source="{Binding CloudIntentPresetInfoText}" />
                                                                     </StackPanel>
@@ -327,7 +327,7 @@
                                                                                     <TextBlock Classes="reorderGrip"
                                                                                                Grid.Column="0"
                                                                                                Text="⋮⋮"
-                                                                                               ToolTip.Tip="Drag to change how important this goal is. The up and down buttons do the same."
+                                                                                               ToolTip.Tip="Drag to change how important this goal is. The settings below follow the list, and changing a setting by hand moves the list too."
                                                                                                PointerPressed="PriorityListBox_PointerPressed"
                                                                                                PointerMoved="PriorityListBox_PointerMoved"
                                                                                                PointerReleased="PriorityListBox_PointerReleased"
@@ -389,12 +389,12 @@
                                                                         <StackPanel Orientation="Horizontal" Spacing="8">
                                                                             <Button VerticalAlignment="Center"
                                                                                     Content="AutoTune"
-                                                                                    views:MarkedText.Tip="Fills leftover graphics-card and context room from your priority list. Leaves Images, max tokens, temperature, reasoning, and chat format you already set. Images on reserves graphics memory from Max image edge, so Context advice is smaller. **Save profile** to keep the launch settings, or **Revert changes** to discard. Tick the experimental box to also time a tiny test reply; that path stores settings so the model can reload."
+                                                                                    views:MarkedText.Tip="Fills in the launch settings from your priority list and this PC's free memory. Images, max tokens, temperature, reasoning and chat format you set yourself are left alone. Tick the box beside it to also measure real speeds on this PC. **Save profile** keeps the result; **Revert changes** discards it."
                                                                                     Command="{Binding ApplyLocalPriorityWizardCommand}"
                                                                                     CommandParameter="{Binding SelectedLocalVariantItem}" />
                                                                             <CheckBox VerticalAlignment="Center"
                                                                                       IsChecked="{Binding LocalExperimentalHardwareTuneEnabled}"
-                                                                                      views:MarkedText.Tip="When ticked, **AutoTune** applies the usual launch settings, then reloads the model for each trial and measures generation speed (tokens per second on a ~256-token reply). On an MTP model it tries draft lengths 2, 3 and 4. A trial must be at least 3% faster to win. The model is left running the winner, and the result stays in the detailed settings, unsaved: **Save profile** keeps it, **Revert changes** puts back your previous settings. Takes a few minutes; progress shows in Diagnostics. Leave unticked for the instant settings pass only (no reload, no measuring).">
+                                                                                      views:MarkedText.Tip="Also measure this PC: AutoTune reloads the model a few times and times real replies, trying Micro-batch sizes and, on MTP models, draft lengths. Only clearly faster settings are kept. The model is left running the result, unsaved: **Save profile** keeps it, **Revert changes** puts back what you had. Takes a few minutes; progress shows in Diagnostics.">
                                                                                 <CheckBox.Content>
                                                                                     <TextBlock Text="Test local system for additional optimisations (experimental)"
                                                                                                TextWrapping="Wrap"
@@ -412,21 +412,21 @@
                                                                                   <CheckBox IsChecked="{Binding LocalForwardPruneEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                             VerticalAlignment="Center"
                                                                                             Content="Trim waste per turn (forward pruning)"
-                                                                                            ToolTip.Tip="Forward pruning: on every turn, trim this turn's own waste (duplicate messages, repeated tool loops, oversized older tool results) so the context fills more slowly. Conservative — it never touches your current task. A per-turn throttle, separate from Compaction (which summarizes older turns). Toggle takes effect on the next turn, no reload needed." />
+                                                                                            ToolTip.Tip="Each turn, quietly removes waste the model does not need (duplicate messages, repeated tool loops, oversized old tool output) so Context fills more slowly. Never touches your current task. Not used with Cline-like clients. Applies from the next message." />
                                                                               </StackPanel>
 
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
                                                                                   <CheckBox IsChecked="{Binding LocalVibeStateEnabled}" IsEnabled="{Binding VibeStateControlsEnabled}"
                                                                                             VerticalAlignment="Center"
                                                                                             Content="Keep session vibe (VIBE_STATE.md)"
-                                                                                            ToolTip.Tip="VIBE_STATE: keeps a small persistent file (VIBE_STATE.md, next to the config) with the session's task / state / next step. On every local turn it is re-injected at the top of the system prompt so the model always knows 'where we are', even after the working context has been paged away. You can read and edit the file directly. Toggle takes effect on the next turn, no reload needed." />
+                                                                                            ToolTip.Tip="Keeps a short note of this chat's task, progress and next step, and passes it to the model each turn so it keeps its place after the chat is trimmed or the model restarts. Each chat keeps its own note. Hail Mary uses it to rescue a chat that ran out of room. Applies from the next message." />
                                                                               </StackPanel>
 
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
                                                                                   <CheckBox IsChecked="{Binding LocalContextPagingEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                             VerticalAlignment="Center"
                                                                                             Content="Page context (lossless spill)"
-                                                                                            ToolTip.Tip="Context paging: when forward-prune truncates an oversized older tool result, the full body is spilled to context_swap.json and the prompt carries a short swap_id pointer. The model can read the full body back via the read_swap_log tool, making the truncation lossless. When off, the lossy head+tail stub is used (identical to pre-paging behavior). Toggle takes effect on the next turn, no reload needed." />
+                                                                                            ToolTip.Tip="When old tool output is trimmed, the full text is kept aside so the model can ask for it back if it needs it. Off: trimmed output is gone for good. Applies from the next message." />
                                                                               </StackPanel>
 <StackPanel Orientation="Horizontal" Spacing="6">
                                                                                  <CheckBox IsChecked="{Binding LocalAutoCompactEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
@@ -549,9 +549,9 @@
                                                                             <TextBlock FontSize="12" FontWeight="SemiBold" Text="Fit and memory" />
                                                                             <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="6">
                                                                         <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Context" />
-                                                                        <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="1024" Maximum="{Binding LocalVariantContextMax}" Increment="1024" Value="{Binding LocalVariantContext}" ToolTip.Tip="How much of the chat the model can keep in mind. Bigger uses more graphics memory and may need a full reload later. AutoTune sizes this from leftover GPU memory after Images (Max image edge). On this 32 GB PC the daily NVFP4 sizes are 213056 with Images off and 163840 with Images on." />
+                                                                        <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="1024" Maximum="{Binding LocalVariantContextMax}" Increment="1024" Value="{Binding LocalVariantContext}" ToolTip.Tip="How much of the chat the model can keep in mind. More uses more graphics memory and needs a reload. AutoTune sizes this from the graphics memory left after the model and Images." />
                                                                         <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Flash" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantFlashAttention}" ToolTip.Tip="Can make long chats faster if your graphics card supports it. Leave Auto/On unless long chats feel broken." />
+                                                                        <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantFlashAttention}" ToolTip.Tip="Usually makes long chats faster and lighter on graphics memory. Leave On unless a model misbehaves with it. AutoTune turns it on for NVIDIA cards." />
                                                                         <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Fit VRAM" />
                                                                         <CheckBox Grid.Row="0"
                                                                                   Grid.Column="5"
@@ -561,9 +561,9 @@
                                                                                   ToolTip.Tip="On: shrink settings so the model still fits in graphics memory. Off: keep the sizes you set, even if that needs more graphics memory. Save keeps this choice." />
 
                                                                         <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="KV key" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalKvCacheOptions}" SelectedItem="{Binding LocalVariantKvCacheTypeK}" ToolTip.Tip="Precision for attention Keys — how reliably the model links new text back to the right earlier turns. q8_0 or f16 keeps earlier turns most faithful. q5/q4 fit roughly twice the Context in the same VRAM, with weaker recall of earlier turns; worth it when Context length matters more than Fidelity. AutoTune keeps q8_0 or better only while Fidelity ranks above Context length. Match KV value unless you are tuning on purpose." />
+                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalKvCacheOptions}" SelectedItem="{Binding LocalVariantKvCacheTypeK}" ToolTip.Tip="How precisely the model remembers earlier turns. q8_0 or f16 is the most faithful. q5 or q4 fit roughly twice the Context in the same graphics memory, but recall of earlier turns is weaker: worth it when Context matters more than Fidelity. Keep KV value the same unless you are tuning on purpose." />
                                                                         <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="KV value" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="3" ItemsSource="{Binding LocalKvCacheOptions}" SelectedItem="{Binding LocalVariantKvCacheTypeV}" ToolTip.Tip="Precision for attention Values — how faithfully earlier turn content is kept. q8_0 or f16 keeps earlier turns most faithful. q5/q4 fit roughly twice the Context in the same VRAM, with weaker recall of earlier turns; worth it when Context length matters more than Fidelity. AutoTune keeps q8_0 or better only while Fidelity ranks above Context length. Match KV key unless you are tuning on purpose." />
+                                                                        <ComboBox Grid.Row="1" Grid.Column="3" ItemsSource="{Binding LocalKvCacheOptions}" SelectedItem="{Binding LocalVariantKvCacheTypeV}" ToolTip.Tip="How precisely the model remembers earlier turns. q8_0 or f16 is the most faithful. q5 or q4 fit roughly twice the Context in the same graphics memory, but recall of earlier turns is weaker: worth it when Context matters more than Fidelity. Keep KV key the same unless you are tuning on purpose." />
                                                                         <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="SWA full" />
                                                                         <ComboBox Grid.Row="1" Grid.Column="5" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantSwaFull}" ToolTip.Tip="Keeps extra chat memory on some models. Try On if long chats forget what you just said." />
 
@@ -580,7 +580,7 @@
                                                                                   Content="On"
                                                                                   ToolTip.Tip="On: when Context is filling, AI-FluxMux may shorten older turns it forwards to llama-server. The Client app still keeps the full chat. Off: never auto-compact forwarded history." />
                                                                          <TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Cache strategy" />
-                                                                         <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding LocalCacheStrategyOptions}" SelectedItem="{Binding LocalVariantCacheStrategy}" ToolTip.Tip="Auto: picks the optimal cache strategy from the model's attributes (vision, speculative). Full: chunk-based reuse (fastest for text-only models). PrefixCheckpoints: exact-prefix cache + checkpoints (used when vision/speculative disables chunk-reuse). Minimal: no cache args (debug). Leave on Auto." />
+                                                                         <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding LocalCacheStrategyOptions}" SelectedItem="{Binding LocalVariantCacheStrategy}" ToolTip.Tip="How the model reuses its work from the previous turn so the next reply starts sooner. Auto picks the right method for this model (models that read pictures or use MTP need a different one). Leave on Auto." />
                                                                             </Grid>
                                                                         </StackPanel>
                                                                     </Border>
@@ -593,9 +593,9 @@
                                                                         <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="GPU layers" />
                                                                         <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalGpuLayersChoices}" SelectedItem="{Binding LocalVariantGpuLayers}" ToolTip.Tip="How much of the model sits on the graphics card. More is usually faster if there is room. Auto lets AI-FluxMux place it. Auto is only on editable copies." />
                                                                         <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Speculative" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="5" ItemsSource="{Binding LocalSpecTypeOptions}" SelectedItem="{Binding LocalVariantSpecType}" ToolTip.Tip="Let the model guess ahead to speed up answers. Turn this off if answers get worse." />
+                                                                        <ComboBox Grid.Row="0" Grid.Column="5" ItemsSource="{Binding LocalSpecTypeOptions}" SelectedItem="{Binding LocalVariantSpecType}" ToolTip.Tip="Lets the model guess a few words ahead and check them, so replies come out faster with exactly the same text. Use draft-mtp for models built with MTP (for example Qwen 3.x MTP files); ngram-simple helps a little on any model; Disabled turns it off." />
                                                                         <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Multi-GPU" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalMultiGpuModeOptions}" SelectedItem="{Binding LocalVariantMultiGpuMode}" ToolTip.Tip="Auto: when two or more NVIDIA graphics cards are detected, llama-server spreads layers by free VRAM. Disabled: use one card only. Manual: use the split settings below." />
+                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalMultiGpuModeOptions}" SelectedItem="{Binding LocalVariantMultiGpuMode}" ToolTip.Tip="Auto: with two or more graphics cards, the model is spread across them by free memory. Disabled: use one card only. Manual: use the split settings below." />
                                                                         <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Split mode" IsVisible="{Binding ShowLocalMultiGpuManualSettings}" />
                                                                         <ComboBox Grid.Row="1" Grid.Column="3" ItemsSource="{Binding LocalSplitModeOptions}" SelectedItem="{Binding LocalVariantSplitMode}" IsVisible="{Binding ShowLocalMultiGpuManualSettings}" ToolTip.Tip="How llama-server spreads the model across graphics cards. Layer is usually best for two cards." />
                                                                         <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Main GPU" IsVisible="{Binding ShowLocalMultiGpuManualSettings}" />
@@ -620,14 +620,14 @@
                                                                         <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Batch threads" />
                                                                         <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalThreadBatchOptions}" SelectedItem="{Binding LocalVariantThreadsBatch}" ToolTip.Tip="How many processor cores to use while reading your question. More can be faster if the rest of the PC is not busy." />
                                                                         <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Batch size" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="5" ItemsSource="{Binding LocalBatchSizeOptions}" SelectedItem="{Binding LocalVariantBatchSize}" ToolTip.Tip="How much of the question is processed at once. Larger can start answering sooner, but uses more graphics memory." />
+                                                                        <ComboBox Grid.Row="0" Grid.Column="5" ItemsSource="{Binding LocalBatchSizeOptions}" SelectedItem="{Binding LocalVariantBatchSize}" ToolTip.Tip="How much of a long prompt is read at once. Larger reads long chats faster but uses more graphics memory. Must be at least Micro-batch." />
 
                                                                         <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Micro-batch" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalUbatchSizeOptions}" SelectedItem="{Binding LocalVariantUbatchSize}" ToolTip.Tip="A smaller bite if the question is too big to fit in graphics memory at once. Lower this if reading the question fails because memory ran out." />
+                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalUbatchSizeOptions}" SelectedItem="{Binding LocalVariantUbatchSize}" ToolTip.Tip="How much of the prompt the graphics card reads per step. Larger reads long chats noticeably faster for a little more graphics memory. Lower it only if the model fails to load for lack of memory. Speed AutoTune can try sizes on this PC." />
                                                                         <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Multi-user" />
                                                                         <ComboBox Grid.Row="1" Grid.Column="3" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantMultiUserMode}" ToolTip.Tip="Allow more than one question at a time. This does not make a single answer faster, and each extra question uses graphics memory." />
                                                                         <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Draft length" IsEnabled="{Binding IsLocalSpecDraftLengthApplicable}" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="5" ItemsSource="{Binding LocalSpecDraftNMaxOptions}" SelectedItem="{Binding LocalVariantSpecDraftNMax}" IsEnabled="{Binding IsLocalSpecDraftLengthApplicable}" ToolTip.Tip="With Speculative set to draft-mtp: how many tokens the model guesses ahead each step. Auto is 2. On the 27B NVFP4 MTP model, 3 measured about 12% faster than 2 (152 vs 135 tok/s); too high wastes work when guesses are rejected. AutoTune can try 2, 3 and 4. Needs a reload." />
+                                                                        <ComboBox Grid.Row="1" Grid.Column="5" ItemsSource="{Binding LocalSpecDraftNMaxOptions}" SelectedItem="{Binding LocalVariantSpecDraftNMax}" IsEnabled="{Binding IsLocalSpecDraftLengthApplicable}" ToolTip.Tip="With Speculative on draft-mtp: how many words the model guesses ahead. Higher can be faster until too many guesses are rejected; it never changes the text. Auto is 2. Speed AutoTune can find the best value for this PC. Needs a reload." />
                                                                             </Grid>
                                                                         </StackPanel>
                                                                     </Border>
@@ -640,9 +640,9 @@
                                                                         <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Chat parser" />
                                                                         <ComboBox Grid.Column="3" ItemsSource="{Binding LocalChatParserOptions}" SelectedItem="{Binding LocalVariantChatParser}" ToolTip.Tip="How chat messages are read. Leave the default unless answers look garbled. Skip parsing is a last resort." />
                                                                         <TextBlock Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Unban tokens" />
-                                                                        <ComboBox Grid.Column="5" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantUnbanTokensMode}" ToolTip.Tip="Allow some words llama-server would otherwise block. This is a real llama-server option (--unbantokens) when llama-server's help lists it; AI-FluxMux only sends it then. AutoTune may turn this on for some chat formats." />
+                                                                        <ComboBox Grid.Column="5" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantUnbanTokensMode}" ToolTip.Tip="Lets the model use a few special words llama-server normally blocks. Some chat formats need it, and AutoTune turns it on for those." />
                                                                         <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Thinking budget" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalReasoningBudgetOptions}" SelectedItem="{Binding LocalVariantReasoningBudget}" ToolTip.Tip="Most tokens the model may spend thinking before it answers (llama-server --reasoning-budget). Unlimited: no cap. 0: no thinking at all. A cap shortens the wait before a reply starts when Reasoning is on. Needs a reload." />
+                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalReasoningBudgetOptions}" SelectedItem="{Binding LocalVariantReasoningBudget}" ToolTip.Tip="The most the model may think before it answers, when Reasoning is on. Unlimited: no cap. 0: no thinking. A cap gets replies started sooner but can make answers shallower. Needs a reload." />
                                                                             </Grid>
                                                                             <StackPanel Orientation="Horizontal" Spacing="10">
                                                                                 <TextBlock FontSize="12"
@@ -1122,7 +1122,7 @@
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <CheckBox VerticalAlignment="Center"
                                               IsChecked="{Binding LoadSelectedProfileOnStartup}"
-                                              ToolTip.Tip="On: when AI-FluxMux starts, it automatically loads the currently-selected Quick Select profile (after the gateway is ready). Off: you launch profiles manually." />
+                                              ToolTip.Tip="On: when AI-FluxMux starts, it loads the selected Quick Select profile for you. Off: you start profiles yourself." />
                                     <TextBlock VerticalAlignment="Center" Text="Auto-load selected profile on startup" />
                                 </StackPanel>
                             </StackPanel>
@@ -1376,7 +1376,7 @@
                                         <TextBlock FontWeight="SemiBold" Text="Endpoint settings" />
                                         <Grid ColumnDefinitions="Auto,Auto" ColumnSpacing="8">
                                             <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Port" />
-                                            <NumericUpDown Grid.Column="1" MinWidth="120" Value="{Binding OrchestratorPort}" Minimum="1" Maximum="65534" ToolTip.Tip="OpenAI-compatible model API for the Client app (Port). AI-FluxMux also uses the daemon port — the private listen port for llama-server (usually Port+1). Do not point the Client app at the daemon port." />
+                                            <NumericUpDown Grid.Column="1" MinWidth="120" Value="{Binding OrchestratorPort}" Minimum="1" Maximum="65534" ToolTip.Tip="The address your Client app connects to. llama-server listens privately on the next port up (the daemon port); never point a Client app there." />
                                         </Grid>
                                         <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="8">
                                             <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Client app" />
@@ -1396,10 +1396,10 @@
                                         <StackPanel Orientation="Horizontal" Spacing="8">
                                             <Button Content="Export Endpoint adapters"
                                                     Command="{Binding ExportEndpointAdaptersCommand}"
-                                                    ToolTip.Tip="Save Port, Client app, Harness web port, and EndpointAdapters JSON to a file you keep. No API keys or model profiles. Use this before a hand-edit, and keep a copy so a reinstall can Import it." />
+                                                    ToolTip.Tip="Save Port, Client app and Harness settings to a file you keep, so a reinstall or a bad hand-edit is easy to undo. No API keys or model profiles." />
                                             <Button Content="Import Endpoint adapters"
                                                     Command="{Binding ImportEndpointAdaptersCommand}"
-                                                    ToolTip.Tip="Restore those fields from an export or from endpoint-adapters.example.json. Makes a timestamped backup of fluxmux_config.json first. Does not import cloud keys or model profiles." />
+                                                    ToolTip.Tip="Restore those settings from a file you exported. AI-FluxMux backs up its current settings first. Cloud keys and model profiles are not touched." />
                                         </StackPanel>
                                         <Border IsVisible="{Binding ShowClineEndpointHint}"
                                                 Background="{DynamicResource FluxMutedBackground}"
@@ -1605,7 +1605,7 @@
                                                                       VerticalAlignment="Center"
                                                                       Content="After Compact, skip prefix cache this turn"
                                                                       IsChecked="{Binding PortRules.SkipPrefixCacheAfterCompact}"
-                                                                      ToolTip.Tip="Compact breaks the prompt prefix. This turn sends cache_prompt false. Session --no-cache-prompt stays on the model profile." />
+                                                                      ToolTip.Tip="Compact changes the start of the prompt, so this turn cannot reuse the model's cached work and takes longer to start." />
                                                         </Grid>
                                                     </StackPanel>
                                                 </Border>
@@ -1619,7 +1619,7 @@
                                                             <CheckBox FontWeight="SemiBold"
                                                                       Content="Omit"
                                                                       IsChecked="{Binding PortRules.OmitEnabled}"
-                                                                      ToolTip.Tip="When off, older tool bodies stay in the pack forwarded to llama-server. Mill counts still see every result. The Client app still has the full output." />
+                                                                      ToolTip.Tip="Off: older tool output is still sent to the model in full. On: older tool output is shortened so Context lasts longer. The Client app always keeps the full output." />
                                                         </DockPanel>
                                                         <Grid ColumnSpacing="8" RowDefinitions="Auto" RowSpacing="6"
                                                               IsEnabled="{Binding PortRules.OmitEnabled}">
@@ -1632,25 +1632,25 @@
                                                                 <ColumnDefinition Width="*" SharedSizeGroup="PortRuleFieldC" />
                                                             </Grid.ColumnDefinitions>
                                                             <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Keep recent results"
-                                                                       ToolTip.Tip="Full tool bodies kept. Older ones are stubbed so llama-server still sees that the call ran." />
+                                                                       ToolTip.Tip="How many recent tool results are sent in full. Older ones are shortened to a note that the tool ran." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="4" Maximum="64"
                                                                            Value="{Binding PortRules.KeepRecentResults}" 
-                                                                              ToolTip.Tip="Full tool bodies kept. Older ones are stubbed so llama-server still sees that the call ran." />
+                                                                              ToolTip.Tip="How many recent tool results are sent in full. Older ones are shortened to a note that the tool ran." />
                                                             <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" Text="Pin latest shell"
-                                                                       ToolTip.Tip="Recent shell results pinned even when omit is dropping other bodies." />
+                                                                       ToolTip.Tip="Recent shell output is always sent in full, even while older tool output is being shortened." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="3" Minimum="1" Maximum="16"
                                                                            Value="{Binding PortRules.PinLatestShellResults}" 
-                                                                                  ToolTip.Tip="Recent shell results pinned even when omit is dropping other bodies." />
+                                                                                  ToolTip.Tip="Recent shell output is always sent in full, even while older tool output is being shortened." />
                                                             <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" Text="Min chars to omit"
-                                                                       ToolTip.Tip="Tool bodies shorter than this stay forwarded." />
+                                                                       ToolTip.Tip="Tool output shorter than this is always sent in full." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="5" Minimum="80" Maximum="2000"
                                                                            Value="{Binding PortRules.MinResultCharsToClear}" 
-                                                                                  ToolTip.Tip="Tool bodies shorter than this stay forwarded." />
+                                                                                  ToolTip.Tip="Tool output shorter than this is always sent in full." />
                                                              <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Tool result clearing"
-                                                                        ToolTip.Tip="When enabled, older tool results are stubbed to keep the context small. When disabled, all tool results are kept, which improves cache hits but grows the context." />
+                                                                        ToolTip.Tip="On: older tool results are shortened to keep Context small. Off: all tool results are kept in full, which lets the model reuse more cached work but fills Context faster." />
                                                              <CheckBox Grid.Row="1" Grid.Column="1" VerticalAlignment="Center"
                                                                        IsChecked="{Binding PortRules.ToolResultClearingEnabled}"
-                                                                       ToolTip.Tip="On: older tool results are stubbed. Off: all tool results are kept (better cache hits, larger context)." />
+                                                                       ToolTip.Tip="On: older tool results are shortened to keep Context small. Off: all tool results are kept in full, which lets the model reuse more cached work but fills Context faster." />
                                                         </Grid>
                                                     </StackPanel>
                                                 </Border>
@@ -1666,11 +1666,11 @@
                                                             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
                                                                 <CheckBox VerticalAlignment="Center" Content="Mill at omitted"
                                                                           IsChecked="{Binding PortRules.MillAtOmittedEnabled}"
-                                                                          ToolTip.Tip="End this Client-app turn when this many older tool results were omitted and the last tools are not a closed loop." />
+                                                                          ToolTip.Tip="Ends this Client-app turn once this many older tool results have been shortened and the recent tools look like they are going round in circles. Stops a runaway tool loop." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="8" Maximum="128"
                                                                                IsEnabled="{Binding PortRules.MillAtOmittedEnabled}"
                                                                                Value="{Binding PortRules.RunawayOmittedResults}" 
-                                                                                  ToolTip.Tip="End this Client-app turn when this many older tool results were omitted and the last tools are not a closed loop." />
+                                                                                  ToolTip.Tip="Ends this Client-app turn once this many older tool results have been shortened and the recent tools look like they are going round in circles. Stops a runaway tool loop." />
                                                                 <views:HelpTopicLink Grid.Column="2"
                                                                                      TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />
@@ -1684,11 +1684,11 @@
                                                         <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
                                                             <CheckBox VerticalAlignment="Center" Content="Closed-loop lookback"
                                                                       IsChecked="{Binding PortRules.ClosedLoopLookbackEnabled}"
-                                                                      ToolTip.Tip="How many recent tools FluxMux inspects. When off, Mill at omitted ends the turn at its count without that check." />
+                                                                      ToolTip.Tip="How many recent tool calls AI-FluxMux checks to tell real progress from going round in circles. Off: Mill at omitted ends the turn at its count without that check." />
                                                             <NumericUpDown Grid.Column="1" Minimum="2" Maximum="16"
                                                                            IsEnabled="{Binding PortRules.ClosedLoopLookbackEnabled}"
                                                                            Value="{Binding PortRules.ClosedLoopMillLookback}" 
-                                                                                   ToolTip.Tip="How many recent tools FluxMux inspects. When off, Mill at omitted ends the turn at its count without that check." />
+                                                                                   ToolTip.Tip="How many recent tool calls AI-FluxMux checks to tell real progress from going round in circles. Off: Mill at omitted ends the turn at its count without that check." />
                                                             <views:HelpTopicLink Grid.Column="2"
                                                                                  TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                  ToolTip.Tip="Open the Port rules Help topic." />
@@ -1699,11 +1699,11 @@
                                                             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
                                                                 <CheckBox VerticalAlignment="Center" Content="Closed-loop mill ceiling"
                                                                           IsChecked="{Binding PortRules.ClosedLoopCeilingEnabled}"
-                                                                          ToolTip.Tip="Last-resort pause when this many older tool results were omitted, even if the last tools still look useful. A valid closed loop may pass Mill at omitted (32) and keep going until this ceiling." />
+                                                                          ToolTip.Tip="Last-resort stop once this many older tool results have been shortened, even if the recent tools still look useful." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="32" Maximum="512"
                                                                                IsEnabled="{Binding PortRules.ClosedLoopCeilingEnabled}"
                                                                                Value="{Binding PortRules.ClosedLoopRunawayOmittedResults}" 
-                                                                                            ToolTip.Tip="Last-resort pause when this many older tool results were omitted, even if the last tools still look useful." />
+                                                                                            ToolTip.Tip="Last-resort stop once this many older tool results have been shortened, even if the recent tools still look useful." />
                                                                 <views:HelpTopicLink Grid.Column="2"
                                                                                      TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />
@@ -1722,7 +1722,7 @@
                                                                 <CheckBox FontWeight="SemiBold"
                                                                           Content="Rapid-churn"
                                                                           IsChecked="{Binding PortRules.RapidChurnEnabled}"
-                                                                          ToolTip.Tip="End this Client-app turn when tools arrive closer together than Seconds, this many times in a row, after omitted has passed Mill at omitted." />
+                                                                          ToolTip.Tip="Ends this Client-app turn when tool calls arrive less than Seconds apart this many times in a row, once Mill at omitted has been reached: a sign of a fast loop." />
                                                             </DockPanel>
                                                             <TextBlock FontSize="11" Opacity="0.75"
                                                                        IsVisible="{Binding PortRules.RapidChurnTally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
@@ -1730,15 +1730,15 @@
                                                             <Grid ColumnSpacing="8" ColumnDefinitions="Auto,*,Auto,*"
                                                                   IsEnabled="{Binding PortRules.RapidChurnEnabled}">
                                                                 <TextBlock VerticalAlignment="Center" Text="Seconds"
-                                                                           ToolTip.Tip="Turns closer together than this, with omitted past the mill count, count as rapid churn." />
+                                                                           ToolTip.Tip="Tool calls closer together than this count towards Rapid-churn." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="1" Maximum="15"
                                                                                Value="{Binding PortRules.RapidChurnSeconds}" 
-                                                                              ToolTip.Tip="Turns closer together than this, with omitted past the mill count, count as rapid churn." />
+                                                                              ToolTip.Tip="Tool calls closer together than this count towards Rapid-churn." />
                                                                 <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Consecutive"
-                                                                           ToolTip.Tip="How many rapid turns in a row end this Client-app turn even when the lookback looks like a closed loop." />
+                                                                           ToolTip.Tip="How many fast tool calls in a row end this Client-app turn, even if the recent tools look like real progress." />
                                                                 <NumericUpDown Grid.Column="3" Minimum="2" Maximum="12"
                                                                                Value="{Binding PortRules.RapidChurnConsecutive}" 
-                                                                                  ToolTip.Tip="How many rapid turns in a row end this Client-app turn even when the lookback looks like a closed loop." />
+                                                                                  ToolTip.Tip="How many fast tool calls in a row end this Client-app turn, even if the recent tools look like real progress." />
                                                             </Grid>
                                                         </StackPanel>
                                                     </Border>
@@ -1747,11 +1747,11 @@
                                                             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
                                                                 <CheckBox VerticalAlignment="Center" Content="Observe-only mill"
                                                                           IsChecked="{Binding PortRules.ObserveOnlyMillEnabled}"
-                                                                          ToolTip.Tip="End this Client-app turn when this many recent tools are screenshot/python/run with no file edit, even before Mill at omitted." />
+                                                                          ToolTip.Tip="Ends this Client-app turn when this many recent tool calls only look around (screenshots, scripts, runs) without editing any file, even before Mill at omitted is reached." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="4" Maximum="24"
                                                                                IsEnabled="{Binding PortRules.ObserveOnlyMillEnabled}"
                                                                                Value="{Binding PortRules.ObserveOnlyMillCount}" 
-                                                                                 ToolTip.Tip="End this Client-app turn when this many recent tools are screenshot/python/run with no file edit, even before Mill at omitted." />
+                                                                                 ToolTip.Tip="Ends this Client-app turn when this many recent tool calls only look around (screenshots, scripts, runs) without editing any file, even before Mill at omitted is reached." />
                                                                 <views:HelpTopicLink Grid.Column="2"
                                                                                      TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />
@@ -1766,11 +1766,11 @@
                                                             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
                                                                 <CheckBox VerticalAlignment="Center" Content="Max pictures"
                                                                           IsChecked="{Binding PortRules.MaxPicturesEnabled}"
-                                                                          ToolTip.Tip="Oldest pictures are dropped from the pack forwarded to llama-server. The Client app still has the album." />
+                                                                          ToolTip.Tip="Only the newest pictures, up to this many, are sent to the model; older ones are dropped. The Client app keeps them all." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="1" Maximum="8"
                                                                                IsEnabled="{Binding PortRules.MaxPicturesEnabled}"
                                                                                Value="{Binding PortRules.MaxForwardedImages}" 
-                                                                               ToolTip.Tip="Oldest pictures are dropped from the pack forwarded to llama-server. The Client app still has the album." />
+                                                                               ToolTip.Tip="Only the newest pictures, up to this many, are sent to the model; older ones are dropped. The Client app keeps them all." />
                                                                 <views:HelpTopicLink Grid.Column="2"
                                                                                      TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />
@@ -1842,10 +1842,10 @@
                                                                            Value="{Binding PortRules.FirstByteSeconds}" 
                                                                              ToolTip.Tip="Open the hang prompt if llama-server sends nothing for this long (non-thinking turns)." />
                                                             <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" Text="Think tokens / sec"
-                                                                       ToolTip.Tip="Used to wait out a thinking budget before the hang prompt." />
+                                                                       ToolTip.Tip="Roughly how fast this model thinks. AI-FluxMux uses it to wait out the thinking budget before asking whether the model has hung." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="3" Minimum="5" Maximum="80"
                                                                            Value="{Binding PortRules.ThinkTokensPerSecond}" 
-                                                                                 ToolTip.Tip="Used to wait out a thinking budget before the hang prompt." />
+                                                                                 ToolTip.Tip="Roughly how fast this model thinks. AI-FluxMux uses it to wait out the thinking budget before asking whether the model has hung." />
                                                             <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" Text="Max think first-byte"
                                                                        ToolTip.Tip="Cap on how long a thinking model may sit before the hang prompt." />
                                                             <NumericUpDown Grid.Row="0" Grid.Column="5" Minimum="30" Maximum="300"
@@ -1879,7 +1879,7 @@
                                                             <CheckBox FontWeight="SemiBold"
                                                                       Content="503"
                                                                       IsChecked="{Binding PortRules.Loading503Enabled}"
-                                                                      ToolTip.Tip="Retry llama-server Loading model / 503 so the Client app does not mark Port dead during a cold load. FluxMux's own unused Port 503 is not retried." />
+                                                                      ToolTip.Tip="Keep retrying while llama-server is still loading the model, so the Client app does not give up on Port during a slow start." />
                                                         </DockPanel>
                                                         <TextBlock FontSize="11" Opacity="0.75"
                                                                    IsVisible="{Binding PortRules.Loading503Tally, Converter={x:Static conv:StringConverters.IsNotNullOrEmpty}}"
@@ -1887,10 +1887,10 @@
                                                         <Grid ColumnSpacing="8" ColumnDefinitions="Auto,*,Auto,*"
                                                               IsEnabled="{Binding PortRules.Loading503Enabled}">
                                                             <TextBlock VerticalAlignment="Center" Text="Retries"
-                                                                       ToolTip.Tip="Retry llama-server Loading model / 503 this many times. FluxMux's own unused Port 503 is not retried." />
+                                                                       ToolTip.Tip="How many times to retry while the model is still loading." />
                                                             <NumericUpDown Grid.Column="1" Minimum="0" Maximum="12"
                                                                            Value="{Binding PortRules.LoadingRetryCount}" 
-                                                                              ToolTip.Tip="Retry llama-server Loading model / 503 this many times. FluxMux's own unused Port 503 is not retried." />
+                                                                              ToolTip.Tip="How many times to retry while the model is still loading." />
                                                             <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Delay seconds"
                                                                        ToolTip.Tip="Wait this long between Loading model retries. Total wait is capped." />
                                                             <NumericUpDown Grid.Column="3" Minimum="1" Maximum="10"
@@ -1907,17 +1907,17 @@
                                                                          ToolTip.Tip="Open the Port rules Help topic." />
                                                     <Grid ColumnSpacing="8" RowDefinitions="Auto" ColumnDefinitions="Auto,*,Auto,*">
                                                         <TextBlock VerticalAlignment="Center" Text="Client-app max tokens"
-                                                                   ToolTip.Tip="Whether the profile overlay, the Client app, or the smaller of the two sets max tokens. Reply is still clamped so prompt plus reply fit Context." />
+                                                                   ToolTip.Tip="Which reply limit wins: this profile's Max tokens, the Client app's, or the smaller of the two. Replies are always kept short enough to fit Context." />
                                                         <ComboBox Grid.Column="1"
                                                                   ItemsSource="{Binding PortRules.ClientMaxTokensModeOptions}"
                                                                   SelectedItem="{Binding PortRules.SelectedClientMaxTokensMode}" 
-                                                                   ToolTip.Tip="Whether the profile overlay, the Client app, or the smaller of the two sets max tokens. Reply is still clamped so prompt plus reply fit Context." />
+                                                                   ToolTip.Tip="Which reply limit wins: this profile's Max tokens, the Client app's, or the smaller of the two. Replies are always kept short enough to fit Context." />
                                                         <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Stop strings"
-                                                                   ToolTip.Tip="Pass Client-app stop through, or ignore a list that can short-loop or cut thinking." />
+                                                                   ToolTip.Tip="Pass the Client app's stop words through, or ignore them if they cut replies or thinking short." />
                                                         <ComboBox Grid.Column="3"
                                                                   ItemsSource="{Binding PortRules.StopHygieneModeOptions}"
                                                                   SelectedItem="{Binding PortRules.SelectedStopHygieneMode}" 
-                                                                   ToolTip.Tip="Pass Client-app stop through, or ignore a list that can short-loop or cut thinking." />
+                                                                   ToolTip.Tip="Pass the Client app's stop words through, or ignore them if they cut replies or thinking short." />
                                                     </Grid>
                                                     </DockPanel>
                                                 </Border>
@@ -1925,7 +1925,7 @@
                                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                                     <Button Content="Save Port rules"
                                                             Command="{Binding PortRules.SaveCommand}"
-                                                            ToolTip.Tip="Write port_forwarding_rules.json next to fluxmux_config.json and use these numbers on the next Client-app turn." />
+                                                            ToolTip.Tip="Save these Port rules. They apply from the next Client-app message." />
                                                     <Button Content="Load Port rules"
                                                             Command="{Binding PortRules.LoadSavedCommand}"
                                                             ToolTip.Tip="Throw away unsaved edits and put back the last saved Port rules file. If that file is missing, show the built-in defaults." />
@@ -1984,16 +1984,16 @@
                                             <TextBox Grid.Column="1"
                                                      Text="{Binding NewCustomCloudProviderName}"
                                                      PlaceholderText="Required name (e.g. Work vLLM)"
-                                                     ToolTip.Tip="Required display name for this OpenAI-compatible server. Saved into the custom provider registry and shown in Provider lists." />
+                                                     ToolTip.Tip="A name for this OpenAI-compatible server, shown in the Provider lists." />
                                             <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Base URL" />
                                             <TextBox Grid.Column="3"
                                                      Text="{Binding NewCustomCloudProviderEndpoint}"
                                                      PlaceholderText="https://api.example.com/v1"
-                                                     ToolTip.Tip="Base URL for the named custom provider. Required with Name when you Add custom provider." />
+                                                     ToolTip.Tip="The web address of this server. Needed, with a name, to add it." />
                                             <Button Grid.Column="4"
                                                     Content="Add custom provider"
                                                     Command="{Binding AddCustomCloudProviderCommand}"
-                                                    ToolTip.Tip="Registers this named OpenAI-compatible provider in the custom registry (CustomCloudProviders) so it stays in Provider lists with its own URL and key." />
+                                                    ToolTip.Tip="Adds this server to the Provider lists with its own address and key." />
                                             <Button Grid.Column="5"
                                                     Content="Remove custom"
                                                     Command="{Binding RemoveCustomCloudProviderCommand}"
@@ -2032,10 +2032,10 @@
                                 <StackPanel Orientation="Horizontal" Spacing="8">
                                     <Button Content="Export model profiles"
                                             Command="{Binding ExportModelProfilesCommand}"
-                                            ToolTip.Tip="Save LocalProfiles and CloudProfiles to a file you keep. No API keys. Validate stamps are stripped. This file is not the live store." />
+                                            ToolTip.Tip="Save all your model profiles to a file you keep. No API keys. Validated marks are removed, so imported profiles need validating again." />
                                     <Button Content="Import model profiles"
                                             Command="{Binding ImportModelProfilesCommand}"
-                                            ToolTip.Tip="Writes a pre-import export next to fluxmux_config.json first, then patches from the chosen pack. Rejects secrets, scripts, and a full fluxmux_config.json. Skips a local row when the .gguf is not in the Model Directory, or when Images is on and no vision projector (mmproj) is found. Does not overwrite a live row that already exists with different settings. If rows are added, also saves fluxmux_config.json.bak-profiles-…. Each skip is listed on Diagnostics." />
+                                            ToolTip.Tip="Add model profiles from an exported file. AI-FluxMux backs up its settings first, skips profiles whose model file or picture helper is missing here, and never overwrites a profile you already have. Each skip is listed in Diagnostics." />
                                 </StackPanel>
                                 <TextBlock FontSize="11"
                                            Opacity="0.85"
@@ -3137,7 +3137,7 @@
                                     <Button Content="Restore to latest checkpoint"
                                             Command="{Binding RestoreGitCheckpointCommand}"
                                             VerticalAlignment="Center"
-                                            ToolTip.Tip="Restores the workspace to the most recent fluxmux-checkpoint commit. This runs 'git checkout &lt;hash&gt;' in the checkpoint folder. Use with caution — any uncommitted changes will be lost." />
+                                            ToolTip.Tip="Puts the checkpoint folder back to the most recent checkpoint. Anything changed since then that was not checkpointed is lost." />
                                     <TextBlock VerticalAlignment="Center" FontSize="10" Foreground="Gray"
                                                Text="Restores to the most recent checkpoint commit." />
                                 </StackPanel>
@@ -3504,7 +3504,7 @@
                                       Height="32"
                                       FontSize="12"
                                       VerticalAlignment="Center"
-                                      ToolTip.Tip="Tell AI-FluxMux which chat client you're using so it can adjust context compaction. &quot;Other&quot; = AI-FluxMux compaction works normally. &quot;Cline-like&quot; = AI-FluxMux compaction incompatible, due to client reinflating context with full chat history each turn">
+                                      ToolTip.Tip="Tell AI-FluxMux which kind of chat client you use. Other: AI-FluxMux trims long chats itself. Cline-like: the client resends the whole chat every turn, so trimming is left to the client.">
                                 <ComboBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding}" FontSize="12" />
@@ -3534,7 +3534,7 @@
                                 Foreground="White"
                                 BorderBrush="#333333"
                                 Click="HailMaryButton_Click"
-                                ToolTip.Tip="When the current turn lacks sufficient context space to complete, and your normal auto-compact didn&#39;t activate in time.&#10;&#10;For most clients: prunes older turns from the forwarded chat (recent turns and your last task are kept). The model forgets the pruned turns, so it may repeat work or lose track of early decisions.&#10;&#10;For Cline-like clients (reinflating): triggers Cline&#39;s own /smol (compact) command via keyboard simulation. This writes a .compaction.json that Cline reads on subsequent turns, actually reducing the context. Focus shifts to VS Code briefly.&#10;&#10;Warning: use this when you really want to keep this chat going on a local model and don&#39;t have a suitable bigger-context model to switch to. This may buy you time at the expense of fidelity." />
+                                ToolTip.Tip="Use when this turn has run out of room and auto-compact did not kick in in time.&#10;&#10;Most clients: older turns are removed from what is sent to the model, keeping your latest task and recent turns, and a short summary of what they established is added.&#10;&#10;Cline-like clients: Cline is asked to compact the chat itself (VS Code takes focus briefly).&#10;&#10;This keeps the chat going on a local model at some cost to fidelity. Switching to a model with more Context is better if you have one." />
                         <TextBlock Grid.Row="1" Grid.Column="4"
                                    IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
                                    HorizontalAlignment="Center"
@@ -3613,12 +3613,12 @@
                                                  GroupName="HailMaryStrategy"
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=WaitForCline}"
                                                  FontSize="11"
-                                                 ToolTip.Tip="Default. Waits for Cline to finish its current turn, then triggers Cline's own /smol command via UI Automation. Focus shifts to VS Code briefly." />
+                                                 ToolTip.Tip="Default. Waits for Cline to finish its turn, then asks Cline to compact the chat (/smol). VS Code takes focus briefly." />
                                     <RadioButton Content="Cline can't continue — compact externally &amp; resurrect"
                                                  GroupName="HailMaryStrategy"
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}"
                                                  FontSize="11"
-                                                 ToolTip.Tip="Use when Cline is non-responsive and cannot run /smol itself. Writes a .compaction.json seeded from VIBE_STATE + the recent Cline history, so Cline resumes compacted on its next turn. You will review a preview before anything is written." />
+                                                 ToolTip.Tip="Use when Cline is stuck and cannot compact itself. AI-FluxMux writes a compacted version of the chat for Cline to pick up on its next turn, built from this chat's session note and recent messages. You see a preview before anything is written." />
                                     <!-- Headroom slider (only when the rescue strategy is selected) -->
                                     <StackPanel Spacing="2" Margin="0,4,0,0"
                                                IsVisible="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}">

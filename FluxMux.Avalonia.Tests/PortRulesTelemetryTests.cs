@@ -81,7 +81,7 @@ public sealed class PortRulesTelemetryTests
         Assert.Contains("pause runaway looping", axaml, StringComparison.Ordinal);
         Assert.Contains("simply forward turns to llama-server without intervention", axaml, StringComparison.Ordinal);
         Assert.Contains("Cloud models do not use Port rules", axaml, StringComparison.Ordinal);
-        Assert.Contains("End this Client-app turn when this many older tool results were omitted", axaml, StringComparison.Ordinal);
+        Assert.Contains("Ends this Client-app turn once this many older tool results have been shortened", axaml, StringComparison.Ordinal);
         Assert.Contains("End this Client-app turn when the Client app dumps a large diagnostic artifact", axaml, StringComparison.Ordinal);
         var millAt = axaml.IndexOf("Content=\"Mill at omitted\"", StringComparison.Ordinal);
         var dumpAt = axaml.IndexOf("Content=\"Diagnostic dump\"", StringComparison.Ordinal);

@@ -3615,8 +3615,8 @@ Ordinary use should not require any of those.<o:p></o:p></span></p>
 <p><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'> The test is meant to run to failure. It deliberately pushes past the context limit so you can watch what actually happens — a graceful slowdown, a hang, or a crash — rather than guessing where the wall is. The result appears in the log above and is written to <span style="font-family:Consolas,monospace">context_fill_perf.log</span>. Use <strong>Cancel stress test</strong> to stop it early. Run it when the model is otherwise idle: it drives real requests, so it will compete with any chat you are running.<o:p></o:p></span></p>
 <h3><span lang=EN style='font-family:"Calibri,sans-serif;mso-fareast-font-family:"Times New Roman";color:#111111;mso-ansi-language:EN'>Hail Mary Compactor<o:p></o:p></span></h3>
 <h3><span lang=EN style='font-family:"Calibri,sans-serif;mso-fareast-font-family:"Times New Roman";color:#111111;mso-ansi-language:EN'>topic.diagnostics_hail_mary<o:p></o:p></span></h3>
-<p><strong><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'>Hail Mary Compactor</span></strong><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'> is a last-resort button that appears in the Diagnostics header when the current turn is close to exceeding the loaded context. It deletes the older turns from the middle of this chat's forwarded history so the current turn fits; the most recent turns and your last task are kept. Your Client app still holds the full conversation — only what is sent to the model is shortened.<o:p></o:p></span></p>
-<p><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'> The trade-off is that the model will not remember the deleted turns, so it may repeat work or lose track of an early decision. That is less disruptive than starting a new chat, where the model loses everything. If a cloud model is ready, switching to it now is the safer move — the local model keeps its full context. Use this button when you want to keep this chat on the local model.<o:p></o:p></span></p>
+<p><strong><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'>Hail Mary Compactor</span></strong><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'> is a last-resort button that appears in the Diagnostics header when the current turn is close to exceeding the loaded context. It deletes the older turns from the middle of this chat's forwarded history so the current turn fits; the most recent turns and your last task are kept, and a short summary of what the removed turns established (goal, decisions, dead ends) is added. Your Client app still holds the full conversation — only what is sent to the model is shortened.<o:p></o:p></span></p>
+<p><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'> The trade-off is that the model loses the detail of the removed turns, so it may repeat some work. That is still far less disruptive than starting a new chat, where the model loses everything. If a model with more Context is ready, such as a cloud model, switching to it keeps the whole chat instead. Use this button when you want to keep this chat on the current model.<o:p></o:p></span></p>
 
 
 <p><strong><span lang=EN style='font-size:11.0pt;font-family:"Calibri",sans-serif;
@@ -4176,9 +4176,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Enabled or Disabled.
-  Can speed long Context on supported NVIDIA cards. Leave Enabled unless chats
-  misbehave.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Enabled or Disabled. Usually makes long chats faster and lighter on graphics memory. Leave Enabled unless a model misbehaves with it.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:3'>
@@ -4233,21 +4231,12 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Prefer </span><code><span
-  style='font-size:10.0pt;color:#111111'>q8_0</span></code><span
-  style='font-size:10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:
-  "Times New Roman";color:#111111'> or </span><code><span style='font-size:
-  10.0pt;color:#111111'>f16</span></code><span style='font-size:10.5pt;
-  font-family:"Calibri",sans-serif;mso-fareast-font-family:"Times New Roman";
-  color:#111111'>. Do not go below </span><code><span style='font-size:10.0pt;
-  color:#111111'>q8_0</span></code><span style='font-size:10.5pt;font-family:
-  "Calibri",sans-serif;mso-fareast-font-family:"Times New Roman";color:#111111'>:
-  fidelity loss usually outweighs any Context gain from q6/q5/q4. The
-  priorities wizard and <span class=SpellE>AutoTune</span> stay at </span><code><span
-  style='font-size:10.0pt;color:#111111'>q8_0</span></code><span
-  style='font-size:10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:
-  "Times New Roman";color:#111111'> or higher. llama-server exposes Keys and
-  Values separately — set both the same unless you are tuning deliberately.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Prefer </span><code><span style='font-size:10.0pt;color:#111111'>q8_0</span></code><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'> or </span><code><span style='font-size:10.0pt;color:#111111'>f16</span></code><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>, the most faithful. </span><code><span style='font-size:10.0pt;color:#111111'>q5</span></code><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'> or </span><code><span style='font-size:10.0pt;color:#111111'>q4</span></code><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'> fit roughly twice the Context in the same graphics memory, but recall of earlier turns is weaker: worth it when Context matters more than Fidelity. The priorities wizard and AutoTune stay at </span><code><span style='font-size:10.0pt;color:#111111'>q8_0</span></code><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'> or higher unless you rank Context length above Fidelity. Set KV key and KV value the same unless you are tuning on purpose.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:5'>
@@ -4273,13 +4262,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Same floor as KV
-  key: prefer </span><code><span style='font-size:10.0pt;color:#111111'>q8_0</span></code><span
-  style='font-size:10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:
-  "Times New Roman";color:#111111'> or </span><code><span style='font-size:
-  10.0pt;color:#111111'>f16</span></code><span style='font-size:10.5pt;
-  font-family:"Calibri",sans-serif;mso-fareast-font-family:"Times New Roman";
-  color:#111111'>; avoid q6/q5/q4. Usually match KV key.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Same trade-off as KV key. Usually match KV key.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:6'>
@@ -4465,11 +4448,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Keeps a small note
-  about what you're working on, where things stand, and what's next. It's added
-  to the top of the prompt on every turn so the model stays oriented in long
-  sessions. The note is updated automatically after each turn. You can read and
-  edit the file directly.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Keeps a short note of this chat's task, progress and next step, and passes it to the model each turn, so it keeps its place after the chat is trimmed or the model restarts. Each chat keeps its own note, updated automatically after each turn. Hail Mary uses it to rescue a chat that ran out of room. You can read and edit the current chat's note in VIBE_STATE.md.<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -4477,10 +4456,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>On by default. Toggle
-  takes effect on the next turn, no reload needed. Greyed out for Cline-like
-  profiles, where the Client reinflates the full context each turn and the note
-  is redundant.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>On by default. Applies from the next message, no reload needed. It does not slow replies: the note rides on your newest message, so the rest of the prompt can still be reused.<o:p></o:p></span></p>
   </td>
   </tr>
   <tr style='mso-yfti-irow:13;mso-yfti-lastrow:yes'>
@@ -4725,8 +4701,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Speculative
-  decoding, where a small draft model guesses ahead.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Lets the model guess a few words ahead and check them, so replies come out faster. The text is exactly the same as without it.<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -4734,15 +4709,34 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Disabled, </span><code><span
-  style='font-size:10.0pt;color:#111111'>draft-<span class=SpellE>mtp</span></span></code><span
-  style='font-size:10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:
-  "Times New Roman";color:#111111'>, or </span><span class=SpellE><code><span
-  style='font-size:10.0pt;color:#111111'>ngram</span></code></span><code><span
-  style='font-size:10.0pt;color:#111111'>-simple</span></code><span
-  style='font-size:10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:
-  "Times New Roman";color:#111111'>. Can speed replies; set Disabled if quality
-  drops.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'></span><code><span style='font-size:10.0pt;color:#111111'>draft-mtp</span></code><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'> for models built with MTP (for example Qwen 3.x MTP files) gives the biggest gain. </span><code><span style='font-size:10.0pt;color:#111111'>ngram-simple</span></code><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'> helps a little on any model. Disabled turns it off. Needs a reload.<o:p></o:p></span></p>
+  </td>
+ </tr>
+ <tr style='mso-yfti-irow:3'>
+  <td valign=top style='border:solid #CBD5E1 1.0pt;border-top:none;mso-border-top-alt:
+  solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Draft length<o:p></o:p></span></p>
+  </td>
+  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
+  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
+  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
+  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>With Speculative on </span><code><span style='font-size:10.0pt;color:#111111'>draft-mtp</span></code><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>: how many words the model guesses ahead.<o:p></o:p></span></p>
+  </td>
+  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
+  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
+  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
+  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Higher can be faster until too many guesses are rejected; it never changes the text. Auto is 2. Speed AutoTune can find the best value for this PC.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:4'>
@@ -4758,8 +4752,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Spread the model
-  across NVIDIA cards.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Spread the model across two or more graphics cards.<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -4767,9 +4760,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Auto when two or
-  more cards are detected. Disabled = one card only. Manual exposes the three split
-  controls below.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Auto spreads it by free memory when two or more cards are found. Disabled = one card only. Manual exposes the three split controls below.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:5'>
@@ -4949,8 +4940,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>How much of the
-  prompt is processed at once.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>How much of a long prompt is read at once.<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -4958,8 +4948,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Larger can start
-  replies sooner; uses more VRAM.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Larger reads long chats faster but uses more graphics memory. Must be at least Micro-batch.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:4'>
@@ -4975,8 +4964,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Smaller processing
-  bite for huge prompts.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>How much of the prompt the graphics card reads per step.<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -4984,8 +4972,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Lower if reading the
-  prompt fails from OOM.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Larger reads long chats noticeably faster for a little more graphics memory. Lower it only if the model fails to load for lack of memory. Speed AutoTune can try sizes on this PC.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:5;mso-yfti-lastrow:yes'>
@@ -5200,6 +5187,54 @@ style<o:p></o:p></span></h3>
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
   mso-fareast-font-family:"Times New Roman";color:#111111'>Off is usually
   better for coding with a <span class=GramE>Client</span> app.<o:p></o:p></span></p>
+  </td>
+ </tr>
+ <tr style='mso-yfti-irow:6;mso-yfti-lastrow:yes'>
+  <td valign=top style='border:solid #CBD5E1 1.0pt;border-top:none;mso-border-top-alt:
+  solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Thinking budget<o:p></o:p></span></p>
+  </td>
+  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
+  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
+  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
+  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>The most the model may think before it answers, when Reasoning is on.<o:p></o:p></span></p>
+  </td>
+  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
+  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
+  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
+  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Unlimited = no cap. 0 = no thinking. A cap gets replies started sooner but can make answers shallower. Needs a reload.<o:p></o:p></span></p>
+  </td>
+ </tr>
+ <tr style='mso-yfti-irow:6;mso-yfti-lastrow:yes'>
+  <td valign=top style='border:solid #CBD5E1 1.0pt;border-top:none;mso-border-top-alt:
+  solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Sampling<o:p></o:p></span></p>
+  </td>
+  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
+  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
+  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
+  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Top-k, Top-p, Min-p and Presence: default word-choice settings, used only when the Client app does not send its own.<o:p></o:p></span></p>
+  </td>
+  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
+  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
+  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
+  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
+  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
+  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Server default keeps llama-server's built-in value. If a quantized model starts looping the same lines, try Presence 1.5. Too high can make code worse. Needs a reload.<o:p></o:p></span></p>
   </td>
  </tr>
 </table>
@@ -5435,11 +5470,7 @@ style='font-family:"Calibri",sans-serif'>Save profile</span></strong> keeps
 what it wrote; <strong><span style='font-family:"Calibri",sans-serif'>Revert
 changes</span></strong> discards it. On a local profile you can also tick <strong><span
 style='font-family:"Calibri",sans-serif'>Test local system for additional <span
-class=SpellE>optimisations</span> (experimental)</span></strong> first, which
-makes <span class=SpellE>AutoTune</span> reload llama-server and time a tiny reply.
-That is much slower, and only ever gains a fraction of a second on that tiny
-test, so leave it unticked for the ordinary settings-only pass. Cloud <span
-class=SpellE>AutoTune</span> has no such option.<o:p></o:p></span></p>
+class=SpellE>optimisations</span> (experimental)</span></strong> first. <span class=SpellE>AutoTune</span> then reloads the model a few times and times real replies, trying Micro-batch sizes and, on MTP models, draft lengths, and keeps only clearly faster settings. It takes a few minutes, and progress shows in Diagnostics. Cloud <span class=SpellE>AutoTune</span> has no such option.<o:p></o:p></span></p>
 
 <p><span class=SpellE><span class=GramE><span lang=EN style='font-size:11.0pt;
 font-family:"Calibri",sans-serif;color:#111111;mso-ansi-language:EN'>AutoTune</span></span></span><span
@@ -5584,9 +5615,7 @@ Fit VRAM can still shrink a <span class=GramE>launch</span> so llama-server
 starts. A ready cloud profile is how Route requests can take a large turn
 without waiting for that maxed Context to fill. KV key and KV value set how
 precisely llama-server stores attention Keys (linking back to earlier turns)
-and Values (keeping earlier content). Prefer q8_0 or f16 — below q8_0 the
-fidelity loss usually outweighs any Context gain, and the priorities wizard
-will not choose lower. Flash attention can reduce memory use or improve
+and Values (keeping earlier content). Prefer q8_0 or f16. Below q8_0 fits more Context but recalls earlier turns less reliably, so the priorities wizard only chooses lower when you rank Context length above Fidelity. Flash attention can reduce memory use or improve
 throughput when the runtime and hardware support it. Start conservatively,
 check readiness, and compare measured results for your model and hardware. See <em><span
 style='font-family:"Calibri",sans-serif'>Local detailed settings</span></em>
@@ -5950,21 +5979,16 @@ afterwards.<o:p></o:p></span></p>
   solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Reasoning effort /
-  budget ‡<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Reasoning effort ‡<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
   mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
-  7.2pt;margin-left:0cm'><span class=SpellE><code><span style='font-size:10.0pt;
-  color:#111111'>LocalReasoningEffort</span></code></span><span
-  style='font-size:10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:
-  "Times New Roman";color:#111111'>, </span><span class=SpellE><code><span
-  style='font-size:10.0pt;color:#111111'>LocalReasoningBudget</span></code></span><span
-  style='font-size:10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:
-  "Times New Roman";color:#111111'><o:p></o:p></span></p>
+  7.2pt;margin-left:0cm'><span style='font-size:10.0pt;
+  color:#111111'></span><code><span style='font-size:10.0pt;color:#111111'>LocalReasoningEffort</span></code><span style='font-size:10.0pt;
+  color:#111111'><o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -5972,9 +5996,7 @@ afterwards.<o:p></o:p></span></p>
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Fine-tunes how much
-  hidden thinking some reasoning models use. <span class=SpellE>AutoTune</span>
-  may set these.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Fine-tunes how much hidden thinking some reasoning models use. Thinking budget is in the editor. AutoTune may set this.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:2'>
@@ -6074,21 +6096,18 @@ afterwards.<o:p></o:p></span></p>
   solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Sampling (top-k,
-  penalties, …) ‡<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Other sampling (repeat window, penalties, …) ‡<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
   mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
-  7.2pt;margin-left:0cm'><span class=SpellE><code><span style='font-size:10.0pt;
-  color:#111111'>LocalTopK</span></code></span><span style='font-size:10.5pt;
-  font-family:"Calibri",sans-serif;mso-fareast-font-family:"Times New Roman";
-  color:#111111'>, </span><span class=SpellE><code><span style='font-size:10.0pt;
-  color:#111111'>LocalRepeatLastN</span></code></span><span style='font-size:
-  10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:"Times New Roman";
-  color:#111111'>, …<o:p></o:p></span></p>
+  7.2pt;margin-left:0cm'><span style='font-size:10.0pt;
+  color:#111111'></span><code><span style='font-size:10.0pt;color:#111111'>LocalRepeatPenalty</span></code><span style='font-size:10.0pt;
+  color:#111111'>, </span><code><span style='font-size:10.0pt;color:#111111'>LocalRepeatLastN</span></code><span style='font-size:10.0pt;
+  color:#111111'>, </span><code><span style='font-size:10.0pt;color:#111111'>LocalFrequencyPenalty</span></code><span style='font-size:10.0pt;
+  color:#111111'><o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -6096,8 +6115,7 @@ afterwards.<o:p></o:p></span></p>
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Extra randomness and
-  repetition controls beyond Temperature.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Extra repetition controls beyond Temperature and the Sampling group.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:6'>
@@ -6127,8 +6145,8 @@ afterwards.<o:p></o:p></span></p>
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>KV precision for speculative
-  draft models.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>KV precision for a separate draft model. Not used by </span><code><span style='font-size:10.0pt;color:#111111'>draft-mtp</span></code><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
+  mso-fareast-font-family:"Times New Roman";color:#111111'>.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:7'>
