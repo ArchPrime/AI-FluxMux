@@ -156,6 +156,14 @@ When AutoTune puts the pre-AutoTune profile back it keeps the **current** `Endpo
 
 **AutoTune names what it changed, using the page's labels.** Both modes end with "Changed in the detailed settings (not saved yet): Draft length 3 → 4; KV key q4_0 → q8_0 …", built by `BuildLabelledChangeList` from `LocalDetailedSettingLabels` by comparing the form before and after. Trial names use the same labels ("Draft length 4", "Batch size 2048"). Keep that label table in step with `MainWindow.axaml` when a control's label changes; an operator could not match the old wording ("usual AutoTune settings") to any control.
 
+## Portability, start-up checks and logs (Nov 2026)
+
+AI-FluxMux must work for other OpenAI-compatible clients and other hardware, not just this PC (RTX 5090, Qwen MTP, Cline). Measurements recorded above are *this PC's*; do not turn them into universal defaults without per-machine measurement.
+
+- **GPU detection is vendor-neutral.** `GetNvidiaGpuInventory` (name kept) uses `nvidia-smi`; when that finds nothing it falls back to `llama-server --list-devices` (`LlamaDeviceList`, cached per exe path + write time). Before, AMD / Intel / Vulkan / ROCm users got 0 GB and CPU-sized defaults. The advice's `NvidiaAvailable` now means "a GPU with known VRAM"; Flash attention is still only forced on for CUDA (`CudaAvailable`).
+- **Start-up access check** (`StartupAccessCheck`, called from `App.OnFrameworkInitializationCompleted`): if the process runs below Medium integrity, or cannot write the config folder or `Logs`, a message names the cause and gives the `icacls` fix. It never blocks start-up. This is the 23 Nov outage (Low integrity label from a sandboxing tool) made visible.
+- **Logs are written by `RollingLogFile`**: off the request thread, stamped `[yyyy-MM-dd HH:mm:ss]`, rotated at 20 MB into `.1`/`.2`. Used by the gateway log (`Proxy_Cloud_Handshake.log`) and `launch_monitor.log`. Time-only stamps made yesterday's lines look like today's; the gateway log had reached 65.8 MB. The "still within prefill" line is now logged once per stream (`LocalStreamHangClock.LoggedPrefillWait`); it was 35% of all lines.
+
 ## Local coding + Client app (operator)
 
 On this RTX 5090 (32 GB VRAM, 64 GB RAM), the daily local model is **`Qwen3.8-27B-NVFP4-MTP-Q8attn.gguf`**. Keep spec type **draft-mtp** with draft length **3** (measured 152 tok/s against 135 at 2 and 71 with MTP off; see *Profile editor* above). Max tokens **16384**. With Images on, use projector **`mmproj-Qwen3.8-27B-NVFP4-BF16.gguf`** and Context **163840**. Text-only: Images off, Context **213056**. **Qwen 3.8 27B Q4** at Context **131072** is the fallback if this NVFP4 file or llama-server build is fussy. Q8 of the same 27B still cuts Context roughly in half. Flash-Next does not replace this 27B on this PC (hybrid RAM/NVMe, not the FluxMux daily path).

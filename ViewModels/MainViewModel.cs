@@ -22513,7 +22513,7 @@ public partial class MainViewModel : ViewModelBase
             ? CoerceDefaultGpuLayers(settings["GpuLayers"]?.ToString(), advice)
             : CoerceLocalOptionKeepAuto(settings["GpuLayers"]?.ToString(), LocalGpuLayersOptions, advice.GpuLayers);
         var flashFallback = advice.FlashAttention.Equals("Auto", StringComparison.OrdinalIgnoreCase)
-            ? (advice.NvidiaAvailable ? "Enabled" : "Disabled")
+            ? (advice.CudaAvailable ? "Enabled" : "Disabled")
             : advice.FlashAttention;
         LocalVariantFlashAttention = CoerceOnOff(settings["LocalFlashAttention"]?.ToString(), flashFallback);
         LocalVariantKvCacheTypeK = CoerceLocalOption(settings["LocalKvCacheTypeK"]?.ToString(), LocalKvCacheOptions, "q8_0");

@@ -121,7 +121,11 @@ public sealed class FluxMuxRuntimeService
 
 		public double ModelFileGb { get; init; }
 
+		/// <summary>A GPU with known VRAM was found (any vendor; nvidia-smi or llama-server --list-devices).</summary>
 		public bool NvidiaAvailable { get; init; }
+
+		/// <summary>At least one CUDA device — the backend where Flash attention is forced on.</summary>
+		public bool CudaAvailable { get; init; }
 
 		public int ContextPriorityFirst { get; init; }
 
@@ -200,6 +204,9 @@ public sealed class FluxMuxRuntimeService
 		public double FreeGb { get; init; }
 
 		public string Driver { get; init; } = string.Empty;
+
+		/// <summary>"CUDA" (nvidia-smi, or llama-server's CUDA device), "Vulkan", "ROCm", "SYCL", …</summary>
+		public string Backend { get; init; } = "CUDA";
 	}
 
 	private sealed class GpuGuardrailState
@@ -365,6 +372,8 @@ public sealed class FluxMuxRuntimeService
 	private readonly object _nvidiaGpuInventoryLock = new object();
 
 	private List<GpuInventoryRow>? _nvidiaGpuInventoryCache;
+	private string? _llamaDeviceInventoryKey;
+	private List<GpuInventoryRow>? _llamaDeviceInventory;
 
 	private DateTime _nvidiaGpuInventoryCacheUtc;
 
@@ -7559,15 +7568,68 @@ public sealed class FluxMuxRuntimeService
 			{
 				UseConservativeLocalLaunch = true,
 				ShortLabel = "non-nvidia-conservative",
-				Message = "NVIDIA telemetry unavailable; applying conservative local launch settings."
+				Message = "No GPU telemetry (nvidia-smi or llama-server --list-devices); applying conservative local launch settings."
 			};
 		}
 		return new GpuGuardrailState
 		{
 			UseConservativeLocalLaunch = false,
 			ShortLabel = "nvidia-default",
-			Message = "NVIDIA telemetry available; default GPU strategy enabled."
+			Message = "GPU telemetry available; default GPU strategy enabled."
 		};
+	}
+
+	/// <summary>
+	/// GPU inventory from <c>llama-server --list-devices</c> (see <see cref="LlamaDeviceList"/>).
+	/// Starting llama-server just to list devices initialises every GPU backend (a second or
+	/// two), so the result is cached per executable (path + write time) for the process lifetime;
+	/// totals do not change, and free memory is only a starting estimate here anyway.
+	/// </summary>
+	private List<GpuInventoryRow> GetLlamaServerDeviceInventory()
+	{
+		try
+		{
+			string serverPath = ResolveLlamaServerPath();
+			if (string.IsNullOrWhiteSpace(serverPath) || !File.Exists(serverPath))
+			{
+				return new List<GpuInventoryRow>();
+			}
+
+			string cacheKey = serverPath + "|" + File.GetLastWriteTimeUtc(serverPath).Ticks.ToString(CultureInfo.InvariantCulture);
+			lock (_nvidiaGpuInventoryLock)
+			{
+				if (_llamaDeviceInventoryKey == cacheKey && _llamaDeviceInventory is not null)
+				{
+					return _llamaDeviceInventory;
+				}
+			}
+
+			var devices = LlamaDeviceList.Parse(ExternalProcessText.RunOrEmpty(serverPath, "--list-devices", 20000));
+			var rows = devices
+				.Select((device, position) => new GpuInventoryRow
+				{
+					// Position in llama-server's own list, which is what --main-gpu / --tensor-split use.
+					Index = position,
+					Name = device.Name,
+					TotalGb = Math.Round(device.TotalMiB / 1024.0, 1),
+					FreeGb = Math.Round(device.FreeMiB / 1024.0, 1),
+					UsedGb = Math.Round(Math.Max(0.0, device.TotalMiB - device.FreeMiB) / 1024.0, 1),
+					Driver = device.Backend + device.Index.ToString(CultureInfo.InvariantCulture),
+					Backend = device.Backend
+				})
+				.ToList();
+			lock (_nvidiaGpuInventoryLock)
+			{
+				_llamaDeviceInventoryKey = cacheKey;
+				_llamaDeviceInventory = rows;
+			}
+
+			return rows;
+		}
+		catch
+		{
+			return new List<GpuInventoryRow>();
+		}
 	}
 
 	private List<GpuInventoryRow> GetNvidiaGpuInventory()
@@ -7584,6 +7646,9 @@ public sealed class FluxMuxRuntimeService
 		string smiOutput = RunShortCommand("nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,driver_version --format=csv,noheader,nounits");
         if (string.IsNullOrWhiteSpace(smiOutput) || smiOutput.Contains("not recognized", StringComparison.OrdinalIgnoreCase) || smiOutput.Contains("NVIDIA-SMI has failed", StringComparison.OrdinalIgnoreCase))
 		{
+			// No NVIDIA telemetry: ask llama-server itself (any vendor — Vulkan, ROCm, SYCL…).
+			// Without this, AMD/Intel GPUs read as 0 GB and every local default was CPU-sized.
+			list = GetLlamaServerDeviceInventory();
 			lock (_nvidiaGpuInventoryLock)
 			{
 				_nvidiaGpuInventoryCache = list;
@@ -7799,7 +7864,7 @@ public sealed class FluxMuxRuntimeService
 		}
 		if (GetString(profile, "LocalFlashAttention").Equals("Auto", StringComparison.OrdinalIgnoreCase))
 		{
-			profile["LocalFlashAttention"] = (localHardwareLaunchAdvice.NvidiaAvailable ? "Enabled" : "Disabled");
+			profile["LocalFlashAttention"] = (localHardwareLaunchAdvice.CudaAvailable ? "Enabled" : "Disabled");
 		}
 	}
 
@@ -7925,6 +7990,7 @@ public sealed class FluxMuxRuntimeService
 			GpuTotalGb = gpuGb,
 			ModelFileGb = fileGb,
 			NvidiaAvailable = nvidia,
+			CudaAvailable = nvidia && nvidiaGpuInventory.Any(row => row.Backend.Equals("CUDA", StringComparison.OrdinalIgnoreCase)),
 			ContextPriorityFirst = contextPriorityFirst,
 			ContextPrioritySecond = contextPrioritySecond,
 			ContextSafeDefault = contextSafeDefault,
@@ -7938,7 +8004,9 @@ public sealed class FluxMuxRuntimeService
 			GpuLayers = LayersFor(offloadMode),
 			BatchSize = batchSize.ToString(CultureInfo.InvariantCulture),
 			UbatchSize = Math.Max(64, val).ToString(CultureInfo.InvariantCulture),
-			FlashAttention = (nvidia ? "Enabled" : "Auto"),
+			// "nvidia" above now means "a GPU with known VRAM" from any vendor; force Flash
+			// attention on only for CUDA, where it is proven. Other backends keep Auto.
+			FlashAttention = (nvidia && nvidiaGpuInventory.Any(row => row.Backend.Equals("CUDA", StringComparison.OrdinalIgnoreCase)) ? "Enabled" : "Auto"),
 			PreferFitEnabled = (preferFit || offloadMode.Equals("GPU + CPU", StringComparison.OrdinalIgnoreCase)),
 			SpecType = ((isQwen38 || LooksLikeMultiTokenPrediction(modelPath)) ? "draft-mtp" : "ngram-simple"),
 			EnableSwaFull = hybridKv,

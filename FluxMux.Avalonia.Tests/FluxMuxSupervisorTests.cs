@@ -315,6 +315,8 @@ public class FluxMuxSupervisorTests
             var supervisor = new FluxMuxSupervisor(dir);
             supervisor.LogLaunchMonitor("test message");
             var logPath = Path.Combine(dir, "launch_monitor.log");
+            // Lines are written by a background writer (RollingLogFile), so wait for it.
+            RollingLogFile.For(logPath).Flush(TimeSpan.FromSeconds(5));
             Assert.True(File.Exists(logPath));
             var content = File.ReadAllText(logPath);
             Assert.Contains("test message", content);

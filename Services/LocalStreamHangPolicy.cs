@@ -202,6 +202,13 @@ public sealed class LocalStreamHangClock
     public int WaitLongerCount { get; set; }
 
     /// <summary>
+    /// The "still within prefill" wait has been logged for this stream. The old guard
+    /// (WaitLongerCount == 0) stays true for the whole wait, so the line was written on every
+    /// watch-loop pass — 35% of all gateway log lines.
+    /// </summary>
+    public bool LoggedPrefillWait { get; set; }
+
+    /// <summary>
     /// True once the first REAL content token (content / reasoning / tool_calls) has been
     /// received from the upstream. Before this, the stream is still in the "prefill / first
     /// token" window even if header bytes have already arrived — for a thinking model the

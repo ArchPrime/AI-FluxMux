@@ -32,7 +32,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private readonly string _contextPath;
     private readonly string _lastRouteExplanationPath;
     private readonly HttpClient _http;
-    private readonly object _logLock = new();
     public static int SharedTurnCounter = 0;
 
     // KV-cache reuse diagnostic: tracks the previous turn's measured prompt-token count so we
@@ -5608,10 +5607,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         try
         {
-            lock (_logLock)
-            {
-                File.AppendAllText(_logPath, $"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
-            }
+            // Background, dated, size-rotated (see RollingLogFile): this runs on the request path.
+            RollingLogFile.For(_logPath).WriteLine(message);
         }
         catch
         {
@@ -5932,8 +5929,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     if (elapsedSinceCopyStart < effectiveEstimate)
                     {
                         // Still within the prefill / first-token window. Log once and keep waiting.
-                        if (clock.WaitLongerCount == 0)
+                        if (clock.WaitLongerCount == 0 && !clock.LoggedPrefillWait)
                         {
+                            clock.LoggedPrefillWait = true;
                             Log("local stream hang: still within prefill/first-token window ("
                                 + (int)elapsedSinceCopyStart + "s / "
                                 + effectiveEstimate + "s, raw estimate " + CurrentPrefillEstimateSeconds + "s, bytes="

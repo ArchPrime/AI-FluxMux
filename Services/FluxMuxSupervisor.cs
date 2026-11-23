@@ -634,11 +634,8 @@ public sealed class FluxMuxSupervisor : IDisposable
     {
         try
         {
-            string logPath = Path.Combine(_logDirectory, "launch_monitor.log");
-            lock (_writeLock)
-            {
-                File.AppendAllText(logPath, $"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
-            }
+            // Background, dated, size-rotated (see RollingLogFile).
+            RollingLogFile.For(Path.Combine(_logDirectory, "launch_monitor.log")).WriteLine(message);
         }
         catch { }
     }

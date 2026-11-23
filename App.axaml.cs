@@ -100,6 +100,7 @@ public partial class App : Application
             }
 
             var configPath = ResolveFluxMuxConfigPath();
+            ReportStartupAccessProblems(configPath);
             var configService = new FluxMuxConfigService(configPath);
             ApplyRequestedTheme(configService.Load().GetString("UiTheme", "Light"));
             var dependencyAuditService = new DependencyAuditService(configPath);
@@ -128,6 +129,31 @@ public partial class App : Application
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    /// <summary>
+    /// Names a write-access or Low-integrity problem before anything tries to write (see
+    /// <see cref="StartupAccessCheck"/>). Checks the config folder and the Logs folder the runtime
+    /// uses (the parent of the config folder + "Logs"). Never throws and never blocks start-up.
+    /// </summary>
+    private static void ReportStartupAccessProblems(string configPath)
+    {
+        try
+        {
+            var configDir = Path.GetDirectoryName(configPath) ?? AppContext.BaseDirectory;
+            var logsDir = Path.Combine(Directory.GetParent(configDir)?.FullName ?? configDir, "Logs");
+            var problems = StartupAccessCheck.Check([configDir, logsDir]);
+            if (problems.Count > 0)
+            {
+                StartupCrashLog.Notify(
+                    "AI-FluxMux cannot write its files",
+                    StartupAccessCheck.BuildMessage(problems, AppContext.BaseDirectory));
+            }
+        }
+        catch
+        {
+            // The check is advisory; it must never stop the app from starting.
+        }
     }
 
     /// <summary>
