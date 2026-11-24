@@ -5,8 +5,7 @@ namespace FluxMux.Avalonia.Services.ContextEngine;
 
 /// <summary>
 /// The public contract for the context engine: the unified, modular strategy that keeps a local
-/// session's "vibe" (task / state / next) persistent and re-injectable, and that pages the working
-/// context so it fills more slowly.
+/// session's "vibe" (task / state / next) persistent and re-injectable.
 ///
 /// This is the seam the rest of the app (the gateway host, the runtime service, the view model)
 /// talks to. It is deliberately small and dependency-free: the engine receives its config flags
@@ -24,13 +23,6 @@ public interface IContextEngine
     /// each call so toggling takes effect on the next turn without a reload.
     /// </summary>
     bool IsVibeStateEnabled();
-
-    /// <summary>
-    /// True when context paging is enabled for the current profile/variant. Paging is assimilated
-    /// into forward-prune, so this is gated by the same per-profile flag that gates forward
-    /// pruning (and therefore inherits the Cline-like client gate automatically).
-    /// </summary>
-    bool IsContextPagingEnabled();
 
     /// <summary>
     /// Loads the current <see cref="VibeState"/> for the session at <paramref name="vibeStatePath"/>.
@@ -53,29 +45,10 @@ public interface IContextEngine
 
     /// <summary>
     /// Builds the short re-injection block to prepend to the system prompt on every local turn,
-    /// so the model always knows "where we are" even after the working context has been paged
-    /// away. Returns an empty string when VIBE_STATE is disabled or the state is empty.
+    /// so the model always knows "where we are" even after older turns have been shortened.
+    /// Returns an empty string when VIBE_STATE is disabled or the state is empty.
     /// </summary>
     string BuildReinjectionBlock(string vibeStatePath);
-
-    /// <summary>
-    /// Pages the working context: trims the turn's own waste (dedupe, collapse repeated tool
-    /// loops, truncate oversized older tool results) so the context fills more slowly. This is the
-    /// paged-context half of the strategy and is the same conservative pipeline as forward
-    /// pruning. Mutates <paramref name="payload"/> in place. Returns a no-op result when paging is
-    /// disabled or there is nothing to trim.
-    ///
-    /// When <paramref name="swapStore"/> is non-null (paging on), the truncate stage spills each
-    /// oversized older tool-result body to the store and leaves a short <c>swap_id</c> pointer in
-    /// the prompt (lossless: the model can read it back via <c>read_swap_log</c>). When null, the
-    /// lossy head+tail stub is used (identical to pre-paging behavior).
-    /// </summary>
-    ForwardPruneResult PageContext(
-        System.Text.Json.Nodes.JsonObject payload,
-        int contextTokens,
-        int? measuredTokens = null,
-        CancellationToken cancellationToken = default,
-        ContextSwapStore? swapStore = null);
 }
 
 /// <summary>
@@ -91,11 +64,4 @@ public sealed class ContextEngineOptions
     /// Backed by the per-profile <c>LocalVibeStateEnabled</c> flag (default on).
     /// </summary>
     public Func<bool> IsVibeStateEnabled { get; init; } = () => true;
-
-    /// <summary>
-    /// Returns whether context paging is enabled for the current profile/variant. Backed by the
-    /// per-profile <c>LocalContextPagingEnabled</c> flag, which is assimilated into forward-prune
-    /// and therefore inherits the Cline-like client gate.
-    /// </summary>
-    public Func<bool> IsContextPagingEnabled { get; init; } = () => true;
 }

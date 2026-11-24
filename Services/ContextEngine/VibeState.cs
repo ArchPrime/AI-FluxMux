@@ -10,7 +10,7 @@ namespace FluxMux.Avalonia.Services.ContextEngine;
 /// state, and the next step. This is the machine-readable core of <c>VIBE_STATE.md</c> — the
 /// file the user can read and edit, and the thing the context engine re-injects at the top of
 /// every local turn so the model always knows "where we are" even after the working context has
-/// been paged away.
+/// been shortened.
 ///
 /// It is deliberately small and flat: a handful of short strings that the model can update in
 /// place (via a tool call) and that survive context resets. The human-readable <c>VIBE_STATE.md</c>

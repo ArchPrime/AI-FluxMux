@@ -9,12 +9,9 @@ namespace FluxMux.Avalonia.Services.ContextEngine;
 /// live config flags). It has no reference to the view model, runtime service, or gateway host,
 /// which is what makes it portable and testable.
 ///
-/// The two capabilities:
-///   * <b>VIBE_STATE</b> — load/save/render the persistent task/state/next record and build the
-///     short re-injection block prepended to every local turn.
-///   * <b>Paged context</b> — the conservative forward-prune pipeline, exposed as
-///     <see cref="PageContext"/> and gated by the same per-profile flag that gates forward
-///     pruning (so it inherits the Cline-like client gate automatically).
+/// Its capability is <b>VIBE_STATE</b>: load/save/render the persistent task/state/next record
+/// and build the short re-injection block added to every local turn. (Paged context, which
+/// spilled tool results to a swap store, was removed on 25 Nov: no Client app could read them back.)
 /// </summary>
 public sealed class ContextEngine : IContextEngine
 {
@@ -36,18 +33,6 @@ public sealed class ContextEngine : IContextEngine
         catch
         {
             // A throwing delegate should never take the app down; default to off.
-            return false;
-        }
-    }
-
-    public bool IsContextPagingEnabled()
-    {
-        try
-        {
-            return _options.IsContextPagingEnabled();
-        }
-        catch
-        {
             return false;
         }
     }
@@ -119,25 +104,5 @@ public sealed class ContextEngine : IContextEngine
         }
 
         return VibeStateMarkdown.BuildReinjectionBlock(state);
-    }
-
-    public ForwardPruneResult PageContext(
-        JsonObject payload,
-        int contextTokens,
-        int? measuredTokens = null,
-        System.Threading.CancellationToken cancellationToken = default,
-        ContextSwapStore? swapStore = null)
-    {
-        if (!IsContextPagingEnabled())
-        {
-            return ForwardPruneResult.None;
-        }
-
-        // The paged-context pipeline is the conservative forward-prune. Reusing it (rather than
-        // duplicating it) is the whole point of the DRY strategy: one pipeline, two entry points.
-        // When a swap store is supplied (paging on), the truncate stage spills oversized bodies
-        // to the store and leaves a swap_id pointer (lossless); when null, it uses the lossy
-        // head+tail stub (identical to pre-paging behavior).
-        return ForwardPrune.PruneTurn(payload, contextTokens, measuredTokens, swapStore);
     }
 }

@@ -5,9 +5,9 @@ using System.Text.Json.Nodes;
 namespace FluxMux.Avalonia.Services.ContextEngine;
 
 /// <summary>
-/// The git execution seam for the <see cref="McpControlPlane"/>. The control plane never shells
-/// out directly; it calls this interface, which keeps git behavior testable (a fake runner in
-/// unit tests) and portable (a different runner on another platform).
+/// The git execution seam for the 📌 Checkpoint button (FluxMuxRuntimeService.RunGitCheckpointAsync).
+/// Keeps git behavior testable (a fake runner in unit tests) and portable (a different runner on
+/// another platform).
 /// </summary>
 public interface IGitRunner
 {

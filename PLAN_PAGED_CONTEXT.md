@@ -1,5 +1,8 @@
 # PLAN — Paged Context + VIBE_STATE.md (UNIFIED context strategy, HANDOFF, resumable)
 
+> **Superseded 25 Nov 2026:** forward pruning and paged context (swap store, `/mcp`, `read_swap_log`, `update_vibe_state`) were removed — see AGENTS.md, *Removed: forward pruning and context paging*. Kept as history only.
+
+
 > Recorded 11/9. **This file is the source of truth for resuming.** If a chat's context
 > overflows mid-implementation, a new chat reads this file + `BRIEFING.md` + `STATUS.md` +
 > `PLAN_CONTEXT_FIXES.md` and continues from the first unchecked step. Each step has a

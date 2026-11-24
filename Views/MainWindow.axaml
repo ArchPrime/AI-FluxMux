@@ -408,12 +408,6 @@
                                                                              <TextBlock Text="Context management:"
                                                                                         FontSize="11"
                                                                                         FontWeight="SemiBold" />
-                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
-                                                                                  <CheckBox IsChecked="{Binding LocalForwardPruneEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
-                                                                                            VerticalAlignment="Center"
-                                                                                            Content="Trim waste per turn (forward pruning)"
-                                                                                            ToolTip.Tip="Each turn, quietly removes waste the model does not need (duplicate messages, repeated tool loops, oversized old tool output) so Context fills more slowly. Never touches your current task. Not used when context compaction is controlled by the Client app. Applies from the next message." />
-                                                                              </StackPanel>
 
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
                                                                                   <CheckBox IsChecked="{Binding LocalVibeStateEnabled}" IsEnabled="{Binding VibeStateControlsEnabled}"
@@ -422,12 +416,6 @@
                                                                                             ToolTip.Tip="Keeps a short note of this chat's task, progress and next step, and passes it to the model each turn so it keeps its place after the chat is trimmed or the model restarts. Each chat keeps its own note. Hail Mary uses it to rescue a chat that ran out of room. Applies from the next message." />
                                                                               </StackPanel>
 
-                                                                              <StackPanel Orientation="Horizontal" Spacing="6">
-                                                                                  <CheckBox IsChecked="{Binding LocalContextPagingEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
-                                                                                            VerticalAlignment="Center"
-                                                                                            Content="Page context (lossless spill)"
-                                                                                            ToolTip.Tip="When old tool output is trimmed, the full text is kept aside so the model can ask for it back if it needs it. Off: trimmed output is gone for good. Applies from the next message." />
-                                                                              </StackPanel>
                                                                               <TextBlock Text="Context compaction controlled by:" FontSize="11" Margin="0,4,0,0" />
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
                                                                                   <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}" 
@@ -3066,7 +3054,7 @@
                         </GroupBox>
 
                         <GroupBox Header="Git Checkpoints"
-                                  ToolTip.Tip="Folder where the '📌 Checkpoint' button and the model's git_checkpoint tool create commits. Global setting — applies to all profiles and client types. Leave blank to use the workspace root.">
+                                  ToolTip.Tip="Folder where the '📌 Checkpoint' button creates commits. Global setting — applies to all profiles and client types. Leave blank to use the workspace root.">
                             <StackPanel Margin="8" Spacing="8">
                                 <StackPanel Orientation="Horizontal" Spacing="6">
                                     <TextBlock Text="Checkpoint folder" VerticalAlignment="Center"

@@ -37,7 +37,6 @@ The chat keeps working. Without AI-FluxMux, every problem can become a hard stop
 - **Model switches mid-chat?** → conversation continues, don't restart. Maintain a pool of local model profiles. When the loaded model can't cover a turn (context too small, no vision, no reasoning), AI-FluxMux offers to switch. You approve, it reloads, the chat continues.
 - **Compaction happens?** → essence survives, don't lose the mission. A durable log captures the *meaning* of your session and re-asserts it after compaction. Cline's own auto-compact still works as the first line of defence; AI-FluxMux adds the layer that survives *hard* compaction.
 - **Context too big for VRAM?** → YaRN extends it into system RAM (up to 1M tokens). The model keeps working; it just gets slower.
-- **Tool result too big for the prompt?** → paged context spills it to disk with a pointer. The model reads it back via MCP. Nothing is lost.
 
 ### 4. Customisation
 

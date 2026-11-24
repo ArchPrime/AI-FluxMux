@@ -209,17 +209,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
     public Func<bool>? GetUserClientReinflatesContext { get; set; }
 
     /// <summary>
-    /// Per-profile forward-prune toggle ("LocalForwardPruneEnabled", default on). Read live each
-    /// turn so it can be switched mid-chat without a reload. Returns null when the profile cannot
-    /// be resolved (treated as on, the default).
-    /// </summary>
-    public Func<string, string, bool?>? GetForwardPruneEnabled { get; set; }
-
-    /// <summary>
     /// Per-profile VIBE_STATE toggle ("LocalVibeStateEnabled", default on). Read live each turn.
     /// When on, the context engine re-injects the session's task/state/next at the top of the
     /// system prompt so the model always knows "where we are" even after the working context has
-    /// been paged away. Returns null when the profile cannot be resolved (treated as on).
+    /// been shortened. Returns null when the profile cannot be resolved (treated as on).
     /// </summary>
     public Func<string, string, bool?>? GetVibeStateEnabled { get; set; }
 
@@ -238,13 +231,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
     public string VibeStatePath { get; set; } = string.Empty;
 
     /// <summary>
-    /// The paged-context swap store. Injected by the runtime service; null when paging is not
-    /// wired up. When non-null and paging is enabled, the forward-prune truncate stage spills
-    /// oversized older tool-result bodies here and leaves a <c>swap_id</c> pointer (lossless).
-    /// </summary>
-    public FluxMux.Avalonia.Services.ContextEngine.ContextSwapStore? SwapStore { get; set; }
-
-    /// <summary>
     /// The durable essence log (the session's "meaning": current task/state/next/files + goal
     /// evolution + decisions + dead ends). Injected by the runtime service; null when not wired
     /// up. This is the source of truth re-asserted after compaction / cold resume.
@@ -260,12 +246,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
     /// <summary>Keeps VIBE_STATE.md / essence.json to the current conversation (null = old global behaviour).</summary>
     public FluxMux.Avalonia.Services.ContextEngine.VibeConversationScope? VibeScope { get; set; }
-
-    /// <summary>
-    /// The MCP control plane (update_vibe_state, read_swap_log, git_checkpoint). Injected by the
-    /// runtime service; null when not wired up. Handles <c>POST /mcp</c> requests.
-    /// </summary>
-    public FluxMux.Avalonia.Services.ContextEngine.McpControlPlane? McpControlPlane { get; set; }
 
     /// <summary>
     /// Per-process compaction-edge detector for essence preservation. Fires on a sharp token drop
@@ -327,7 +307,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     public Func<(HailMaryCompaction.HailMaryAggression Stop, bool StripImages, bool WasArmed)>? ConsumeHailMaryMiddleCut { get; set; }
 
     /// <summary>
-    /// Raised for every gateway log line (Hail Mary results, forward-prune results, context
+    /// Raised for every gateway log line (Hail Mary results, context
     /// measurements, route decisions, etc.) so the UI diagnostic terminal can show them live.
     /// This is the "report results to terminal" path: previously Log() only wrote to a file.
     /// </summary>
@@ -608,16 +588,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 && IsModelsListPath(path))
             {
                 await SendJsonAsync(context.Response, 200, ListModels(LoadState())).ConfigureAwait(false);
-                return;
-            }
-
-            // MCP control plane: the model's tools for managing the paged-context capability
-            // (update_vibe_state, read_swap_log, git_checkpoint). POST /mcp with a JSON body of
-            // { "tool": "name", "args": { ... } }. Returns { "ok": true, ... } or
-            // { "ok": false, "error": "..." }. 404 when the control plane is not wired up.
-            if (method.Equals("POST", StringComparison.OrdinalIgnoreCase) && path == "/mcp")
-            {
-                await HandleMcpRequestAsync(context).ConfigureAwait(false);
                 return;
             }
 
@@ -1022,7 +992,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
             : null;
         var turnStart = DateTime.Now;
         int? measuredPromptTokens = null;
-        string? forwardPruneSummary = null;
         // VIBE_STATE bookkeeping for this turn. It used to run twice on some turns (once in the
         // measured-token path and again in the reinflating-client path), recording everything
         // twice; this flag makes it once per request.
@@ -1119,50 +1088,19 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
             // VIBE_STATE re-injection (stage 0): when enabled, prepend the session's persistent
             // task/state/next to the system prompt so the model always knows "where we are" even
-            // after the working context has been paged away. This is a cheap, prefix-safe system
-            // suffix (a few lines) and runs before forward-prune so the pruned turn still carries
-            // the current vibe. No-op when disabled or when no VIBE_STATE.md exists yet.
+            // after older turns have been shortened. No-op when disabled or when no VIBE_STATE.md
+            // exists yet.
             if (!isProbeRequest && hotContext > 0)
             {
                 InjectVibeState(payload, model, Str(state, "local_variant"));
             }
 
-            // Forward pruning: a per-turn fill throttle. On EVERY local turn, as it happens, trim
-            // the turn's own waste (dedupe, collapse repeated tool loops, truncate oversized older
-            // tool results) so the context fills more slowly. This is NOT conventional compaction
-            // (which summarizes older turns at a threshold) and NOT Hail Mary (one-off emergency
-            // rear-prune) — it is a distinct, conservative, always-on mechanism. It is gated on the
-            // per-profile "LocalForwardPruneEnabled" toggle (default on) so it can be turned off
-            // mid-chat without a reload. Uses the model's measured token count when available.
-            //
-            // IMPORTANT: forward pruning modifies the prompt (dedupe, loop-collapse, tool-result
-            // truncation), so it breaks the exact-prefix KV cache. If the client reinflates the
-            // context (e.g., Cline, which resends the full history each turn), skip it entirely —
-            // the same reasoning as the session-artifact and tool-result-clearing skips above.
-            // Otherwise every pruned turn is a cache miss.
-            //
-            // NOTE: this does NOT re-measure the prompt after pruning. Re-measuring is a network
-            // round-trip to llama-server (LocalPromptTokenCounter.CountAsync → POST
-            // /input_tokens), and doing it on every pruned turn would add a full extra call to the
-            // model per turn — a significant speed hit. The prune itself is a cheap in-memory JSON
-            // edit; the gauge refresh is not worth an extra llama-server call each turn. The next
-            // turn's own measurement will reflect the pruned history anyway.
-            if (!isProbeRequest && hotContext > 0
-                && GetUserClientReinflatesContext?.Invoke() != true
-                && GetForwardPruneEnabled?.Invoke(model, Str(state, "local_variant")) == true)
-            {
-                // Paged context: when the context engine is wired up and paging is enabled, use
-                // its PageContext (which passes the swap store so the truncate stage spills
-                // oversized bodies and leaves a swap_id pointer — lossless). When paging is off or
-                // the engine is not wired up, fall back to the direct ForwardPrune.PruneTurn call
-                // (the lossy head+tail stub, identical to pre-paging behavior).
-                var forwardPruned = (ContextEngine is not null && ContextEngine.IsContextPagingEnabled())
-                    ? ContextEngine.PageContext(payload, hotContext, measuredPromptTokens, swapStore: SwapStore)
-                    : ForwardPrune.PruneTurn(payload, hotContext, measuredPromptTokens);
-                forwardPruneSummary = forwardPruned.Pruned
-                    ? "pruned " + forwardPruned.TokensSaved + " tokens (" + string.Join(", ", forwardPruned.Stages.Select(s => s.Split(':')[0].Trim())) + ")"
-                    : "nothing to prune";
-            }
+            // Forward pruning and context paging were removed on 25 Nov. Forward pruning acted only
+            // once the prompt was already over the Context, after Omit had stubbed the same older
+            // results (394 turns that day, nothing cut), and its "keep the newest 8" cut moved
+            // every turn. Paging left a swap_id pointer the model could not read: its /mcp route
+            // was not the MCP protocol, so no Client app could call read_swap_log. Omit, the
+            // tool-result dedup, the repeat collapse and compaction cover what they did.
 
             if (!compactApplied && !isProbeRequest)
             {
@@ -1912,13 +1850,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             {
                 // Requests can be handled concurrently; a plain ++ could give two turns one number.
                 Interlocked.Increment(ref SharedTurnCounter);
-                // Only include the forward-prune summary if the client doesn't reinflate the context.
-                // When the client reinflates (e.g. Cline), forward pruning is disabled, so the
-                // summary would be misleading.
-                var pruneBit = (forwardPruneSummary is not null && GetUserClientReinflatesContext?.Invoke() != true) 
-                    ? " · " + forwardPruneSummary 
-                    : string.Empty;
-                Log("[turn " + SharedTurnCounter + "] " + routeKind + " · " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms" + pruneBit);
+                Log("[turn " + SharedTurnCounter + "] " + routeKind + " · " + (DateTime.Now - turnStart).TotalMilliseconds.ToString("0", CultureInfo.InvariantCulture) + " ms");
 
                 // DIAG (temporary): one line that ties together the measured prompt size, which
                 // context transforms fired this turn, and whether the client reinflates the context.
@@ -1928,12 +1860,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
                 {
                     var reinflate = GetUserClientReinflatesContext?.Invoke() == true;
-                    var fpOn = GetForwardPruneEnabled?.Invoke(model, Str(state, "local_variant")) == true;
                     Log("[prefill-diag] turn=" + SharedTurnCounter
                         + " promptTokens=" + measuredPromptTokens
-                        + " reinflate=" + reinflate
-                        + " forwardPruneGate=" + fpOn
-                        + " pruneFired=" + (forwardPruneSummary is not null));
+                        + " reinflate=" + reinflate);
                 }
             }
             HttpResponseMessage? response = null;
@@ -2418,9 +2347,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 // VIBE_STATE is NOT auto-updated after every turn. Auto-updating would change the
                 // reinjection block (Task/State/Next) on every turn, which changes the system prompt
                 // and breaks the KV cache prefix — forcing a full cold prefill every single turn.
-                // Instead, VIBE_STATE is only updated when the model explicitly calls the
-                // update_vibe_state MCP tool, or when the user edits the file directly. This keeps
-                // the injected block stable across turns so the KV cache prefix is preserved.
+                // Instead it is refreshed by UpdateVibeStateAfterTurn, which writes only when the
+                // state actually changed, or when the user edits the file directly.
                 return;
             }
 
@@ -4176,37 +4104,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
     }
 
     /// <summary>
-    /// Handles a <c>POST /mcp</c> request: reads the JSON body, dispatches to the
-    /// <see cref="McpControlPlane"/>, and writes the JSON response. 404 when the control plane is
-    /// not wired up; 400 on a malformed body; 200 with the tool's result otherwise. Never throws.
-    /// </summary>
-    private async Task HandleMcpRequestAsync(HttpListenerContext context)
-    {
-        var plane = McpControlPlane;
-        if (plane is null)
-        {
-            await SendOpenAiErrorAsync(context.Response, "MCP not available", 404, "mcp_not_available").ConfigureAwait(false);
-            return;
-        }
-
-        JsonObject? body;
-        try
-        {
-            using var reader = new StreamReader(context.Request.InputStream);
-            var raw = await reader.ReadToEndAsync().ConfigureAwait(false);
-            body = string.IsNullOrWhiteSpace(raw) ? null : JsonNode.Parse(raw) as JsonObject;
-        }
-        catch
-        {
-            await SendOpenAiErrorAsync(context.Response, "Malformed JSON body", 400, "invalid_request").ConfigureAwait(false);
-            return;
-        }
-
-        var result = plane.Handle(body ?? new JsonObject());
-        await SendJsonAsync(context.Response, 200, result).ConfigureAwait(false);
-    }
-
-    /// <summary>
     /// Essence preservation: observes the turn's measured prompt-token count and, when a
     /// compaction/restart edge is detected, re-asserts the durable essence so it survives the
     /// context reset. For Cline-like clients it rewrites the session's .compaction.json (rich
@@ -4454,7 +4351,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// Stage-0 VIBE_STATE re-injection: when the per-profile toggle is on and a
     /// <c>VIBE_STATE.md</c> exists, adds the session's persistent task/state/next to the END of
     /// the newest user message, so the model always knows "where we are" even after the working
-    /// context has been paged away, and only the newest turn of the prompt changes. The block is deliberately terse (a few lines) so it costs almost
+    /// context has been shortened, and only the newest turn of the prompt changes. The block is deliberately terse (a few lines) so it costs almost
     /// nothing in tokens. No-op when the engine is not wired up, the toggle is off, or no
     /// VIBE_STATE.md exists yet. All I/O goes through the engine's <c>IContextIo</c> seam, so a
     /// locked or corrupt file never breaks a turn.
@@ -4468,7 +4365,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         // Read the live per-profile toggle. Null (profile unresolvable) is treated as on, the
-        // default — matching the forward-prune gate.
+        // default.
         var enabled = GetVibeStateEnabled?.Invoke(model, variant);
         if (enabled == false)
         {
@@ -4669,10 +4566,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
     }
 
     /// <summary>
-    /// After each local turn, refresh VIBE_STATE.md with the current task/state/next. This is the
-    /// automatic counterpart to the <c>update_vibe_state</c> MCP tool: instead of the model calling
-    /// the tool explicitly, FluxMux updates the file on every turn so the session's "where we are"
-    /// note stays current without any model involvement.
+    /// After each local turn, refresh VIBE_STATE.md with the current task/state/next, so the
+    /// session's "where we are" note stays current without any model involvement.
     ///
     /// The update is conservative: it only writes if the state actually changed, and it never
     /// throws. A failure here must never break a turn.
@@ -4686,7 +4581,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         // Read the live per-profile toggle. Null (profile unresolvable) is treated as on, the
-        // default — matching the forward-prune gate.
+        // default.
         var enabled = GetVibeStateEnabled?.Invoke(model, variant);
         if (enabled == false)
         {
@@ -5992,7 +5887,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         {
         }
 
-        // Surface the line to the UI diagnostic terminal so Hail Mary / forward-prune / context
+        // Surface the line to the UI diagnostic terminal so Hail Mary / context
         // results are visible live (previously Log() only wrote to a file).
         try
         {

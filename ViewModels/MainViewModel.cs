@@ -507,7 +507,7 @@ public partial class MainViewModel : ViewModelBase
                 SetHailMaryOutcome("Prune applied");
             });
         };
-        // Surface every gateway log line (Hail Mary results, forward-prune results, context
+        // Surface every gateway log line (Hail Mary results, context
         // measurements, route decisions) into the live diagnostic terminal so the user can see
         // what is happening, especially during significant delays.
         _runtimeService.GatewayLogLine += line =>
@@ -867,9 +867,7 @@ public partial class MainViewModel : ViewModelBase
     /// <summary>
     /// True when the VIBE_STATE checkbox should be enabled. VIBE_STATE is prefix-safe
     /// (its block hash is stable across turns, so it does NOT break the KV cache prefix),
-    /// so it remains available for ALL client types including Cline-like. This is unlike
-    /// forward-prune and context-paging, which are defeated by reinflation and break the
-    /// cache — those are gated on CompactionControlsEnabled.
+    /// so it remains available for ALL client types including Cline-like.
     /// </summary>
     public bool VibeStateControlsEnabled => true;
 
@@ -8700,39 +8698,17 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Per-profile forward-prune toggle ("LocalForwardPruneEnabled", default on). When on, every
-    /// local turn has its own waste trimmed (dedupe, collapse repeated tool loops, truncate
-    /// oversized older tool results) so the context fills more slowly. A per-turn throttle,
-    /// distinct from Compaction (summarize older turns) and Hail Mary (one-off emergency
-    /// rear-prune). Read live each turn, so toggling takes effect on the next turn without a
-    /// reload. Persisted per profile in the config.
-    /// </summary>
-    [ObservableProperty]
-    private bool _localForwardPruneEnabled = true;
-
-    /// <summary>
     /// Per-profile VIBE_STATE toggle ("LocalVibeStateEnabled", default on). When on, the context
     /// engine re-injects the session's task/state/next at the top of every local turn so the model
-    /// always knows "where we are" even after the working context has been paged away. Read live
-    /// each turn, so toggling takes effect on the next turn without a reload. Persisted per profile
-    /// in the config.
+    /// always knows "where we are" even after older turns have been shortened. Read live each turn,
+    /// so toggling takes effect on the next turn without a reload. Persisted per profile in the
+    /// config.
     /// </summary>
     [ObservableProperty]
     private bool _localVibeStateEnabled = true;
 
     /// <summary>
-    /// Per-profile context-paging toggle ("LocalContextPagingEnabled", default on). When on, the
-    /// forward-prune truncate stage spills oversized older tool-result bodies to the swap store
-    /// and leaves a short swap_id pointer in the prompt (lossless: the model can read the full
-    /// body back via read_swap_log). When off, the lossy head+tail stub is used (identical to
-    /// pre-paging behavior). Read live each turn, so toggling takes effect on the next turn
-    /// without a reload. Persisted per profile in the config.
-    /// </summary>
-    [ObservableProperty]
-    private bool _localContextPagingEnabled = true;
-
-    /// <summary>
-    /// The directory that the "📌 Checkpoint" button (and the model's git_checkpoint tool) commits
+    /// The directory that the "📌 Checkpoint" button commits
     /// to. Empty means "use the workspace root" (the parent of the config file's folder). This is a
     /// global setting, not per-profile: the git repo location is not tied to a model profile.
     /// Persisted at the top level of the config as "LocalGitCheckpointDirectory".
@@ -22064,9 +22040,7 @@ public partial class MainViewModel : ViewModelBase
         settings["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled;
         settings["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled;
         settings["LocalAutoCompactMode"] = LocalAutoCompactMode;
-        settings["LocalForwardPruneEnabled"] = LocalForwardPruneEnabled;
         settings["LocalVibeStateEnabled"] = LocalVibeStateEnabled;
-        settings["LocalContextPagingEnabled"] = LocalContextPagingEnabled;
         settings["LocalAutoCompactTriggerPercent"] = ((int)LocalAutoCompactTriggerPercent).ToString();
         settings["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString();
         settings["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString();
@@ -22675,12 +22649,8 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantAutoCompressEnabled = ParseBool(settings["AutoCompressEnabled"]?.ToString() ?? string.Empty, true);
         LocalAutoCompactEnabled = ParseBool(settings["LocalAutoCompactEnabled"]?.ToString() ?? string.Empty, true);
         LocalAutoCompactMode = CoerceLocalAutoCompactMode(settings["LocalAutoCompactMode"]?.ToString());
-        // Forward-prune toggle: default on, so only an explicit "false" disables it.
-        LocalForwardPruneEnabled = ParseBool(settings["LocalForwardPruneEnabled"]?.ToString() ?? string.Empty, true);
         // VIBE_STATE toggle: default on, so only an explicit "false" disables it.
         LocalVibeStateEnabled = ParseBool(settings["LocalVibeStateEnabled"]?.ToString() ?? string.Empty, true);
-        // Context-paging toggle: default on, so only an explicit "false" disables it.
-        LocalContextPagingEnabled = ParseBool(settings["LocalContextPagingEnabled"]?.ToString() ?? string.Empty, true);
         SelectedLocalAutoCompactModeOption = LocalAutoCompactModeOptions.FirstOrDefault(o =>
             string.Equals(o.Value, LocalAutoCompactMode, StringComparison.OrdinalIgnoreCase))
             ?? LocalAutoCompactModeOptions.FirstOrDefault(o =>
@@ -24444,9 +24414,7 @@ public partial class MainViewModel : ViewModelBase
         LocalAutoCompactKeepTurns = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactKeepTurns", LocalAutoCompactKeepTurns.ToString()), 6d), 4m, 12m);
         LocalAutoCompactKeepToolResults = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactKeepToolResults", LocalAutoCompactKeepToolResults.ToString()), 8d), 4m, 16m);
         LocalAutoCompactPinUserChars = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalAutoCompactPinUserChars", LocalAutoCompactPinUserChars.ToString()), 2000d), 500m, 5000m);
-        LocalForwardPruneEnabled = ParseBool(settings.GetValueOrDefault("LocalForwardPruneEnabled", LocalForwardPruneEnabled.ToString()), true);
         LocalVibeStateEnabled = ParseBool(settings.GetValueOrDefault("LocalVibeStateEnabled", LocalVibeStateEnabled.ToString()), true);
-        LocalContextPagingEnabled = ParseBool(settings.GetValueOrDefault("LocalContextPagingEnabled", LocalContextPagingEnabled.ToString()), true);
         LocalMaxForwardedImages = Math.Clamp((decimal)ParseDouble(settings.GetValueOrDefault("LocalMaxForwardedImages", LocalMaxForwardedImages.ToString()), 1d), 1m, 8m);
         LocalVariantAutoCompressEnabled = !string.Equals(LocalAutoCompactMode, "none", StringComparison.OrdinalIgnoreCase);
         RefreshLocalVisionHint();
@@ -24763,9 +24731,7 @@ public partial class MainViewModel : ViewModelBase
             ["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled,
             ["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled,
             ["LocalAutoCompactMode"] = LocalAutoCompactMode,
-            ["LocalForwardPruneEnabled"] = LocalForwardPruneEnabled,
             ["LocalVibeStateEnabled"] = LocalVibeStateEnabled,
-            ["LocalContextPagingEnabled"] = LocalContextPagingEnabled,
             ["LocalAutoCompactTriggerPercent"] = ((int)LocalAutoCompactTriggerPercent).ToString(),
             ["LocalAutoCompactKeepTurns"] = ((int)LocalAutoCompactKeepTurns).ToString(),
             ["LocalAutoCompactKeepToolResults"] = ((int)LocalAutoCompactKeepToolResults).ToString(),

@@ -522,7 +522,7 @@ public sealed class FluxMuxRuntimeService
 	public event Action<int>? HailMaryAppliedNotice;
 
 	/// <summary>
-	/// Raised for every gateway log line (Hail Mary results, forward-prune results, context
+	/// Raised for every gateway log line (Hail Mary results, context
 	/// measurements, route decisions, etc.) so the UI diagnostic terminal can show them live.
 	/// </summary>
 	public event Action<string>? GatewayLogLine;
@@ -910,7 +910,6 @@ public sealed class FluxMuxRuntimeService
 		host.GenerationSpeed = _generationSpeedTracker;
 		host.EnrichState = EnrichProxyRuntimeState;
 		host.GetLocalAutoCompactSettings = GetLocalAutoCompactSettings;
-		host.GetForwardPruneEnabled = GetForwardPruneEnabled;
 		host.GetUserClientReinflatesContext = () => UserClientReinflatesContext;
 		// VIBE_STATE + paged-context engine. The engine is self-contained: it reads its config
 		// flags via injected delegates (backed by the per-profile GetProfileBool one-liners) and
@@ -925,21 +924,7 @@ public sealed class FluxMuxRuntimeService
 				IsVibeStateEnabled = () => GetVibeStateEnabled(
 					_managedLocalModel,
 					_managedLocalVariant) != false,
-				IsContextPagingEnabled = () => GetContextPagingEnabled(
-					_managedLocalModel,
-					_managedLocalVariant) != false,
 			});
-
-		// Paged-context swap store + MCP control plane. The swap store lives next to the config
-		// file (context_swap.json). The MCP control plane exposes update_vibe_state, read_swap_log,
-		// and git_checkpoint over POST /mcp. Both are self-contained (no hard dependency on this
-		// service) and never throw.
-		var swapStorePath = Path.Combine(_scriptRoot, "context_swap.json");
-		var swapStore = new FluxMux.Avalonia.Services.ContextEngine.ContextSwapStore(
-			new FluxMux.Avalonia.Services.ContextEngine.FileSystemContextIo(),
-			swapStorePath);
-		swapStore.EnsureExists();
-		host.SwapStore = swapStore;
 
 		// Essence log + reasserter (essence-preserving compaction). The essence log lives next to
 		// VIBE_STATE.md (kept together with the other session artifacts). The reasserter re-asserts
@@ -954,14 +939,6 @@ public sealed class FluxMuxRuntimeService
 		host.VibeScope = new FluxMux.Avalonia.Services.ContextEngine.VibeConversationScope(_vibeStatePath, essenceLogPath);
 		host.EssenceReasserter = new FluxMux.Avalonia.Services.ContextEngine.EssenceReasserter(essenceLog);
 
-		var mcpPlane = new FluxMux.Avalonia.Services.ContextEngine.McpControlPlane(
-			host.ContextEngine,
-			swapStore,
-			new FluxMux.Avalonia.Services.ContextEngine.GitRunner(),
-			_vibeStatePath,
-			_workspaceRoot,
-			essenceLog);
-		host.McpControlPlane = mcpPlane;
 		host.ReportHailMaryApplied = tokens => HailMaryAppliedNotice?.Invoke(tokens);
 		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);
 		host.ReportPortRulesTelemetry = snap => PortRulesTelemetryNotice?.Invoke(snap);
@@ -973,7 +950,7 @@ public sealed class FluxMuxRuntimeService
 			// Only forward user-relevant lines to the terminal. The gateway logs many internal
 			// lines (route decide, overlay, ContextDiag, long-load, ttfb, upstream ok, etc.)
 			// that are useful in the log file but clutter the UI. Forward only:
-			//   - [turn N] ...   (one line per turn: route, timing, forward-prune result)
+			//   - [turn N] ...   (one line per turn: route, timing)
 			//   - hail-mary ...  (only when armed and executed)
 			//   - essence: ... / vibe-state: ...  (the essence-preservation system: goal pivots,
 			//     captured decisions/dead ends, compaction-edge detection, and re-assertion). The
@@ -1058,43 +1035,16 @@ public sealed class FluxMuxRuntimeService
 	}
 
 	/// <summary>
-	/// Per-profile forward-prune toggle ("LocalForwardPruneEnabled", default on). Read live from
-	/// the config file each turn (same LoadJsonCached path as the auto-compact settings) so it
-	/// can be switched mid-chat without a reload. Returns null when the profile cannot be
-	/// resolved; the gateway treats null as "on" (the default).
-	///
-	/// IMPORTANT: forward-prune is forced OFF when the user's client reinflates the context
-	/// (forwards the full chat each turn, e.g. Cline). For those clients the prune is defeated
-	/// (the client resends the full history on the next turn, undoing the prune) AND it breaks
-	/// the KV cache prefix (pruning a slightly different set of tool results each turn changes
-	/// the prompt, forcing a cold re-prefill every turn). This is the same rationale as skipping
-	/// session artifact stripping for reinflating clients. The per-profile config toggle is
-	/// therefore ignored for reinflating clients — they always get forward-prune off.
-	/// </summary>
-	private bool? GetForwardPruneEnabled(string model, string variant)
-	{
-		// Profiles that leave shortening to the Client app always get forward-prune off, regardless of the config.
-		if (UserClientReinflatesContext)
-		{
-			return false;
-		}
-
-		// Default on: only an explicit "false" disables forward pruning.
-		return GetProfileBool(model, variant, "LocalForwardPruneEnabled", fallback: true);
-	}
-
-	/// <summary>
 	/// Per-profile VIBE_STATE toggle ("LocalVibeStateEnabled", default on). When on, the context
 	/// engine re-injects the session's task/state/next at the top of every local turn so the model
-	/// always knows "where we are" even after the working context has been paged away. Read live
-	/// each turn so it can be switched mid-chat without a reload.
+	/// always knows "where we are" even after older turns have been shortened. Read live each turn
+	/// so it can be switched mid-chat without a reload.
 	///
 	/// IMPORTANT: VIBE_STATE is SAFE for reinflating clients (Cline-like). The VIBE_STATE block
 	/// is a prefix-stable system suffix: its hash is stable across turns (verified), so it does
-	/// NOT break the KV cache prefix. Unlike forward-prune and context-paging (which change the
-	/// prompt content each turn and force a cold re-prefill), VIBE_STATE is appended after the
-	/// stable prefix and does not invalidate the cache. It is therefore NOT forced off for
-	/// reinflating clients — it remains available as a useful feature for Cline sessions.
+	/// NOT break the KV cache prefix: it is appended after the stable prefix. It is therefore NOT
+	/// forced off for reinflating clients — it remains available as a useful feature for Cline
+	/// sessions.
 	/// </summary>
 	private bool? GetVibeStateEnabled(string model, string variant)
 	{
@@ -1105,36 +1055,10 @@ public sealed class FluxMuxRuntimeService
 	}
 
 	/// <summary>
-	/// Per-profile context-paging toggle ("LocalContextPagingEnabled", default on). When on, the
-	/// forward-prune truncate stage spills oversized older tool-result bodies to the swap store
-	/// and leaves a short swap_id pointer in the prompt (lossless: the model can read the full
-	/// body back via read_swap_log). When off, the lossy head+tail stub is used (identical to
-	/// pre-paging behavior). Read live each turn so it can be switched mid-chat without a reload.
-	///
-	/// IMPORTANT: context-paging is forced OFF when the user's client reinflates the context
-	/// (forwards the full chat each turn, e.g. Cline). For those clients, paging changes the
-	/// prompt content each turn (swapping different tool-result bodies in and out), which
-	/// breaks the KV cache prefix and forces a cold re-prefill every turn. This is the same
-	/// rationale as forcing forward-prune off for reinflating clients. The per-profile config
-	/// toggle is therefore ignored for reinflating clients — they always get paging off.
-	/// </summary>
-	private bool? GetContextPagingEnabled(string model, string variant)
-	{
-		// Profiles that leave shortening to the Client app always get context-paging off, regardless of the config.
-		if (UserClientReinflatesContext)
-		{
-			return false;
-		}
-
-		// Default on: only an explicit "false" disables paged-context spill.
-		return GetProfileBool(model, variant, "LocalContextPagingEnabled", fallback: true);
-	}
-
-	/// <summary>
 	/// Reads a per-profile boolean flag from <c>fluxmux_config.json</c> (under
 	/// <c>LocalProfiles["model::variant"]</c>), falling back to <paramref name="fallback"/> when
 	/// the key is absent. This is the single per-profile bool-read for the app; new flags
-	/// (e.g. <c>LocalVibeStateEnabled</c>, <c>LocalContextPagingEnabled</c>) are one-liners over
+	/// (e.g. <c>LocalVibeStateEnabled</c>) are one-liners over
 	/// it rather than copies of this body.
 	/// </summary>
 	private bool? GetProfileBool(string model, string variant, string key, bool fallback)
@@ -3297,46 +3221,25 @@ public sealed class FluxMuxRuntimeService
 	}
 
 	/// <summary>
-	/// Creates a git checkpoint in the workspace. This is the user-facing counterpart to the
-	/// <c>git_checkpoint</c> MCP tool: instead of the model calling the tool, the user clicks a
-	/// button in the UI. The checkpoint is a git commit with a message like
-	/// "fluxmux-checkpoint: &lt;message&gt;" so it's easy to find and reset to later.
+	/// Creates a git checkpoint in the workspace (the 📌 Checkpoint button). The checkpoint is a
+	/// git commit with a message like "fluxmux-checkpoint: &lt;message&gt;" so it's easy to find
+	/// and reset to later. It went through an MCP control plane until 25 Nov; that plane's other
+	/// tools could not be reached by any Client app and were removed, so this calls git directly.
 	/// </summary>
 	public async Task<RuntimeActionResult> RunGitCheckpointAsync(string message, string? workDir = null, CancellationToken cancellationToken = default(CancellationToken))
 	{
-		var host = _gatewayHost;
-		if (host is null || host.McpControlPlane is null)
-		{
-			return new RuntimeActionResult
-			{
-				IsSuccess = false,
-				Status = "MCP control plane not available",
-				Details = "The gateway host or MCP control plane is not initialized."
-			};
-		}
-
 		try
 		{
 			// Prefer the explicit override (the folder the user just confirmed in the picker),
 			// falling back to the configured/default checkpoint directory.
 			var targetDir = string.IsNullOrWhiteSpace(workDir) ? GitCheckpointDirectory : workDir.Trim();
 
-			var args = new JsonObject
-			{
-				["message"] = string.IsNullOrWhiteSpace(message) ? "checkpoint" : message,
-				["work_dir"] = targetDir,
-			};
-
-			var body = new JsonObject
-			{
-				["tool"] = "git_checkpoint",
-				["args"] = args
-			};
-
-			var result = host.McpControlPlane.Handle(body);
-			var ok = result["ok"]?.GetValue<bool>() ?? false;
-			var gitMessage = result["message"]?.GetValue<string>() ?? string.Empty;
-			var error = result["error"]?.GetValue<string>() ?? string.Empty;
+			var (ok, gitMessage) = await Task.Run(
+				() => new FluxMux.Avalonia.Services.ContextEngine.GitRunner().CreateCheckpoint(
+					targetDir,
+					string.IsNullOrWhiteSpace(message) ? "checkpoint" : message),
+				cancellationToken).ConfigureAwait(false);
+			var error = ok ? string.Empty : gitMessage;
 
 			return new RuntimeActionResult
 			{

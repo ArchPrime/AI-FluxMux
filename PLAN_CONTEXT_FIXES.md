@@ -1,5 +1,8 @@
 # PLAN — Context fixes: YaRN switch, per-turn forward-prune, Hail Mary (HANDOFF, resumable)
 
+> **Superseded 25 Nov 2026:** forward pruning and paged context (swap store, `/mcp`, `read_swap_log`, `update_vibe_state`) were removed — see AGENTS.md, *Removed: forward pruning and context paging*. Kept as history only.
+
+
 > Recorded 10/26. **This file is the source of truth for resuming.** If a chat's context
 > overflows mid-implementation, a new chat reads this file + `BRIEFING.md` + `STATUS.md`
 > and continues from the first unchecked step. Each step has a "DONE?" marker — flip it to

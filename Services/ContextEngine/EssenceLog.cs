@@ -36,7 +36,7 @@ public sealed record EssenceIntentShift(
 /// task/state/next/files snapshot PLUS the history of how the goal evolved, the key decisions,
 /// and the dead ends. Written continuously while the model is live; re-asserted after a
 /// compaction or cold resume so the essence survives even when the raw context is discarded.
-/// Mirrors ContextSwapStore's resilience: all I/O via <see cref="IContextIo"/>, never throws.
+/// All I/O via <see cref="IContextIo"/>, never throws.
 /// </summary>
 public sealed class EssenceLog
 {

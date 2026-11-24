@@ -2,9 +2,8 @@
 // plus a UI-Automation click of Cline's chat send button.
 //
 // When FluxMux is acting as a gateway for a Cline-like client (one that reinflates full
-// history every turn), the forward-prune and context-paging ContextEngine features are
-// defeated: Cline sends the full history again on the next turn, undoing any prune and
-// breaking the KV cache prefix. The only way to actually reduce Cline's context is to
+// history every turn), Cline sends the full history again on the next turn, so shortening
+// what AI-FluxMux forwards does not shrink Cline's own copy. The only way to actually reduce Cline's context is to
 // trigger Cline's own compaction (/smol), which writes a .compaction.json file that Cline
 // reads on subsequent turns.
 //
