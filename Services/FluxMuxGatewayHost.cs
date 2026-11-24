@@ -3006,17 +3006,57 @@ public sealed class FluxMuxGatewayHost : IDisposable
         Log("local reload: forward-compact suppressed for " + minutes + " minutes after failed compact");
     }
 
-    private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn, int? measuredPromptTokens = null, bool forceCompact = false)
-    {
-        var rules = CurrentRules();
+    /// <summary>
+    /// Share of the Context at which AI-FluxMux shortens a chat even when the profile leaves
+    /// shortening to the Client app. Most Client apps shorten well before this (Cline at about
+    /// 80 %), so it only fires when theirs came too late or one turn was very large.
+    /// </summary>
+    internal const double LastResortCompactShare = 0.95;
 
-        // If the user's client reinflates the context (forwards the full chat each turn, e.g. Cline),
-        // skip FluxMux compaction entirely. The client will resend the full history on the next turn
-        // anyway, so compacting here is wasted work. Let the client manage its own context.
-        if (GetUserClientReinflatesContext?.Invoke() == true)
+    /// <summary>
+    /// Last-resort shorten for "Long chats are shortened by: the Client app". Uses the same
+    /// stepped cut as normal compaction, so a Client app that keeps resending the long chat
+    /// still gets a mostly reusable prompt cache. Returns false (prompt untouched) below the
+    /// threshold or when nothing older can be shortened.
+    /// </summary>
+    private bool TryLastResortCompact(JsonObject payload, JsonObject state, PortForwardingRules rules, int? measuredPromptTokens)
+    {
+        var context = ParseInt(Str(state, "local_context"), 0);
+        if (context <= 0)
         {
             return false;
         }
+
+        var promptTokens = measuredPromptTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        var threshold = (int)(context * LastResortCompactShare);
+        if (promptTokens < threshold)
+        {
+            return false;
+        }
+
+        if (!LocalHistoryCompaction.TryCompactPayloadStable(
+                payload,
+                rules,
+                trial => !LocalRequestOverlayRouting.PromptExceedsContext(trial, context, rules.CompactHeadroom)))
+        {
+            return false;
+        }
+
+        Log("last-resort compact: prompt " + promptTokens.ToString(CultureInfo.InvariantCulture)
+            + " tokens reached " + threshold.ToString(CultureInfo.InvariantCulture)
+            + " (95% of Context) and the Client app had not shortened it, so AI-FluxMux shortened older turns so the turn can run");
+        var inserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
+        if (inserted > 0)
+        {
+            Log("local chat: inserted a user turn so the Qwen template has a query");
+        }
+
+        return true;
+    }
+
+    private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn, int? measuredPromptTokens = null, bool forceCompact = false)
+    {
+        var rules = CurrentRules();
 
         // Check if the user has chosen "full fidelity" for a document. In this case, we skip
         // auto-compaction to let the document run in RAM at full precision.
@@ -3082,19 +3122,26 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return false;
         }
 
-        // "None / endpoint managed": the user explicitly opted out of gateway
+        // "The Client app" (mode "none"): the user explicitly opted out of gateway
         // compaction. Skip both the wizard path and the Port-rules fallback so the
-        // endpoint (llama.cpp / the model itself) manages context. This check is
+        // Client app manages context. This check is
         // outside the autoContext > 0 gate so it works even when local_context is 0.
         //
         // A null result means the per-profile settings could not be resolved (no
         // config, no LocalProfiles, or the model::variant key is missing). In that
         // case we must NOT fall back to the Port-rules compaction below — doing so
-        // would defeat the user's explicit "None / endpoint managed" opt-out. Treat
+        // would defeat the user's explicit "The Client app" (mode "none") opt-out. Treat
         // an unresolvable profile as "none" so the opt-out is honoured.
-        if (!perProfile.HasValue || perProfileMode == "none")
+        //
+        // "None" is shown as "Long chats are shortened by: the Client app" (Cline Auto compact,
+        // Harness's own shortening, ...). AI-FluxMux still keeps a last-resort shorten near the
+        // Context limit, so a turn the Client app did not shorten in time runs instead of
+        // being refused as too large.
+        if (!perProfile.HasValue
+            || string.Equals(perProfileMode, "none", StringComparison.OrdinalIgnoreCase)
+            || GetUserClientReinflatesContext?.Invoke() == true)
         {
-            return false;
+            return TryLastResortCompact(payload, state, rules, measuredPromptTokens);
         }
 
         // Wizard-controlled auto-compaction: independent of Port rules.

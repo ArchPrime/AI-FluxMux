@@ -14,7 +14,7 @@ Desktop router for local and cloud models. Designed for any OpenAI-compatible Cl
 - **Compact and omit** — shorten older turns and stub older tool bodies on the pack forwarded to llama-server. The Client app still has the full chat.
 - **Route requests** — when the loaded local cannot take a turn, or a ready cloud would spare RAM, AI-FluxMux asks before switching. Overlay temperature / max tokens can apply without a reload.
 - **Generation progress** — live progress bar that moves during thinking/prefill and generation phases, with data-driven prefill estimates and generation ETA.
-- **Compaction controls respect the client** — when the selected client reinflates context with full chat history each turn (Cline-like), forward-prune, auto-compact, and compact controls are disabled automatically.
+- **One choice for who shortens long chats** — each model profile says whether AI-FluxMux (Port rules or the profile's own settings) or the Client app (Cline Auto compact, Harness's own shortening) shortens a chat that outgrows the Context. With the Client app, AI-FluxMux leaves the chat alone and only shortens it as a last resort at 95 % of the Context, so the turn still runs.
 - **YaRN context extension** — extend a local model's context far beyond its VRAM budget, up to 1M tokens, by spilling the KV cache into system RAM.
 - **In-app Help** — install, llama-server, Cline, Harness, and Port rules. Setting Help links keep a stable topic id so a later Help text update does not break the jump.
 

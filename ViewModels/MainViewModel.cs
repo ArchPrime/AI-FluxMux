@@ -834,37 +834,31 @@ public partial class MainViewModel : ViewModelBase
     public partial string SelectedSelection2CloudVariant { get; set; } = BaseVariantDisplayName;
 
     /// <summary>
-    /// The user's chat client style. "Other" = non-reinflating (compaction works normally).
-    /// "Cline-like" = forwards the full chat history each turn (reinflates context, so
-    /// FluxMux compaction is disabled). This is a declaration of fact about which client
-    /// the user is using, not a behavioral preference.
+    /// True when the RUNNING local profile says "Long chats are shortened by: the Client app"
+    /// (LocalAutoCompactMode "none"). Read live from the runtime, which reads the running
+    /// profile from disk. Replaces the old Diagnostics "client style: Other / Cline-like" box,
+    /// which duplicated the profile choice and silently overrode it.
     /// </summary>
-    [ObservableProperty]
-    public partial string UserClientStyle { get; set; } = "Other";
+    public bool UserClientReinflatesContext => _runtimeService.UserClientReinflatesContext;
 
     /// <summary>
-    /// Warning text shown when the user's client reinflates the context (e.g. Cline).
-    /// Explains that FluxMux compaction can't shrink what the client resends.
+    /// True when the profile being edited lets AI-FluxMux shorten long chats, so its own
+    /// shortening controls (pruning, paging, trigger, keep turns) apply. Greyed out when the
+    /// profile leaves shortening to the Client app.
     /// </summary>
-    public const string UserClientReinflationWarning =
-        "AI-FluxMux compaction can shorten what it sends to the model from your end. " +
-        "But endpoints that resend the full chat history every turn (e.g. Cline) will keep reinflating the context at their end from the full chat. " +
-        "Forward-prune and context-paging are disabled for these clients (they break the KV cache). " +
-        "VIBE_STATE remains available (it's prefix-safe). " +
-        "The Hail Mary button triggers Cline's /smol command to compact the conversation from the client side.";
+    public bool CompactionControlsEnabled =>
+        !string.Equals(LocalAutoCompactMode, "none", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// True when the user's client reinflates the context (forwards the full chat each turn).
+    /// Re-reads the running profile's shortening choice for bindings that depend on it (the
+    /// Hail Mary picker). Called before the picker opens, since a profile can be launched or
+    /// switched without this view model seeing a property change.
     /// </summary>
-    public bool UserClientReinflatesContext =>
-        UserClientStyle.StartsWith("Cline-like", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// True when FluxMux compaction controls should be enabled. When the user's client
-    /// reinflates the context (e.g. Cline), compaction is disabled and the controls are
-    /// greyed out.
-    /// </summary>
-    public bool CompactionControlsEnabled => !UserClientReinflatesContext;
+    public void RefreshClientShorteningState()
+    {
+        OnPropertyChanged(nameof(UserClientReinflatesContext));
+        OnPropertyChanged(nameof(HailMaryRescueAvailable));
+    }
 
     /// <summary>
     /// True when the VIBE_STATE checkbox should be enabled. VIBE_STATE is prefix-safe
@@ -886,15 +880,6 @@ public partial class MainViewModel : ViewModelBase
     /// </summary>
     public bool HailMaryButtonEnabled => HailMaryButtonVisible;
 
-    /// <summary>
-    /// Tooltip for the "User client" dropdown. Explains that this tells FluxMux which
-    /// chat client the user is using, so it can adjust compaction behavior.
-    /// </summary>
-    public string UserClientStyleTooltip => UserClientReinflatesContext
-        ? UserClientReinflationWarning
-        : "Tell AI-FluxMux which chat client you're using so it can adjust compaction. " +
-          "\"Other\" = your client keeps compacted context (AI-FluxMux compaction works normally). " +
-          "\"Cline-like\" = your client forwards the full chat history each turn (AI-FluxMux compaction is disabled).";
 
     [ObservableProperty]
     public partial bool IsFirstProfileBootstrapPending { get; set; } = false;
@@ -1015,18 +1000,6 @@ public partial class MainViewModel : ViewModelBase
         "Cline",
         "DeepSeek Harness",
         "Other"
-    ];
-
-    /// <summary>
-    /// Options for the "User client" dropdown in the Diagnostics panel. This tells FluxMux
-    /// which chat client the user is using, so it can adjust compaction behavior.
-    /// "Other" = non-reinflating (compaction works normally).
-    /// "Cline-like" = reinflating (compaction disabled).
-    /// </summary>
-    public IReadOnlyList<string> UserClientStyleOptions { get; } =
-    [
-        "Other",
-        "Cline-like"
     ];
 
     [ObservableProperty]
@@ -1235,80 +1208,6 @@ public partial class MainViewModel : ViewModelBase
         TrySyncEndpointSettingsForMountedRoute();
         RefreshCloudRecommendBanner();
         RefreshLocalReloadRecommendBanner();
-    }
-
-    partial void OnUserClientStyleChanged(string value)
-    {
-        if (_isLoadingConfig)
-        {
-            return;
-        }
-
-        var trimmedValue = value?.Trim() ?? "Other";
-        _config.SetString("UserClientStyle", trimmedValue);
-
-        ApplyUserClientStyle();
-        OnPropertyChanged(nameof(UserClientStyleTooltip));
-        OnPropertyChanged(nameof(CompactionControlsEnabled));
-        OnPropertyChanged(nameof(HailMaryButtonEnabled));
-    }
-
-    /// <summary>
-    /// Applies the user client style: when the client reinflates the context (e.g. Cline),
-    /// disable FluxMux compaction and grey out the compaction controls. When the client
-    /// doesn't reinflate, enable compaction normally.
-    /// </summary>
-    private void ApplyUserClientStyle()
-    {
-        _isApplyingUserClientStyle = true;
-        try
-        {
-            if (UserClientReinflatesContext)
-            {
-                // Disable FluxMux compaction globally. The gateway checks this flag on every
-                // turn and skips compaction if it's true, regardless of the per-profile setting.
-                _runtimeService.SetUserClientReinflatesContext(true);
-                
-                // Save the current settings and disable them.
-                if (_savedLocalAutoCompactMode == null)
-                {
-                    _savedLocalAutoCompactMode = LocalAutoCompactMode;
-                    _savedLocalAutoCompactEnabled = LocalAutoCompactEnabled;
-                    _savedLocalForwardPruneEnabled = LocalForwardPruneEnabled;
-                    _savedLocalVariantAutoCompressEnabled = LocalVariantAutoCompressEnabled;
-                    _savedPortRulesCompactEnabled = PortRules.CompactEnabled;
-                }
-                LocalAutoCompactMode = "none";
-                LocalAutoCompactEnabled = false;
-                LocalForwardPruneEnabled = false;
-                LocalVariantAutoCompressEnabled = false;
-                PortRules.CompactEnabled = false;
-            }
-            else
-            {
-                // Enable compaction normally.
-                _runtimeService.SetUserClientReinflatesContext(false);
-                
-                // Revert to the saved settings if they were changed.
-                if (_savedLocalAutoCompactMode != null)
-                {
-                    LocalAutoCompactMode = _savedLocalAutoCompactMode;
-                    LocalAutoCompactEnabled = _savedLocalAutoCompactEnabled ?? true;
-                    LocalForwardPruneEnabled = _savedLocalForwardPruneEnabled ?? true;
-                    LocalVariantAutoCompressEnabled = _savedLocalVariantAutoCompressEnabled ?? false;
-                    PortRules.CompactEnabled = _savedPortRulesCompactEnabled ?? true;
-                    _savedLocalAutoCompactMode = null;
-                    _savedLocalAutoCompactEnabled = null;
-                    _savedLocalForwardPruneEnabled = null;
-                    _savedLocalVariantAutoCompressEnabled = null;
-                    _savedPortRulesCompactEnabled = null;
-                }
-            }
-        }
-        finally
-        {
-            _isApplyingUserClientStyle = false;
-        }
     }
 
     partial void OnHarnessWebPortChanged(decimal value)
@@ -2260,10 +2159,9 @@ public partial class MainViewModel : ViewModelBase
             SelectedEndpointApp.Equals("DeepSeek Harness", StringComparison.OrdinalIgnoreCase)
                 || HarnessWebIsInPlay,
             ResolveRunningProfileExtendContextIntoRam() ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : 0,
-            // When the user client reinflates the context (e.g. Cline), Cline manages its own
-            // auto-compact. FluxMux must NOT turn off Cline's auto-compact, so pass "none" as
-            // the compact mode to prevent ClineContextSync from patching globalState.json.
-            UserClientReinflatesContext ? "none" : LocalAutoCompactMode);
+            // "none" = the profile leaves shortening to the Client app, so ClineContextSync turns
+            // Cline Auto compact back on; any other mode turns it off so AI-FluxMux shortens.
+            LocalAutoCompactMode);
 
     /// <summary>
     /// Reads the YaRN "Extend context into RAM" flag directly from the running profile's
@@ -5227,15 +5125,15 @@ public partial class MainViewModel : ViewModelBase
     private void HailMaryShrinkTurn()
     {
         _runtimeService.Supervisor?.LogLaunchMonitor(
-            "[HailMary] HailMaryShrinkTurn invoked (reinflate=" + UserClientReinflatesContext +
-            ", style=" + UserClientStyle + ", selectedStrategy=" + HailMarySelectedStrategy + ")");
+            "[HailMary] HailMaryShrinkTurn invoked (clientShortens=" + UserClientReinflatesContext +
+            ", clineRescue=" + HailMaryRescueAvailable + ", selectedStrategy=" + HailMarySelectedStrategy + ")");
         // When the user's client reinflates the context (e.g. Cline), a middle-cut is
         // defeated: Cline sends the full history again on the next turn, undoing the cut
         // and breaking the KV cache prefix. Instead, run a Cline-aware compaction strategy.
         // Stage 0 = WaitForCline (trigger Cline's own /smol). Stage 1 = ExternalRescue (write a
         // .compaction.json ourselves when Cline is non-responsive). The strategy is selected in
         // the picker; the default is WaitForCline (the existing behavior).
-        if (UserClientReinflatesContext)
+        if (HailMaryRescueAvailable)
         {
             RunClineCompactionStrategy();
             return;
@@ -5275,8 +5173,14 @@ public partial class MainViewModel : ViewModelBase
     public partial global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy HailMarySelectedStrategy { get; set; }
         = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Default;
 
-    /// <summary>True when the external-rescue option should be offered (Cline-like client).</summary>
-    public bool HailMaryRescueAvailable => UserClientReinflatesContext;
+    /// <summary>
+    /// True when the Cline rescue options should be offered: the running profile leaves
+    /// shortening to the Client app and that Client app is Cline (the /smol and compaction-file
+    /// strategies only work in Cline).
+    /// </summary>
+    public bool HailMaryRescueAvailable =>
+        UserClientReinflatesContext
+        && string.Equals(SelectedEndpointApp, "Cline", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// True when a rescue compaction has been prepared and is awaiting user confirmation. While
@@ -5793,12 +5697,6 @@ public partial class MainViewModel : ViewModelBase
     private bool _lastTurnTelemetryActive;
     private DateTimeOffset _lastPlottedTurnUtc = DateTimeOffset.MinValue;
     private const int TurnTelemetryWindow = 20;
-    private string? _savedLocalAutoCompactMode;
-    private bool? _savedLocalAutoCompactEnabled;
-    private bool? _savedLocalForwardPruneEnabled;
-    private bool? _savedLocalVariantAutoCompressEnabled;
-    private bool? _savedPortRulesCompactEnabled;
-    private bool _isApplyingUserClientStyle;
 
     /// <summary>
     /// Plots one point per completed chat turn on the two telemetry graphs. Called from
@@ -8647,6 +8545,10 @@ public partial class MainViewModel : ViewModelBase
 
     partial void OnLocalAutoCompactModeChanged(string value)
     {
+        OnPropertyChanged(nameof(CompactionControlsEnabled));
+        OnPropertyChanged(nameof(HailMaryRescueAvailable));
+        // Keep the stored AutoCompressEnabled in step with the choice (it is no longer on the page).
+        LocalVariantAutoCompressEnabled = !string.Equals(value, "none", StringComparison.OrdinalIgnoreCase);
         // Sync the SelectedLocalAutoCompactModeOption with the LocalAutoCompactMode.
         var option = LocalAutoCompactModeOptions.FirstOrDefault(o => 
             string.Equals(o.Value, value, StringComparison.OrdinalIgnoreCase));
@@ -8706,9 +8608,9 @@ public partial class MainViewModel : ViewModelBase
 
     public ObservableCollection<LocalAutoCompactModeOption> LocalAutoCompactModeOptions { get; } =
     [
-        new LocalAutoCompactModeOption { Value = "port-rules", Display = "Port rules default" },
-        new LocalAutoCompactModeOption { Value = "per-profile", Display = "Profile-specific" },
-        new LocalAutoCompactModeOption { Value = "none", Display = "None / endpoint managed" }
+        new LocalAutoCompactModeOption { Value = "port-rules", Display = "AI-FluxMux, Port rules settings" },
+        new LocalAutoCompactModeOption { Value = "per-profile", Display = "AI-FluxMux, this profile's settings" },
+        new LocalAutoCompactModeOption { Value = "none", Display = "The Client app (e.g. Cline Auto compact)" }
     ];
 
     [ObservableProperty]
@@ -14653,17 +14555,6 @@ public partial class MainViewModel : ViewModelBase
             _config.GetString("EndpointApp", SelectedEndpointApp),
             "Cline");
         SyncEndpointAppToRuntime();
-        var loadedClientStyle = FirstNonEmpty(
-            _config.GetString("UserClientStyle", UserClientStyle),
-            "Other").Trim();
-        // Sanitize: if the stored value is the old "Which client?" placeholder or anything
-        // not in the valid options list, fall back to "Other" so the dropdown never shows blank.
-        UserClientStyle = UserClientStyleOptions.Contains(loadedClientStyle, StringComparer.OrdinalIgnoreCase)
-            ? loadedClientStyle
-            : "Other";
-        // Apply the user client style now that the setting is loaded. This sets the global
-        // flag that the gateway checks to decide whether to skip compaction.
-        ApplyUserClientStyle();
         var harnessWebPort = _config.GetInt("HarnessWebPort", (int)HarnessWebPort);
         if (harnessWebPort is >= 1 and <= 65535)
         {
@@ -15869,13 +15760,6 @@ public partial class MainViewModel : ViewModelBase
 
     private bool HasUnsavedEditsForTreeItem(CloudVariantTreeItemViewModel item, bool isLocal)
     {
-        // Don't report unsaved edits when the settings are being saved/restored due to
-        // client type changes (e.g. Cline-like). These are visual changes, not user edits.
-        if (_isApplyingUserClientStyle)
-        {
-            return false;
-        }
-        
         if (isLocal)
         {
             if (_isHydratingLocalVariantForm || _isValidatingLocalProfile || _isApplyingLocalPriorityWizard)
@@ -16398,7 +16282,6 @@ public partial class MainViewModel : ViewModelBase
         _config.SetString("LlamaCudaMinor", LlamaCudaMinor?.Trim() ?? string.Empty);
         _config.SetInt("OrchestratorPort", (int)OrchestratorPort);
         _config.SetString("EndpointApp", SelectedEndpointApp?.Trim() ?? string.Empty);
-        _config.SetString("UserClientStyle", UserClientStyle?.Trim() ?? "Other");
         _config.SetInt("HarnessWebPort", (int)HarnessWebPort);
         _config.SetBool("IdleTimeoutEnabled", IdleTimeoutEnabled);
         _config.SetBool("GenerationSpeedTelemetryEnabled", true);
@@ -25276,7 +25159,7 @@ public partial class MainViewModel : ViewModelBase
         {
             "port-rules" or "port rules" or "portrules" => "port-rules",
             "per-profile" or "per profile" or "perprofile" or "use settings below" => "per-profile",
-            "none" or "endpoint" or "endpoint managed" or "no compaction" => "none",
+            "none" or "endpoint" or "endpoint managed" or "no compaction" or "client app" or "the client app" => "none",
             _ => "port-rules"
         };
     }

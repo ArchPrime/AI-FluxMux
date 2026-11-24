@@ -8,10 +8,11 @@ using Xunit;
 namespace FluxMux.Avalonia.Tests;
 
 /// <summary>
-/// Regression tests for the "None / endpoint managed" auto-compact opt-out.
-/// Verifies that when the per-profile settings callback returns null (profile
-/// unresolvable) or mode "none", the gateway does NOT fall through to the
-/// Port-rules compaction fallback.
+/// Regression tests for "Long chats are shortened by: the Client app" (mode "none").
+/// When the per-profile settings callback returns null (profile unresolvable) or mode
+/// "none", the gateway does NOT run its regular or Port-rules compaction; it only
+/// shortens as a last resort once the prompt reaches 95% of the Context, so a turn the
+/// Client app did not shorten in time still runs instead of being refused.
 /// </summary>
 public sealed class AutoCompactModeNoneTests
 {
@@ -124,7 +125,23 @@ public sealed class AutoCompactModeNoneTests
     }
 
     [Fact]
-    public void None_mode_skips_port_rules_compaction_even_when_prompt_overflows()
+    public void Client_app_mode_leaves_a_prompt_below_the_last_resort_line_alone()
+    {
+        using var paths = new TempPaths();
+        // Port rules would compact this (Compact is on and the prompt is long), but the
+        // profile leaves shortening to the Client app and the prompt is far below 95%.
+        var host = CreateHost(paths, (model, variant) =>
+            ("none", 0.60, 6, 8, 2000));
+
+        var (state, payload) = BuildOverflowingState();
+        state["local_context"] = "65536";
+        var result = InvokeTryApplyForwardCompact(host, payload, state, compactOn: true);
+
+        Assert.False(result, "With the Client app shortening, AI-FluxMux must not compact below the last-resort line.");
+    }
+
+    [Fact]
+    public void Client_app_mode_still_shortens_as_a_last_resort_when_the_prompt_overflows()
     {
         using var paths = new TempPaths();
         var host = CreateHost(paths, (model, variant) =>
@@ -133,19 +150,23 @@ public sealed class AutoCompactModeNoneTests
         var (state, payload) = BuildOverflowingState();
         var result = InvokeTryApplyForwardCompact(host, payload, state, compactOn: true);
 
-        Assert.False(result, "None mode must skip all gateway compaction, including the Port-rules fallback.");
+        Assert.True(result, "A turn over 95% of the Context must be shortened so it runs, even when the Client app shortens long chats.");
     }
 
     [Fact]
-    public void Unresolvable_profile_treated_as_none_skips_port_rules_compaction()
+    public void Unresolvable_profile_gets_only_the_last_resort()
     {
         using var paths = new TempPaths();
         var host = CreateHost(paths, settingsCallback: null);
 
         var (state, payload) = BuildOverflowingState();
-        var result = InvokeTryApplyForwardCompact(host, payload, state, compactOn: true);
+        state["local_context"] = "65536";
+        Assert.False(InvokeTryApplyForwardCompact(host, payload, state, compactOn: true),
+            "An unresolvable profile is treated like 'the Client app': no Port-rules compaction below the last-resort line.");
 
-        Assert.False(result, "An unresolvable profile must be treated as 'none' (hard opt-out), not fall back to Port-rules.");
+        var (overState, overPayload) = BuildOverflowingState();
+        Assert.True(InvokeTryApplyForwardCompact(host, overPayload, overState, compactOn: true),
+            "Above the last-resort line it is still shortened so the turn runs.");
     }
 
     [Fact]

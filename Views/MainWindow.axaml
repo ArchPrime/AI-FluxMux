@@ -412,7 +412,7 @@
                                                                                   <CheckBox IsChecked="{Binding LocalForwardPruneEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                             VerticalAlignment="Center"
                                                                                             Content="Trim waste per turn (forward pruning)"
-                                                                                            ToolTip.Tip="Each turn, quietly removes waste the model does not need (duplicate messages, repeated tool loops, oversized old tool output) so Context fills more slowly. Never touches your current task. Not used with Cline-like clients. Applies from the next message." />
+                                                                                            ToolTip.Tip="Each turn, quietly removes waste the model does not need (duplicate messages, repeated tool loops, oversized old tool output) so Context fills more slowly. Never touches your current task. Not used when long chats are shortened by the Client app. Applies from the next message." />
                                                                               </StackPanel>
 
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
@@ -428,17 +428,12 @@
                                                                                             Content="Page context (lossless spill)"
                                                                                             ToolTip.Tip="When old tool output is trimmed, the full text is kept aside so the model can ask for it back if it needs it. Off: trimmed output is gone for good. Applies from the next message." />
                                                                               </StackPanel>
-<StackPanel Orientation="Horizontal" Spacing="6">
-                                                                                 <CheckBox IsChecked="{Binding LocalAutoCompactEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
-                                                                                           VerticalAlignment="Center"
-                                                                                           Content="Auto-compact"
-                                                                                           ToolTip.Tip="Silently summarize older turns when the prompt gets long. No pause, no dialog. The model continues with a compressed memory of early work." />
-                                                                             </StackPanel>
+                                                                              <TextBlock Text="Long chats are shortened by:" FontSize="11" Margin="0,4,0,0" />
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
-                                                                                  <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}" IsEnabled="{Binding CompactionControlsEnabled}"
+                                                                                  <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}" 
                                                                                             SelectedItem="{Binding SelectedLocalAutoCompactModeOption}"
                                                                                             HorizontalAlignment="Stretch"
-                                                                                            ToolTip.Tip="Choose how auto-compact settings are sourced for this profile. Use Port rules applies the shared settings from Servers - Advanced: Port rules. Profile-specific uses the per-profile settings below. None / endpoint managed disables FluxMux compaction and lets the endpoint manage context. Compaction only happens according to the selected option." />
+                                                                                            ToolTip.Tip="Who shortens a chat that grows too long for this profile&#x27;s Context. AI-FluxMux, Port rules settings: AI-FluxMux shortens older turns using Compact in Port rules, and Launch turns Cline Auto compact off. AI-FluxMux, this profile&#x27;s settings: the same, using the Trigger and Keep settings below. The Client app: AI-FluxMux leaves the chat as the Client app sends it (Cline Auto compact is turned back on at Launch; other Client apps use their own shortening, told the right Context size), and only shortens it itself as a last resort at 95% of the Context so the turn can still run. Applies from the next message." />
                                                                               </StackPanel>
                                                                               <StackPanel Orientation="Horizontal" Spacing="6"
                                                                                              IsVisible="{Binding LocalAutoCompactMode, Converter={x:Static vm:StringEqualsConverter.Instance}, ConverterParameter=per-profile}">
@@ -571,14 +566,6 @@
                                                                         <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding LocalCacheReuseOptions}" SelectedItem="{Binding LocalVariantCacheReuse}" ToolTip.Tip="Reuse work from similar earlier questions so follow-ups can start sooner." />
                                                                         <TextBlock Grid.Row="2" Grid.Column="2" VerticalAlignment="Center" FontSize="11" Text="Cache RAM" />
                                                                         <ComboBox Grid.Row="2" Grid.Column="3" ItemsSource="{Binding LocalCacheRamOptions}" SelectedItem="{Binding LocalVariantCacheRam}" ToolTip.Tip="How much ordinary computer memory to keep for that reuse. Unlimited helps long back-and-forth chats. Disabled turns reuse off." />
-                                                                        <TextBlock Grid.Row="2" Grid.Column="4" VerticalAlignment="Center" FontSize="11" Text="Compact" />
-                                                                        <CheckBox Grid.Row="2"
-                                                                                  Grid.Column="5"
-                                                                                  VerticalAlignment="Center"
-                                                                                  IsChecked="{Binding LocalVariantAutoCompressEnabled}"
-                                                                                  IsEnabled="{Binding CompactionControlsEnabled}"
-                                                                                  Content="On"
-                                                                                  ToolTip.Tip="On: when Context is filling, AI-FluxMux may shorten older turns it forwards to llama-server. The Client app still keeps the full chat. Off: never auto-compact forwarded history." />
                                                                          <TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" FontSize="11" Text="Cache strategy" />
                                                                          <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding LocalCacheStrategyOptions}" SelectedItem="{Binding LocalVariantCacheStrategy}" ToolTip.Tip="How the model reuses its work from the previous turn so the next reply starts sooner. Auto picks the right method for this model (models that read pictures or use MTP need a different one). Leave on Auto." />
                                                                             </Grid>
@@ -3463,28 +3450,6 @@
                                    TextWrapping="NoWrap"
                                    TextTrimming="CharacterEllipsis"
                                    ToolTip.Tip="{Binding ActiveRouteStatusTooltip}" />
-                        <Grid Grid.Column="3" ClipToBounds="False">
-                            <ComboBox ItemsSource="{Binding UserClientStyleOptions}"
-                                      SelectedItem="{Binding UserClientStyle}"
-                                      Width="120"
-                                      Height="32"
-                                      FontSize="12"
-                                      VerticalAlignment="Center"
-                                      ToolTip.Tip="Tell AI-FluxMux which kind of chat client you use. Other: AI-FluxMux trims long chats itself. Cline-like: the client resends the whole chat every turn, so trimming is left to the client.">
-                                <ComboBox.ItemTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding}" FontSize="12" />
-                                    </DataTemplate>
-                                </ComboBox.ItemTemplate>
-                            </ComboBox>
-                            <TextBlock Text="User client/agent?"
-                                       FontSize="10"
-                                       FontWeight="Bold"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Bottom"
-                                       Margin="0,0,0,-14"
-                                       Opacity="0.7" />
-                        </Grid>
                         <Button Grid.Row="0" Grid.Column="4"
                                 x:Name="HailMaryButton"
                                 Classes="hailMary"
@@ -3500,7 +3465,7 @@
                                 Foreground="White"
                                 BorderBrush="#333333"
                                 Click="HailMaryButton_Click"
-                                ToolTip.Tip="Use when this turn has run out of room and auto-compact did not kick in in time.&#10;&#10;Most clients: older turns are removed from what is sent to the model, keeping your latest task and recent turns, and a short summary of what they established is added.&#10;&#10;Cline-like clients: Cline is asked to compact the chat itself (VS Code takes focus briefly).&#10;&#10;This keeps the chat going on a local model at some cost to fidelity. Switching to a model with more Context is better if you have one." />
+                                ToolTip.Tip="Use when this turn has run out of room and auto-compact did not kick in in time.&#10;&#10;Most clients: older turns are removed from what is sent to the model, keeping your latest task and recent turns, and a short summary of what they established is added.&#10;&#10;Cline, when the profile leaves shortening to the Client app: Cline is asked to compact the chat itself (VS Code takes focus briefly).&#10;&#10;This keeps the chat going on a local model at some cost to fidelity. Switching to a model with more Context is better if you have one." />
                         <TextBlock Grid.Row="1" Grid.Column="4"
                                    IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
                                    HorizontalAlignment="Center"
@@ -3572,7 +3537,7 @@
                                 <!-- ── Strategy / prune view (not yet pending) ── -->
                                 <StackPanel Spacing="6"
                                            IsVisible="{Binding HailMaryRescuePending, Converter={x:Static vm:InvertedBoolConverter.Instance}}">
-                                <!-- Cline strategy options (only for Cline-like clients) -->
+                                <!-- Cline strategy options (only when the running profile leaves shortening to Cline) -->
                                 <StackPanel Spacing="2" IsVisible="{Binding HailMaryRescueAvailable}">
                                     <TextBlock Text="Cline compaction strategy:" FontSize="11" FontWeight="SemiBold" />
                                     <RadioButton Content="Wait for Cline to become ready, then send /smol"
@@ -3607,7 +3572,7 @@
                                     </StackPanel>
                                 </StackPanel>
 
-                                <!-- Non-Cline prune options (only when not a Cline-like client) -->
+                                <!-- Prune options (every other case) -->
                                 <StackPanel Spacing="6"
                                            IsVisible="{Binding HailMaryRescueAvailable, Converter={x:Static vm:InvertedBoolConverter.Instance}}">
                                     <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.85"

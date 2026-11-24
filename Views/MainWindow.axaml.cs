@@ -332,7 +332,8 @@ public partial class MainWindow : Window
     private void HailMaryBannerShrink_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
     {
         var vm = DataContext as MainViewModel;
-        if (vm is not null && vm.UserClientReinflatesContext && HailMaryPickerPopup is not null)
+        vm?.RefreshClientShorteningState();
+        if (vm is not null && vm.HailMaryRescueAvailable && HailMaryPickerPopup is not null)
         {
             HailMaryPickerPopup.IsOpen = true;
         }
@@ -345,6 +346,8 @@ public partial class MainWindow : Window
     /// </summary>
     private void HailMaryButton_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
     {
+        // The running profile decides whether the Cline rescue options apply; refresh before showing.
+        (DataContext as MainViewModel)?.RefreshClientShorteningState();
         if (HailMaryPickerPopup is not null)
         {
             HailMaryPickerPopup.IsOpen = !HailMaryPickerPopup.IsOpen;
@@ -377,7 +380,7 @@ public partial class MainWindow : Window
         // Keep the popup open for Cline mode: both the ExternalRescue strategy AND the
         // 80%-threshold / fall-through paths can show a confirmation preview inside the
         // popup. Only close it for the non-Cline (middle-cut) path.
-        if (vm is not null && vm.UserClientReinflatesContext)
+        if (vm is not null && vm.HailMaryRescueAvailable)
         {
             return;
         }

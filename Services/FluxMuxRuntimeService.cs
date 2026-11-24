@@ -1073,8 +1073,8 @@ public sealed class FluxMuxRuntimeService
 	/// </summary>
 	private bool? GetForwardPruneEnabled(string model, string variant)
 	{
-		// Reinflating clients (Cline-like) always get forward-prune off, regardless of the config.
-		if (_userClientReinflatesContext)
+		// Profiles that leave shortening to the Client app always get forward-prune off, regardless of the config.
+		if (UserClientReinflatesContext)
 		{
 			return false;
 		}
@@ -1120,8 +1120,8 @@ public sealed class FluxMuxRuntimeService
 	/// </summary>
 	private bool? GetContextPagingEnabled(string model, string variant)
 	{
-		// Reinflating clients (Cline-like) always get context-paging off, regardless of the config.
-		if (_userClientReinflatesContext)
+		// Profiles that leave shortening to the Client app always get context-paging off, regardless of the config.
+		if (UserClientReinflatesContext)
 		{
 			return false;
 		}
@@ -1221,13 +1221,38 @@ public sealed class FluxMuxRuntimeService
 		=> _generationSpeedTracker.SetEnabled(enabled);
 
 	/// <summary>
-	/// Sets whether the user's client reinflates the context (forwards the full chat each turn,
-	/// e.g. Cline). When true, the gateway skips FluxMux compaction on every turn, regardless
-	/// of the per-profile compact mode. This is a global flag, not per-profile.
+	/// True when the running local profile says "Long chats are shortened by: the Client app"
+	/// (LocalAutoCompactMode "none"). AI-FluxMux then leaves the forwarded chat alone (no
+	/// pruning, no Omit, no regular compaction) and only steps in as a last resort near the
+	/// Context limit. Read live from the state file and config on every call, so it follows the
+	/// running profile and a changed choice applies from the next turn. This replaced the old
+	/// global "client style: Other / Cline-like" box, which duplicated the profile choice.
+	/// False when no local profile is running or it cannot be resolved.
 	/// </summary>
-	private bool _userClientReinflatesContext;
-	public void SetUserClientReinflatesContext(bool reinflates) => _userClientReinflatesContext = reinflates;
-	public bool UserClientReinflatesContext => _userClientReinflatesContext;
+	public bool UserClientReinflatesContext
+	{
+		get
+		{
+			try
+			{
+				var state = LoadJsonCached(_proxyRuntimeStatePath);
+				var model = GetString(state, "local_preferred_model");
+				if (string.IsNullOrWhiteSpace(model))
+				{
+					return false;
+				}
+
+				var variant = FirstNonEmpty(GetString(state, "local_variant"), "(defaults)");
+				var settings = GetLocalAutoCompactSettings(model, variant);
+				return settings.HasValue
+					&& string.Equals(settings.Value.Mode, "none", StringComparison.OrdinalIgnoreCase);
+			}
+			catch
+			{
+				return false;
+			}
+		}
+	}
 
 	private void EnsureIdleTimeoutLoop()
 	{
@@ -2212,7 +2237,12 @@ public sealed class FluxMuxRuntimeService
 		{
 			JsonObject root = LoadJsonCached(_configPath);
 			JsonObject? profile = ResolveLocalProfile(root, model, variant);
-			bool compactEnabled = ParseBool(GetString(profile, "AutoCompressEnabled"), fallback: true);
+			// "Compact is on" follows the profile's "Long chats are shortened by" choice: on unless
+			// the profile leaves shortening to the Client app. The old Fit and memory "Compact" tick
+			// (AutoCompressEnabled) is no longer on the page, so it must not be able to silently
+			// switch shortening off; it stays in JSON only so older files load.
+			bool compactEnabled = !string.Equals(
+				GetString(profile, "LocalAutoCompactMode"), "none", StringComparison.OrdinalIgnoreCase);
 			lock (_proxyStateLock)
 			{
 				JsonObject jsonObject = File.Exists(_proxyLocalReloadRecommendPath)

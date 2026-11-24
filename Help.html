@@ -3424,7 +3424,7 @@ each time you switch models.</p>
      Each <strong>Launch</strong> writes the loaded Context and the model
      profile name into Cline's OpenAI Compatible settings, turns off Cline <strong>Auto
      compact</strong> so that FluxMux Compact is the one shortening forwarded
-     history, and leaves <strong>Supports Images</strong> ticked when a
+     history (unless the model profile leaves that to the Client app), and leaves <strong>Supports Images</strong> ticked when a
      validated Images-on profile exists. Cline shows the profile name as its
      Model ID, and your Port still takes the turn. If the model bar or those
      toggles look unchanged, reload that editor window so Cline rereads the
@@ -4340,35 +4340,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   back-and-forth chats. Disabled turns reuse off.<o:p></o:p></span></p>
   </td>
  </tr>
- <tr style='mso-yfti-irow:9'>
-  <td valign=top style='border:solid #CBD5E1 1.0pt;border-top:none;mso-border-top-alt:
-  solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
-  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
-  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Compact<o:p></o:p></span></p>
-  </td>
-  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
-  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
-  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
-  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
-  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
-  7.2pt;margin-left:0cm'><span class=SpellE><span class=GramE><span
-  style='font-size:10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:
-  "Times New Roman";color:#111111'>Lets</span></span></span><span
-  style='font-size:10.5pt;font-family:"Calibri",sans-serif;mso-fareast-font-family:
-  "Times New Roman";color:#111111'> AI-<span class=SpellE>FluxMux</span>
-  shorten older turns it forwards to llama-server.<o:p></o:p></span></p>
-  </td>
-  <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
-  border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
-  mso-border-left-alt:solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;
-  padding:4.2pt 6.0pt 4.2pt 6.0pt'>
-  <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
-  7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Only kicks in when the loaded Context is genuinely filling, not on every turn. Your Client app still keeps the full chat. Unticked = never shorten forwarded history. Greyed out when the client style box in the Diagnostics header is set to Cline-like, because that Client app resends the whole chat every turn and shortens it itself.<o:p></o:p></span></p>
-  </td>
- </tr>
- <tr style='mso-yfti-irow:10'>
+  <tr style='mso-yfti-irow:10'>
   <td valign=top style='border:solid #CBD5E1 1.0pt;border-top:none;mso-border-top-alt:
   solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
@@ -4393,7 +4365,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
   mso-fareast-font-family:"Times New Roman";color:#111111'>On by default. Toggle
-  takes effect on the next turn, no reload needed. Greyed out when client style is Cline-like (see Compact).<o:p></o:p></span></p>
+  takes effect on the next turn, no reload needed. Greyed out when long chats are shortened by the Client app (see <b>Long chats are shortened by</b>).<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:11'>
@@ -4424,7 +4396,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
   mso-fareast-font-family:"Times New Roman";color:#111111'>On by default. Only
   matters when a tool result is genuinely large. Toggle takes effect on the next
-  turn, no reload needed. Greyed out when client style is Cline-like (see Compact).<o:p></o:p></span></p>
+  turn, no reload needed. Greyed out when long chats are shortened by the Client app (see <b>Long chats are shortened by</b>).<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:11'>
@@ -4432,7 +4404,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Auto-compact<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Long chats are shortened by<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -4440,7 +4412,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Summarises older turns when the prompt gets long, with no pause and no dialog. The model carries on with a shortened memory of the early work.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Who shortens a chat that grows too long for this profile's Context. <b>AI-FluxMux, Port rules settings</b>: AI-FluxMux summarises older turns using <b>Compact</b> in Port rules. <b>AI-FluxMux, this profile's settings</b>: the same, using this profile's Trigger, Keep turns, Tool results and Pin user. <b>The Client app</b>: AI-FluxMux sends the chat on as the Client app sent it, and the Client app shortens it itself (Cline Auto compact, or Harness's own shortening).<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -4448,7 +4420,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Your Client app still keeps the full chat. Greyed out when client style is Cline-like (see Compact).<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>With either AI-FluxMux choice, your Client app still keeps the full chat, and <b>Launch</b> turns Cline Auto compact off. With <b>The Client app</b>, <b>Launch</b> turns Cline Auto compact back on (if AI-FluxMux turned it off), pruning and paging are not used, and AI-FluxMux still shortens the chat as a last resort when it reaches 95% of the Context, so the turn runs instead of failing. Applies from the next message.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:12'>
@@ -6668,7 +6640,7 @@ provider as something you configured, so <strong>Context Window</strong> is a
 number you typed, and it defaults to 128000. Cline fetches the model list to
 fill its picker, but takes capacity from its own settings. Its <strong>Auto
 compact</strong> then decides when to summarise against that typed number rather
-than against the model actually loaded, which is why <strong>Launch</strong> turns Auto compact off and leaves shortening to FluxMux <strong>Compact</strong>. With client style set to Cline-like, AI-FluxMux does not shorten the chat, so <strong>Launch</strong> leaves Cline Auto compact on, and turns it back on if AI-FluxMux was the one that turned it off.<o:p></o:p></span></p>
+than against the model actually loaded, which is why <strong>Launch</strong> turns Auto compact off and leaves shortening to FluxMux <strong>Compact</strong>. When the model profile's <strong>Long chats are shortened by</strong> is set to <strong>The Client app</strong>, AI-FluxMux leaves the shortening to Cline, so <strong>Launch</strong> leaves Cline Auto compact on, and turns it back on if AI-FluxMux was the one that turned it off.<o:p></o:p></span></p>
 
 <p class=MsoNormal style='mso-margin-top-alt:auto;mso-margin-bottom-alt:auto;
 margin-left:36.0pt;text-indent:-18.0pt;mso-list:l15 level1 lfo16;tab-stops:
@@ -7316,7 +7288,7 @@ mso-fareast-font-family:Symbol;mso-bidi-font-family:Symbol'><span
 style='mso-list:Ignore'>·<span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
 </span></span></span><![endif]><strong><span style='mso-fareast-font-family:
 "Times New Roman"'>Launch</span></strong><span style='mso-fareast-font-family:
-"Times New Roman"'> also turns off the Cline <strong>Auto compact</strong> function, because <span class=SpellE>FluxMux</span> Compact is what shortens forwarded history. With client style <strong>Cline-like</strong>, it leaves Cline <strong>Auto compact</strong> on instead. It also leaves <strong>Supports Images</strong> ticked when a validated Images-on
+"Times New Roman"'> also turns off the Cline <strong>Auto compact</strong> function, because <span class=SpellE>FluxMux</span> Compact is what shortens forwarded history. When the model profile leaves shortening long chats to <strong>The Client app</strong>, it leaves Cline <strong>Auto compact</strong> on instead. It also leaves <strong>Supports Images</strong> ticked when a validated Images-on
 profile exists.<o:p></o:p></span></p>
 
 <p class=MsoNormal style='mso-margin-top-alt:auto;mso-margin-bottom-alt:auto;
