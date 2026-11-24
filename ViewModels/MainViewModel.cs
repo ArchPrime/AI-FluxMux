@@ -834,7 +834,7 @@ public partial class MainViewModel : ViewModelBase
     public partial string SelectedSelection2CloudVariant { get; set; } = BaseVariantDisplayName;
 
     /// <summary>
-    /// True when the RUNNING local profile says "Long chats are shortened by: the Client app"
+    /// True when the RUNNING local profile says "Context compaction controlled by: the Client app"
     /// (LocalAutoCompactMode "none"). Read live from the runtime, which reads the running
     /// profile from disk. Replaces the old Diagnostics "client style: Other / Cline-like" box,
     /// which duplicated the profile choice and silently overrode it.
@@ -844,7 +844,7 @@ public partial class MainViewModel : ViewModelBase
     /// <summary>
     /// True when the profile being edited lets AI-FluxMux shorten long chats, so its own
     /// shortening controls (pruning, paging, trigger, keep turns) apply. Greyed out when the
-    /// profile leaves shortening to the Client app.
+    /// profile leaves context compaction to the Client app.
     /// </summary>
     public bool CompactionControlsEnabled =>
         !string.Equals(LocalAutoCompactMode, "none", StringComparison.OrdinalIgnoreCase);
@@ -858,6 +858,8 @@ public partial class MainViewModel : ViewModelBase
     {
         OnPropertyChanged(nameof(UserClientReinflatesContext));
         OnPropertyChanged(nameof(HailMaryRescueAvailable));
+        OnPropertyChanged(nameof(HailMarySmolAvailable));
+        OnPropertyChanged(nameof(HailMaryUsesClientStrategy));
     }
 
     /// <summary>
@@ -2159,7 +2161,7 @@ public partial class MainViewModel : ViewModelBase
             SelectedEndpointApp.Equals("DeepSeek Harness", StringComparison.OrdinalIgnoreCase)
                 || HarnessWebIsInPlay,
             ResolveRunningProfileExtendContextIntoRam() ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : 0,
-            // "none" = the profile leaves shortening to the Client app, so ClineContextSync turns
+            // "none" = the profile leaves context compaction to the Client app, so ClineContextSync turns
             // Cline Auto compact back on; any other mode turns it off so AI-FluxMux shortens.
             LocalAutoCompactMode);
 
@@ -5127,13 +5129,13 @@ public partial class MainViewModel : ViewModelBase
         _runtimeService.Supervisor?.LogLaunchMonitor(
             "[HailMary] HailMaryShrinkTurn invoked (clientShortens=" + UserClientReinflatesContext +
             ", clineRescue=" + HailMaryRescueAvailable + ", selectedStrategy=" + HailMarySelectedStrategy + ")");
-        // When the user's client reinflates the context (e.g. Cline), a middle-cut is
-        // defeated: Cline sends the full history again on the next turn, undoing the cut
-        // and breaking the KV cache prefix. Instead, run a Cline-aware compaction strategy.
-        // Stage 0 = WaitForCline (trigger Cline's own /smol). Stage 1 = ExternalRescue (write a
-        // .compaction.json ourselves when Cline is non-responsive). The strategy is selected in
-        // the picker; the default is WaitForCline (the existing behavior).
-        if (HailMaryRescueAvailable)
+        // Default, for every Client app: the AI-FluxMux trim below. The Client app resends its
+        // full chat on later turns, but AI-FluxMux compaction (or, when the profile leaves
+        // shortening to the Client app, the 95 % last resort) keeps those turns fitting, so the
+        // revived chat stays alive. Cline extras, when picked and usable for this Client app:
+        // WaitForCline (Cline's own /smol, also for Cline forks set to Other) and ExternalRescue
+        // (write Cline's .compaction.json when Cline itself is stuck).
+        if (HailMaryUsesClientStrategy)
         {
             RunClineCompactionStrategy();
             return;
@@ -5158,6 +5160,31 @@ public partial class MainViewModel : ViewModelBase
         StatusMessage = "Hail Mary Context Trim armed (" + stopName + imgBit + "): the next turn you send will have its older history trimmed to make room. Send your reply now.";
         _runtimeService.RequestHailMaryMiddleCut(HailMaryAggressionStop, HailMaryStripImages);
         ResetHailMaryPicker();
+        if (string.Equals(SelectedEndpointApp, "DeepSeek Harness", StringComparison.OrdinalIgnoreCase))
+        {
+            _ = ContinueHarnessAfterHailMaryAsync();
+        }
+    }
+
+    /// <summary>
+    /// Harness after a failed turn waits for the user. Rather than make them send something,
+    /// ask Harness (through its own local web interface) to retry the failed turn in the same
+    /// chat; the armed trim then shortens that retry so it fits. Falls back to asking the user
+    /// to send a message when Harness is not reachable or declines.
+    /// </summary>
+    private async Task ContinueHarnessAfterHailMaryAsync()
+    {
+        var sessionId = DeepSeekHarnessSetup.ResolveMostRecentSessionId();
+        var port = (int)HarnessWebPort;
+        var openUrl = DeepSeekHarnessSetup.ResolveOpenChatUrl(port);
+        DeepSeekHarnessSetup.TryExtractWebAuthToken(openUrl, out var authToken);
+        var asked = sessionId is not null
+            && await DeepSeekHarnessSetup.TryContinueFailedSessionAsync(port, authToken, sessionId).ConfigureAwait(true);
+        _runtimeService.Supervisor?.LogLaunchMonitor(
+            "[HailMary] Harness retry of the failed turn " + (asked ? "requested" : "not possible") + " (session " + (sessionId ?? "none") + ")");
+        StatusMessage = asked
+            ? "Hail Mary Context Trim armed, and Harness was asked to retry the failed turn in the same chat. Watch it continue in Harness."
+            : "Hail Mary Context Trim armed. Harness could not be asked to retry by itself, so send a message (for example \"continue\") in the same Harness chat.";
     }
 
     private bool CanHailMaryShrinkTurn => HailMaryButtonVisible;
@@ -5171,16 +5198,33 @@ public partial class MainViewModel : ViewModelBase
     /// </summary>
     [ObservableProperty]
     public partial global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy HailMarySelectedStrategy { get; set; }
-        = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Default;
+        = global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.TrimInAiFluxMux;
 
     /// <summary>
-    /// True when the Cline rescue options should be offered: the running profile leaves
-    /// shortening to the Client app and that Client app is Cline (the /smol and compaction-file
-    /// strategies only work in Cline).
+    /// True when "Cline can't continue — compact externally" is offered: the Client app is Cline.
+    /// That strategy writes into Cline's own task files (~/.cline/data/sessions), which a fork or
+    /// any other Client app does not use, so it would only find, or overwrite, an unrelated task.
+    /// The default Hail Mary (AI-FluxMux trim) works for every Client app and needs none of this.
     /// </summary>
     public bool HailMaryRescueAvailable =>
-        UserClientReinflatesContext
-        && string.Equals(SelectedEndpointApp, "Cline", StringComparison.OrdinalIgnoreCase);
+        string.Equals(SelectedEndpointApp, "Cline", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when "Ask the Client app to compact (/smol)" is offered: Cline, or Other, which is
+    /// what a Cline fork with the same /smol command and send button would be set to. Never for
+    /// Harness, which has neither.
+    /// </summary>
+    public bool HailMarySmolAvailable =>
+        !string.Equals(SelectedEndpointApp, "DeepSeek Harness", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when the chosen Hail Mary strategy runs on the Client app's side (/smol or Cline's
+    /// compaction file) rather than as the AI-FluxMux trim. A Cline strategy the current Client
+    /// app cannot use falls back to the trim, so a dead chat is always revived somehow.
+    /// </summary>
+    public bool HailMaryUsesClientStrategy =>
+        (HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.WaitForCline && HailMarySmolAvailable)
+        || (HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue && HailMaryRescueAvailable);
 
     /// <summary>
     /// True when a rescue compaction has been prepared and is awaiting user confirmation. While
@@ -5306,7 +5350,8 @@ public partial class MainViewModel : ViewModelBase
         // (e.g., they know Cline is about to become idle, or they want to test the /smol path).
         var contextFillFraction = contextLimit > 0 ? (double)promptTokens / contextLimit : 0.0;
         var userExplicitlyChoseWaitForCline = HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.WaitForCline;
-        if (contextFillFraction > 0.80 && !userExplicitlyChoseWaitForCline)
+        // Only Cline has the compaction file this fallback writes; a fork keeps /smol.
+        if (contextFillFraction > 0.80 && !userExplicitlyChoseWaitForCline && HailMaryRescueAvailable)
         {
             SetHailMaryOutcome("Context too full for /smol — writing external compaction…");
             StatusMessage = "Context is already " + (contextFillFraction * 100).ToString("0") + "% full. Cline can't process /smol at this fill level. Writing an external compaction file instead — close & reopen the chat (or restart Cline) after confirming to apply it.";
@@ -5476,7 +5521,7 @@ public partial class MainViewModel : ViewModelBase
             System.Environment.StackTrace.Split('\n').SkipWhile(l => !l.Contains("MainViewModel")).FirstOrDefault()?.Trim());
         HailMaryAggressionStop = HailMaryCompaction.HailMaryAggression.Balanced;
         HailMaryStripImages = false;
-        HailMarySelectedStrategy = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Default;
+        HailMarySelectedStrategy = global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.TrimInAiFluxMux;
         HailMaryHeadroom = global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroomPolicy.Default;
         HailMaryRescuePending = false;
         HailMaryRescuePreview = string.Empty;

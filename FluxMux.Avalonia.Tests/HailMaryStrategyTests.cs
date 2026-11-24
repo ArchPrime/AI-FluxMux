@@ -9,6 +9,28 @@ namespace FluxMux.Avalonia.Tests;
 
 public sealed class HailMaryStrategyTests
 {
+    // ── Picker: the AI-FluxMux trim is the default for every Client app ───────────
+
+    [Fact]
+    public void Trim_is_the_first_strategy_so_an_unset_choice_revives_any_Client_app()
+    {
+        // default(HailMaryStrategy) is what a fresh picker holds before any radio is touched.
+        Assert.Equal(HailMaryStrategy.TrimInAiFluxMux, default(HailMaryStrategy));
+    }
+
+    [Theory]
+    [InlineData("TrimInAiFluxMux", HailMaryStrategy.TrimInAiFluxMux)]
+    [InlineData("WaitForCline", HailMaryStrategy.WaitForCline)]
+    [InlineData("ExternalRescue", HailMaryStrategy.ExternalRescue)]
+    [InlineData("anything else", HailMaryStrategy.TrimInAiFluxMux)]
+    public void Picker_radios_map_to_their_strategy(string radio, HailMaryStrategy expected)
+    {
+        var converter = new FluxMux.Avalonia.ViewModels.HailMaryStrategyToBoolConverter();
+        var picked = converter.ConvertBack(true, typeof(HailMaryStrategy), radio, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal(expected, picked);
+        Assert.Equal(true, converter.Convert(expected, typeof(bool), expected.ToString(), System.Globalization.CultureInfo.InvariantCulture));
+    }
+
     // ── Strategy resolver ──────────────────────────────────────────────────────────
 
     [Fact]

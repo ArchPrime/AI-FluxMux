@@ -124,7 +124,47 @@ public static class HailMaryCompaction
         var before = measuredTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
         var headroomFraction = HeadroomFractionFor(stop);
         var target = (int)(contextTokens * (1.0 - headroomFraction));
-        if (before <= target)
+        return PruneToTarget(payload, before, target, KeepTurnsFor(stop), stripImages, measuredTokens);
+    }
+
+    /// <summary>
+    /// Least number of recent messages kept when fitting a Client app's own summary request.
+    /// The request is the old part of the chat plus the summary instruction at the end, so only
+    /// the instruction and the message before it need to survive; everything older may go.
+    /// </summary>
+    public const int ClientSummaryKeepTurns = 2;
+
+    /// <summary>
+    /// Fits a Client app's own "summarise this chat" request (for example Harness compaction)
+    /// into the loaded Context, leaving <paramref name="replyTokens"/> for the summary itself.
+    /// Uses the same tool-pair-safe rear cut as the Hail Mary button, so the system prompt, the
+    /// first request and the summary instruction always stay.
+    /// </summary>
+    public static HailMaryResult FitClientSummaryRequest(
+        JsonObject payload,
+        int contextTokens,
+        int replyTokens,
+        int? measuredTokens = null)
+    {
+        if (payload is null || contextTokens <= 0)
+        {
+            return HailMaryResult.None;
+        }
+
+        var before = measuredTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
+        var target = contextTokens - Math.Max(0, replyTokens);
+        return PruneToTarget(payload, before, target, ClientSummaryKeepTurns, stripImages: true, measuredTokens);
+    }
+
+    private static HailMaryResult PruneToTarget(
+        JsonObject payload,
+        int before,
+        int target,
+        int keepTurns,
+        bool stripImages,
+        int? measuredTokens)
+    {
+        if (target <= 0 || before <= target)
         {
             return HailMaryResult.None;
         }
@@ -158,7 +198,6 @@ public static class HailMaryCompaction
         // The rear prune: drop older conversational turns until the prompt fits under the
         // headroom target, keeping at least KeepTurnsFor(stop) recent turns. Tool-pair-safe;
         // always keeps the system prompt + last real user task.
-        var keepTurns = KeepTurnsFor(stop);
         if (MiddleCutOlderTurns(payload, report, target, keepTurns, calibrationRatio))
         {
             var t = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(payload) * calibrationRatio);

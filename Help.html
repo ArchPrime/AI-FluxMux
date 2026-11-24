@@ -3613,7 +3613,7 @@ Ordinary use should not require any of those.<o:p></o:p></span></p>
 <p><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'> The test is meant to run to failure. It deliberately pushes past the context limit so you can watch what actually happens — a graceful slowdown, a hang, or a crash — rather than guessing where the wall is. The result appears in the log above and is written to <span style="font-family:Consolas,monospace">context_fill_perf.log</span>. Use <strong>Cancel stress test</strong> to stop it early. Run it when the model is otherwise idle: it drives real requests, so it will compete with any chat you are running.<o:p></o:p></span></p>
 <h3><span lang=EN style='font-family:"Calibri,sans-serif;mso-fareast-font-family:"Times New Roman";color:#111111;mso-ansi-language:EN'>Hail Mary Compactor<o:p></o:p></span></h3>
 <h3><span lang=EN style='font-family:"Calibri,sans-serif;mso-fareast-font-family:"Times New Roman";color:#111111;mso-ansi-language:EN'>topic.diagnostics_hail_mary<o:p></o:p></span></h3>
-<p><strong><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'>Hail Mary Compactor</span></strong><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'> is a last-resort button that appears in the Diagnostics header when the current turn is close to exceeding the loaded context. It deletes the older turns from the middle of this chat's forwarded history so the current turn fits; the most recent turns and your last task are kept, and a short summary of what the removed turns established (goal, decisions, dead ends) is added. Your Client app still holds the full conversation — only what is sent to the model is shortened.<o:p></o:p></span></p>
+<p><strong><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'>Hail Mary Compactor</span></strong><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'> is a last-resort button that appears in the Diagnostics header when the current turn is close to exceeding the loaded context. It deletes the older turns from the middle of this chat's forwarded history so the current turn fits; the most recent turns and your last task are kept, and a short summary of what the removed turns established (goal, decisions, dead ends) is added. Your Client app still holds the full conversation — only what is sent to the model is shortened. This works with any Client app: arm it, then send your next message (or retry the failed one) in the Client app. Later turns keep fitting, because AI-FluxMux keeps shortening what it forwards (at the latest at 95% of the Context, even when the model profile leaves context compaction to the Client app). For Cline, and Cline forks with Client app set to Other, the picker can instead ask the Client app to compact the chat itself with /smol; for Cline it can also rebuild a stuck chat from outside. DeepSeek Harness usually rescues itself first: when a turn is refused as too large, Harness compacts the chat and retries, and AI-FluxMux makes sure that compaction fits. If the chat is still stuck, Hail Mary also asks Harness to retry the failed turn, so the same chat simply continues; if Harness cannot be reached, send a message such as “continue” in the same chat.<o:p></o:p></span></p>
 <p><span lang=EN style='font-size:11.0pt;font-family:"Calibri,sans-serif;color:#111111;mso-ansi-language:EN'> The trade-off is that the model loses the detail of the removed turns, so it may repeat some work. That is still far less disruptive than starting a new chat, where the model loses everything. If a model with more Context is ready, such as a cloud model, switching to it keeps the whole chat instead. Use this button when you want to keep this chat on the current model.<o:p></o:p></span></p>
 
 
@@ -4365,7 +4365,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
   mso-fareast-font-family:"Times New Roman";color:#111111'>On by default. Toggle
-  takes effect on the next turn, no reload needed. Greyed out when long chats are shortened by the Client app (see <b>Long chats are shortened by</b>).<o:p></o:p></span></p>
+  takes effect on the next turn, no reload needed. Greyed out when context compaction is controlled by the Client app (see <b>Context compaction controlled by</b>).<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:11'>
@@ -4396,7 +4396,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
   mso-fareast-font-family:"Times New Roman";color:#111111'>On by default. Only
   matters when a tool result is genuinely large. Toggle takes effect on the next
-  turn, no reload needed. Greyed out when long chats are shortened by the Client app (see <b>Long chats are shortened by</b>).<o:p></o:p></span></p>
+  turn, no reload needed. Greyed out when context compaction is controlled by the Client app (see <b>Context compaction controlled by</b>).<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:11'>
@@ -4404,7 +4404,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   solid #CBD5E1 .75pt;mso-border-alt:solid #CBD5E1 .75pt;padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Long chats are shortened by<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Context compaction controlled by<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -4412,7 +4412,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Who shortens a chat that grows too long for this profile's Context. <b>AI-FluxMux, Port rules settings</b>: AI-FluxMux summarises older turns using <b>Compact</b> in Port rules. <b>AI-FluxMux, this profile's settings</b>: the same, using this profile's Trigger, Keep turns, Tool results and Pin user. <b>The Client app</b>: AI-FluxMux sends the chat on as the Client app sent it, and the Client app shortens it itself (Cline Auto compact, or Harness's own shortening).<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Who compacts a chat that grows too long for this profile's Context. <b>AI-FluxMux, Port rules settings</b>: AI-FluxMux summarises older turns using <b>Compact</b> in Port rules. <b>AI-FluxMux, this profile's settings</b>: the same, using this profile's Trigger, Keep turns, Tool results and Pin user. <b>The Client app</b>: AI-FluxMux sends the chat on as the Client app sent it, and the Client app shortens it itself (Cline Auto compact, or Harness's own shortening).<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -6640,7 +6640,7 @@ provider as something you configured, so <strong>Context Window</strong> is a
 number you typed, and it defaults to 128000. Cline fetches the model list to
 fill its picker, but takes capacity from its own settings. Its <strong>Auto
 compact</strong> then decides when to summarise against that typed number rather
-than against the model actually loaded, which is why <strong>Launch</strong> turns Auto compact off and leaves shortening to FluxMux <strong>Compact</strong>. When the model profile's <strong>Long chats are shortened by</strong> is set to <strong>The Client app</strong>, AI-FluxMux leaves the shortening to Cline, so <strong>Launch</strong> leaves Cline Auto compact on, and turns it back on if AI-FluxMux was the one that turned it off.<o:p></o:p></span></p>
+than against the model actually loaded, which is why <strong>Launch</strong> turns Auto compact off and leaves shortening to FluxMux <strong>Compact</strong>. When the model profile's <strong>Context compaction controlled by</strong> is set to <strong>The Client app</strong>, AI-FluxMux leaves the shortening to Cline, so <strong>Launch</strong> leaves Cline Auto compact on, and turns it back on if AI-FluxMux was the one that turned it off.<o:p></o:p></span></p>
 
 <p class=MsoNormal style='mso-margin-top-alt:auto;mso-margin-bottom-alt:auto;
 margin-left:36.0pt;text-indent:-18.0pt;mso-list:l15 level1 lfo16;tab-stops:
@@ -7288,7 +7288,7 @@ mso-fareast-font-family:Symbol;mso-bidi-font-family:Symbol'><span
 style='mso-list:Ignore'>·<span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
 </span></span></span><![endif]><strong><span style='mso-fareast-font-family:
 "Times New Roman"'>Launch</span></strong><span style='mso-fareast-font-family:
-"Times New Roman"'> also turns off the Cline <strong>Auto compact</strong> function, because <span class=SpellE>FluxMux</span> Compact is what shortens forwarded history. When the model profile leaves shortening long chats to <strong>The Client app</strong>, it leaves Cline <strong>Auto compact</strong> on instead. It also leaves <strong>Supports Images</strong> ticked when a validated Images-on
+"Times New Roman"'> also turns off the Cline <strong>Auto compact</strong> function, because <span class=SpellE>FluxMux</span> Compact is what shortens forwarded history. When the model profile leaves context compaction to <strong>The Client app</strong>, it leaves Cline <strong>Auto compact</strong> on instead. It also leaves <strong>Supports Images</strong> ticked when a validated Images-on
 profile exists.<o:p></o:p></span></p>
 
 <p class=MsoNormal style='mso-margin-top-alt:auto;mso-margin-bottom-alt:auto;

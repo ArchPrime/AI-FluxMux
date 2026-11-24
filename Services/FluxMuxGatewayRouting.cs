@@ -29,6 +29,22 @@ public static class FluxMuxGatewayRouting
         + "You can try recovering the chat by launching a model profile with larger Context, if you have one, "
         + "or using the **Hail Mary** context trimmer, then retrying. "
         + "Otherwise start a new chat. Consider making a more focussed or simpler request.";
+    /// <summary>
+    /// Standard overflow wording added to a too-large refusal. Harness (and other Client apps
+    /// built on OpenAI-style error handling) only start their own recovery — compact the chat and
+    /// retry the turn — when the error names the context being exceeded in the usual words; the
+    /// plain-English sentence above does not match their detectors, so without this the refusal
+    /// silently switched their recovery off. Not added for Cline, whose proven rescue is Hail
+    /// Mary writing its task files; Cline's reaction to this wording is not verified.
+    /// </summary>
+    public const string StandardOverflowPhrase = "(Context length exceeded.)";
+
+    /// <summary>Adds <see cref="StandardOverflowPhrase"/> for every Client app except Cline.</summary>
+    public static string WithStandardOverflowPhrase(JsonObject? state, string message)
+        => IsClineApp(EndpointApp(state)) || message.Contains(StandardOverflowPhrase, StringComparison.Ordinal)
+            ? message
+            : message.TrimEnd() + " " + StandardOverflowPhrase;
+
     public const string LocalContextOverflowMessage =
         "This chat turn failed as it was too large to fit into the remaining Context space. "
         + "You can try recovering the chat by launching a model profile with larger Context, if you have one, "
@@ -577,7 +593,7 @@ public static class FluxMuxGatewayRouting
         {
             finished += " " + LocalTurnTooLargeAfterTrimMessage;
         }
-        return finished;
+        return WithStandardOverflowPhrase(state, finished);
     }
 
     public static string FormatLocalContextOverflowMessage(
@@ -589,7 +605,7 @@ public static class FluxMuxGatewayRouting
         var body = ProxyRuntimeStateSecrets.LastServedWasCloud(lastServedKind)
             ? LocalReloadRouting.FormatCloudContextLead(lastServedCloudLabel)
             : LocalContextOverflowMessage;
-        return PortRulesPostMortem.FinishClientError(body, portRuleDetails);
+        return WithStandardOverflowPhrase(state, PortRulesPostMortem.FinishClientError(body, portRuleDetails));
     }
 
     public static string FormatLocalVisionUnavailableMessage(JsonObject? state)

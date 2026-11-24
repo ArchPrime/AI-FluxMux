@@ -322,18 +322,18 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Opens the Hail Mary picker popup when the user clicks the banner's "shrink this turn"
-    /// button in Cline mode. The banner button and the picker's "Armed" button both run
+    /// button when a Client-app strategy (Cline /smol or the external rescue) is chosen. The banner button and the picker's "Armed" button both run
     /// HailMaryShrinkTurnCommand; for Cline that command prepares an external rescue whose
     /// confirmation preview lives INSIDE the picker popup. Without opening the popup here, the
     /// user sees the banner disappear but has no way to reach the "Confirm write" button — the
     /// next context-overflow offer re-shows the banner and the flow loops with no exit.
-    /// For the non-Cline (middle-cut) path the command arms a one-off prune and needs no popup.
+    /// For the default AI-FluxMux trim the command arms a one-off prune and needs no popup.
     /// </summary>
     private void HailMaryBannerShrink_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
     {
         var vm = DataContext as MainViewModel;
         vm?.RefreshClientShorteningState();
-        if (vm is not null && vm.HailMaryRescueAvailable && HailMaryPickerPopup is not null)
+        if (vm is not null && vm.HailMaryUsesClientStrategy && HailMaryPickerPopup is not null)
         {
             HailMaryPickerPopup.IsOpen = true;
         }
@@ -380,7 +380,7 @@ public partial class MainWindow : Window
         // Keep the popup open for Cline mode: both the ExternalRescue strategy AND the
         // 80%-threshold / fall-through paths can show a confirmation preview inside the
         // popup. Only close it for the non-Cline (middle-cut) path.
-        if (vm is not null && vm.HailMaryRescueAvailable)
+        if (vm is not null && vm.HailMaryUsesClientStrategy)
         {
             return;
         }

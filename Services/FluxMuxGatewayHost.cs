@@ -14,6 +14,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using FluxMux.Avalonia.Services.ContextEngine;
+using FluxMux.Avalonia.Services.HailMary;
 
 namespace FluxMux.Avalonia.Services;
 
@@ -1182,6 +1183,25 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         ReportHailMaryApplied?.Invoke(gaugeTokens.Value);
                     }
                 }
+                }
+            }
+
+            // A Client app's own "summarise this chat" request (Harness compaction, whether it
+            // started by itself after an overflow error or the user typed /compact). It carries
+            // nearly the whole chat, so it overflowed too and the chat stayed stuck. Make it fit,
+            // or answer it from the session note, so the Client app's compaction completes and
+            // the chat continues in place.
+            if (!isProbeRequest && hotContext > 0 && ClientCompactionRequest.IsSummaryRequest(payload))
+            {
+                var fitted = await TryFitClientSummaryRequestAsync(payload, state, hotContext, measuredPromptTokens).ConfigureAwait(false);
+                measuredPromptTokens = fitted.MeasuredTokens;
+                if (!fitted.Fits)
+                {
+                    var checkpoint = ClientCompactionRequest.BuildFallbackCheckpoint(EssenceReasserter?.BuildRescueBlock());
+                    Log("client compaction: the summary request still does not fit after trimming, so AI-FluxMux answered it with its own session note ("
+                        + checkpoint.Length.ToString(CultureInfo.InvariantCulture) + " chars)");
+                    await SendAssistantReplyAsync(context.Response, checkpoint, payload["stream"]?.ToString() is "true" or "True").ConfigureAwait(false);
+                    return;
                 }
             }
 
@@ -3014,7 +3034,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     internal const double LastResortCompactShare = 0.95;
 
     /// <summary>
-    /// Last-resort shorten for "Long chats are shortened by: the Client app". Uses the same
+    /// Last-resort shorten for "Context compaction controlled by: the Client app". Uses the same
     /// stepped cut as normal compaction, so a Client app that keeps resending the long chat
     /// still gets a mostly reusable prompt cache. Returns false (prompt untouched) below the
     /// threshold or when nothing older can be shortened.
@@ -3052,6 +3072,121 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Shortens a Client app's summary request (see <see cref="ClientCompactionRequest"/>) so it
+    /// fits with room for the summary. When older turns are dropped, the session note is added to
+    /// the instruction so the summary still covers the goals and decisions from the dropped part.
+    /// </summary>
+    private async Task<(bool Fits, int? MeasuredTokens)> TryFitClientSummaryRequestAsync(
+        JsonObject payload,
+        JsonObject state,
+        int hotContext,
+        int? measuredPromptTokens)
+    {
+        var reply = ClientCompactionRequest.ReplyTokens(payload, hotContext);
+        if (!LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, reply, measuredPromptTokens))
+        {
+            Log("client compaction: the Client app's summary request fits ("
+                + (measuredPromptTokens?.ToString(CultureInfo.InvariantCulture) ?? "n/a") + " tokens), sent as is");
+            return (true, measuredPromptTokens);
+        }
+
+        var fit = HailMaryCompaction.FitClientSummaryRequest(payload, hotContext, reply, measuredPromptTokens);
+        if (fit.MiddleCutDropped > 0)
+        {
+            var essenceBlock = EssenceReasserter?.BuildRescueBlock();
+            if (!string.IsNullOrWhiteSpace(essenceBlock))
+            {
+                ClientCompactionRequest.AppendToInstruction(
+                    payload,
+                    "\n\nAlso keep the still-true points from this session note, which covers the older part of the conversation that is no longer shown above:\n" + essenceBlock);
+            }
+        }
+
+        var remeasured = measuredPromptTokens;
+        var port = ParseInt(Str(state, "local_port"), 0);
+        if (port > 0)
+        {
+            remeasured = await LocalPromptTokenCounter.CountAsync(port, payload, Str(state, "local_preferred_model")).ConfigureAwait(false)
+                ?? (fit.AfterTokens > 0 ? fit.AfterTokens : measuredPromptTokens);
+        }
+        else if (fit.AfterTokens > 0)
+        {
+            remeasured = fit.AfterTokens;
+        }
+
+        var fits = !LocalRequestOverlayRouting.PromptExceedsContext(payload, hotContext, reply, remeasured);
+        Log("client compaction: shortened the Client app's summary request so its compaction can finish: "
+            + (measuredPromptTokens?.ToString(CultureInfo.InvariantCulture) ?? "n/a") + " → "
+            + (remeasured?.ToString(CultureInfo.InvariantCulture) ?? "n/a") + " tokens, "
+            + fit.MiddleCutDropped.ToString(CultureInfo.InvariantCulture) + " older messages dropped, "
+            + reply.ToString(CultureInfo.InvariantCulture) + " tokens kept for the summary"
+            + (fits ? string.Empty : " (still too large)"));
+        if (fits)
+        {
+            LocalChatTemplateGuard.EnsureUserQuery(payload);
+        }
+
+        return (fits, remeasured);
+    }
+
+    /// <summary>A normal assistant reply written by AI-FluxMux, streamed or not as the request asked.</summary>
+    private static async Task SendAssistantReplyAsync(HttpListenerResponse response, string text, bool stream)
+    {
+        var created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (!stream)
+        {
+            await SendJsonAsync(response, 200, new JsonObject
+            {
+                ["id"] = "chatcmpl-fluxmux-checkpoint",
+                ["object"] = "chat.completion",
+                ["created"] = created,
+                ["model"] = "local",
+                ["choices"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["index"] = 0,
+                        ["message"] = new JsonObject { ["role"] = "assistant", ["content"] = text },
+                        ["finish_reason"] = "stop"
+                    }
+                },
+                ["usage"] = new JsonObject { ["prompt_tokens"] = 0, ["completion_tokens"] = 0, ["total_tokens"] = 0 }
+            }).ConfigureAwait(false);
+            return;
+        }
+
+        response.StatusCode = 200;
+        response.ContentType = "text/event-stream";
+        ApplyCorsHeaders(response);
+        var chunk = new JsonObject
+        {
+            ["id"] = "chatcmpl-fluxmux-checkpoint",
+            ["object"] = "chat.completion.chunk",
+            ["created"] = created,
+            ["model"] = "local",
+            ["choices"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["index"] = 0,
+                    ["delta"] = new JsonObject { ["role"] = "assistant", ["content"] = text },
+                    ["finish_reason"] = "stop"
+                }
+            }
+        };
+        var bytes = Encoding.UTF8.GetBytes("data: " + chunk.ToJsonString() + "\n\ndata: [DONE]\n\n");
+        using var writeCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            await response.OutputStream.WriteAsync(bytes, writeCts.Token).ConfigureAwait(false);
+            await response.OutputStream.FlushAsync(writeCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private bool TryApplyForwardCompact(JsonObject payload, JsonObject state, bool compactOn, int? measuredPromptTokens = null, bool forceCompact = false)
@@ -3133,7 +3268,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         // would defeat the user's explicit "The Client app" (mode "none") opt-out. Treat
         // an unresolvable profile as "none" so the opt-out is honoured.
         //
-        // "None" is shown as "Long chats are shortened by: the Client app" (Cline Auto compact,
+        // "None" is shown as "Context compaction controlled by: the Client app" (Cline Auto compact,
         // Harness's own shortening, ...). AI-FluxMux still keeps a last-resort shorten near the
         // Context limit, so a turn the Client app did not shorten in time runs instead of
         // being refused as too large.
@@ -4006,9 +4141,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
         try
         {
-            // Resolve a stable session key: the Cline session id when this is a Cline-like client,
-            // else the local model identity (so different local sessions don't cross-trigger).
-            var isClineLike = GetUserClientReinflatesContext?.Invoke() == true;
+            // Resolve a stable session key: the Cline session id when this is a Cline request
+            // (profile leaves context compaction to the Client app AND the request carries Cline's message
+            // ids), else the local model identity (so different local sessions don't cross-trigger).
+            // "The Client app" is chosen per profile for any Client app now (Harness too), so the
+            // choice alone no longer means the request came from Cline.
+            var isClineLike = GetUserClientReinflatesContext?.Invoke() == true
+                && payload["messages"] is JsonArray edgeMessages
+                && RequestCarriesMessageIds(edgeMessages);
             var sessionKey = isClineLike
                 ? (ClineCompactionWriter.GetMostRecentSessionId() ?? "_cline")
                 : ("local:" + Str(state, "local_preferred_model"));
@@ -4117,6 +4257,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // compaction that never happened — and rewrote that task's compaction file. A real
             // Cline turn, even straight after Cline compacts, carries Cline's own system prompt.
             if (LocalRequestOverlayRouting.EstimatePromptTokens(payload) < FluxMux.Avalonia.Services.ContextEngine.CompactionEdgeDetector.MinObservedTokens)
+            {
+                return;
+            }
+
+            // Only a real Cline request may touch a Cline task's files. "The Client app" can be
+            // chosen for Harness or any other Client app, and without message ids the session
+            // match below falls back to the most recent Cline task, so a Harness chat that
+            // shortened itself would have rewritten that unrelated task's compaction file.
+            if (!RequestCarriesMessageIds(messages))
             {
                 return;
             }

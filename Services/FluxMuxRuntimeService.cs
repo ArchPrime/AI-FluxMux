@@ -1221,7 +1221,7 @@ public sealed class FluxMuxRuntimeService
 		=> _generationSpeedTracker.SetEnabled(enabled);
 
 	/// <summary>
-	/// True when the running local profile says "Long chats are shortened by: the Client app"
+	/// True when the running local profile says "Context compaction controlled by: the Client app"
 	/// (LocalAutoCompactMode "none"). AI-FluxMux then leaves the forwarded chat alone (no
 	/// pruning, no Omit, no regular compaction) and only steps in as a last resort near the
 	/// Context limit. Read live from the state file and config on every call, so it follows the
@@ -2237,8 +2237,8 @@ public sealed class FluxMuxRuntimeService
 		{
 			JsonObject root = LoadJsonCached(_configPath);
 			JsonObject? profile = ResolveLocalProfile(root, model, variant);
-			// "Compact is on" follows the profile's "Long chats are shortened by" choice: on unless
-			// the profile leaves shortening to the Client app. The old Fit and memory "Compact" tick
+			// "Compact is on" follows the profile's "Context compaction controlled by" choice: on unless
+			// the profile leaves context compaction to the Client app. The old Fit and memory "Compact" tick
 			// (AutoCompressEnabled) is no longer on the page, so it must not be able to silently
 			// switch shortening off; it stays in JSON only so older files load.
 			bool compactEnabled = !string.Equals(

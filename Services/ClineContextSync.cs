@@ -282,7 +282,7 @@ public static class ClineContextSync
                 options.MaxTokens,
                 options.CompactMode);
             // Only turn off Cline's auto-compact when FluxMux is managing compacting.
-            // When the profile's compact mode is "none" (shortened by the Client app), Cline should
+            // When the profile's compact mode is "none" (compaction controlled by the Client app), Cline should
             // keep its own auto-compact on — FluxMux is not doing the compacting.
             // When it is "none", put back an Auto compact that FluxMux itself turned off earlier.
             var settingsChanged = PatchGlobalSettingsAutoCompact(
@@ -722,7 +722,7 @@ public static class ClineContextSync
         }
 
         // Only turn off Cline's auto-condense (useAutoCondense) when FluxMux is managing
-        // compacting. When the profile's compact mode is "none" (shortened by the Client app), Cline
+        // compacting. When the profile's compact mode is "none" (compaction controlled by the Client app), Cline
         // should keep its own auto-compact on — FluxMux is not doing the compacting. This
         // mirrors the gate on PatchGlobalSettingsAutoCompactOff (autoCompactEnabled in
         // global-settings.json), which was already correctly gated but this one was not.
@@ -786,11 +786,11 @@ public static class ClineContextSync
             return context + ". " + follow;
         }
 
-        // When compact mode is "none" (shortened by the Client app), FluxMux is not doing the compacting,
+        // When compact mode is "none" (compaction controlled by the Client app), FluxMux is not doing the compacting,
         // so don't claim we turned off Cline's auto-compact.
         if (string.Equals(compactMode, "none", StringComparison.OrdinalIgnoreCase))
         {
-            return "Cline 4.x Context Window already matches this model profile. This profile leaves shortening long chats to the Client app, so Cline Auto compact is left as it is.";
+            return "Cline 4.x Context Window already matches this model profile. This profile leaves context compaction to the Client app, so Cline Auto compact is left as it is.";
         }
 
         return "Cline 4.x Context Window already matches this model profile, and Auto compact is off.";

@@ -412,7 +412,7 @@
                                                                                   <CheckBox IsChecked="{Binding LocalForwardPruneEnabled}" IsEnabled="{Binding CompactionControlsEnabled}"
                                                                                             VerticalAlignment="Center"
                                                                                             Content="Trim waste per turn (forward pruning)"
-                                                                                            ToolTip.Tip="Each turn, quietly removes waste the model does not need (duplicate messages, repeated tool loops, oversized old tool output) so Context fills more slowly. Never touches your current task. Not used when long chats are shortened by the Client app. Applies from the next message." />
+                                                                                            ToolTip.Tip="Each turn, quietly removes waste the model does not need (duplicate messages, repeated tool loops, oversized old tool output) so Context fills more slowly. Never touches your current task. Not used when context compaction is controlled by the Client app. Applies from the next message." />
                                                                               </StackPanel>
 
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
@@ -428,12 +428,12 @@
                                                                                             Content="Page context (lossless spill)"
                                                                                             ToolTip.Tip="When old tool output is trimmed, the full text is kept aside so the model can ask for it back if it needs it. Off: trimmed output is gone for good. Applies from the next message." />
                                                                               </StackPanel>
-                                                                              <TextBlock Text="Long chats are shortened by:" FontSize="11" Margin="0,4,0,0" />
+                                                                              <TextBlock Text="Context compaction controlled by:" FontSize="11" Margin="0,4,0,0" />
                                                                               <StackPanel Orientation="Horizontal" Spacing="6">
                                                                                   <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}" 
                                                                                             SelectedItem="{Binding SelectedLocalAutoCompactModeOption}"
                                                                                             HorizontalAlignment="Stretch"
-                                                                                            ToolTip.Tip="Who shortens a chat that grows too long for this profile&#x27;s Context. AI-FluxMux, Port rules settings: AI-FluxMux shortens older turns using Compact in Port rules, and Launch turns Cline Auto compact off. AI-FluxMux, this profile&#x27;s settings: the same, using the Trigger and Keep settings below. The Client app: AI-FluxMux leaves the chat as the Client app sends it (Cline Auto compact is turned back on at Launch; other Client apps use their own shortening, told the right Context size), and only shortens it itself as a last resort at 95% of the Context so the turn can still run. Applies from the next message." />
+                                                                                            ToolTip.Tip="Who compacts a chat that grows too long for this profile&#x27;s Context. AI-FluxMux, Port rules settings: AI-FluxMux shortens older turns using Compact in Port rules, and Launch turns Cline Auto compact off. AI-FluxMux, this profile&#x27;s settings: the same, using the Trigger and Keep settings below. The Client app: AI-FluxMux leaves the chat as the Client app sends it (Cline Auto compact is turned back on at Launch; other Client apps use their own shortening, told the right Context size), and only shortens it itself as a last resort at 95% of the Context so the turn can still run. Applies from the next message." />
                                                                               </StackPanel>
                                                                               <StackPanel Orientation="Horizontal" Spacing="6"
                                                                                              IsVisible="{Binding LocalAutoCompactMode, Converter={x:Static vm:StringEqualsConverter.Instance}, ConverterParameter=per-profile}">
@@ -3465,7 +3465,7 @@
                                 Foreground="White"
                                 BorderBrush="#333333"
                                 Click="HailMaryButton_Click"
-                                ToolTip.Tip="Use when this turn has run out of room and auto-compact did not kick in in time.&#10;&#10;Most clients: older turns are removed from what is sent to the model, keeping your latest task and recent turns, and a short summary of what they established is added.&#10;&#10;Cline, when the profile leaves shortening to the Client app: Cline is asked to compact the chat itself (VS Code takes focus briefly).&#10;&#10;This keeps the chat going on a local model at some cost to fidelity. Switching to a model with more Context is better if you have one." />
+                                ToolTip.Tip="Use when this turn has run out of room and auto-compact did not kick in in time.&#10;&#10;Any Client app (the default): older turns are removed from what is sent to the model, keeping your latest task and recent turns, and a short summary of what they established is added. Send your next message to run it.&#10;&#10;Cline (and Cline forks set to Client app Other) can instead be asked to compact the chat itself with /smol (VS Code takes focus briefly); Cline can also have its chat rebuilt from outside when it is stuck.&#10;&#10;This keeps the chat going on a local model at some cost to fidelity. Switching to a model with more Context is better if you have one." />
                         <TextBlock Grid.Row="1" Grid.Column="4"
                                    IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
                                    HorizontalAlignment="Center"
@@ -3537,16 +3537,24 @@
                                 <!-- ── Strategy / prune view (not yet pending) ── -->
                                 <StackPanel Spacing="6"
                                            IsVisible="{Binding HailMaryRescuePending, Converter={x:Static vm:InvertedBoolConverter.Instance}}">
-                                <!-- Cline strategy options (only when the running profile leaves shortening to Cline) -->
-                                <StackPanel Spacing="2" IsVisible="{Binding HailMaryRescueAvailable}">
-                                    <TextBlock Text="Cline compaction strategy:" FontSize="11" FontWeight="SemiBold" />
-                                    <RadioButton Content="Wait for Cline to become ready, then send /smol"
+                                <!-- How to revive the chat. The AI-FluxMux trim works for every Client app and is the default;
+                                     /smol is offered for Cline and Cline forks (Client app Other), the external rescue for Cline only. -->
+                                <StackPanel Spacing="2">
+                                    <TextBlock Text="Revive this chat by:" FontSize="11" FontWeight="SemiBold" />
+                                    <RadioButton Content="Trimming it in AI-FluxMux (any Client app)"
+                                                 GroupName="HailMaryStrategy"
+                                                 IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=TrimInAiFluxMux}"
+                                                 FontSize="11"
+                                                 ToolTip.Tip="Default. On the next message you send, AI-FluxMux drops older turns so the reply has room, and adds a short note of what those turns established. Works with Cline, Harness and any other Client app. Later turns keep fitting because AI-FluxMux keeps shortening them (at the latest at 95% of the Context)." />
+                                    <RadioButton Content="Ask the Client app to compact itself (/smol)"
+                                     IsVisible="{Binding HailMarySmolAvailable}"
                                                  GroupName="HailMaryStrategy"
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=WaitForCline}"
                                                  FontSize="11"
-                                                 ToolTip.Tip="Default. Waits for Cline to finish its turn, then asks Cline to compact the chat (/smol). VS Code takes focus briefly." />
+                                                 ToolTip.Tip="Waits for Cline (or a Cline fork with the same /smol command) to finish its turn, then asks it to compact the chat with /smol. VS Code takes focus briefly. If the chat is too full for the Client app to answer /smol, use the AI-FluxMux trim instead." />
                                     <RadioButton Content="Cline can't continue — compact externally &amp; resurrect"
                                                  GroupName="HailMaryStrategy"
+                                     IsVisible="{Binding HailMaryRescueAvailable}"
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}"
                                                  FontSize="11"
                                                  ToolTip.Tip="Use when Cline is stuck and cannot compact itself. AI-FluxMux writes a compacted version of the chat for Cline to pick up on its next turn, built from this chat's session note and recent messages. You see a preview before anything is written." />
@@ -3572,9 +3580,9 @@
                                     </StackPanel>
                                 </StackPanel>
 
-                                <!-- Prune options (every other case) -->
+                                <!-- Trim options (only when the AI-FluxMux trim is chosen) -->
                                 <StackPanel Spacing="6"
-                                           IsVisible="{Binding HailMaryRescueAvailable, Converter={x:Static vm:InvertedBoolConverter.Instance}}">
+                                           IsVisible="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=TrimInAiFluxMux}">
                                     <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.85"
                                                Text="Drop older turns so the reply has room to complete. The system prompt, your last task, and the active tool-pair are always kept." />
                                     <StackPanel Spacing="2">

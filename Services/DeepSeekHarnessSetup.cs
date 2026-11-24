@@ -180,6 +180,167 @@ public static class DeepSeekHarnessSetup
             new JsonObject { ["sessionId"] = sessionId.Trim() },
             rpcId);
 
+    /// <summary>
+    /// session/prompt with empty content: Harness's documented way to "continue an eligible
+    /// failed idle Session" — it retries the turn that failed, in the same open chat.
+    /// </summary>
+    public static string BuildSessionContinueRequestJson(string sessionId, string? rpcId = null)
+        => BuildHarnessRpcRequestJson(
+            "session/prompt",
+            new JsonObject
+            {
+                ["requestId"] = "fluxmux-hail-mary-" + Guid.NewGuid().ToString("N"),
+                ["sessionId"] = sessionId.Trim(),
+                ["mode"] = "queue",
+                ["content"] = new JsonArray()
+            },
+            rpcId);
+
+    public static string BuildSessionPromptApiUrl(int webPort)
+        => BuildChatUrl(webPort) + "/api/session/prompt";
+
+    /// <summary>
+    /// The Harness chat written to most recently: the one whose turn just failed. Session folders
+    /// are ~/.dsh/sessions/&lt;workspace&gt;/session-&lt;id&gt;, and the folder name is the session id.
+    /// </summary>
+    public static string? ResolveMostRecentSessionId(string? sessionsRoot = null)
+    {
+        try
+        {
+            var root = sessionsRoot ?? Path.Combine(ResolveDshHomeDirectory(), "sessions");
+            if (!Directory.Exists(root))
+            {
+                return null;
+            }
+
+            string? bestId = null;
+            var bestTime = DateTime.MinValue;
+            foreach (var workspace in Directory.EnumerateDirectories(root))
+            {
+                foreach (var session in Directory.EnumerateDirectories(workspace, "session-*"))
+                {
+                    foreach (var log in Directory.EnumerateFiles(session, "session.v*.jsonl*"))
+                    {
+                        var written = File.GetLastWriteTimeUtc(log);
+                        if (written > bestTime)
+                        {
+                            bestTime = written;
+                            bestId = Path.GetFileName(session);
+                        }
+                    }
+                }
+            }
+
+            return bestId;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Asks a running Harness web UI to retry the failed turn of <paramref name="sessionId"/> in
+    /// place. Returns false when Harness is not reachable or refuses (for example the chat is not
+    /// idle, or its last turn did not fail); the caller then asks the user to send a message.
+    /// </summary>
+    public static async Task<bool> TryContinueFailedSessionAsync(
+        int webPort,
+        string? authToken,
+        string sessionId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return false;
+        }
+
+        var port = Math.Clamp(webPort, 1, 65535);
+        try
+        {
+            using var handler = new HttpClientHandler { UseCookies = true, CookieContainer = new CookieContainer() };
+            using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+            if (!string.IsNullOrWhiteSpace(authToken))
+            {
+                using var gate = await client.GetAsync(
+                    AppendQuery(BuildChatUrl(port), "token", authToken.Trim()),
+                    cancellationToken).ConfigureAwait(false);
+                if (!gate.IsSuccessStatusCode && (int)gate.StatusCode != 401)
+                {
+                    return false;
+                }
+            }
+
+            var reply = await SendHarnessRpcAsync(
+                client,
+                port,
+                BuildSessionPromptApiUrl(port),
+                BuildSessionContinueRequestJson(sessionId),
+                cancellationToken).ConfigureAwait(false);
+            return HarnessRpcSucceeded(reply);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// True for a non-empty RPC reply that reports no error. Harness answers a refused request
+    /// with an error member, or with a typed refusal such as "session/not-found" or
+    /// "session/agent-busy" in the result.
+    /// </summary>
+    public static bool HarnessRpcSucceeded(string? reply)
+    {
+        if (string.IsNullOrWhiteSpace(reply))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (JsonNode.Parse(reply) is not JsonObject root)
+            {
+                return true;
+            }
+
+            foreach (var node in EnumerateSessionIdObjects(root))
+            {
+                if (node["error"] is JsonNode error && !string.IsNullOrWhiteSpace(error.ToString()))
+                {
+                    return false;
+                }
+
+                var type = node["type"]?.ToString() ?? node["code"]?.ToString() ?? string.Empty;
+                if (type.Contains("error", StringComparison.OrdinalIgnoreCase)
+                    || HarnessRefusalTypes.Contains(type))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return true;
+        }
+    }
+
+    private static readonly HashSet<string> HarnessRefusalTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "session/not-found",
+        "session/agent-busy",
+        "session/conflict",
+        "session/steer-unavailable",
+        "session/model-unavailable",
+        "session/migration-required",
+    };
+
     public static string BuildSessionCreateApiUrl(int webPort)
         => BuildChatUrl(webPort) + "/api/session/create";
 

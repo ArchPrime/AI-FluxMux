@@ -7,7 +7,7 @@ namespace FluxMux.Avalonia.ViewModels;
 /// <summary>
 /// Two-way converter between the Hail Mary Cline compaction strategy (enum) and a RadioButton's
 /// IsChecked (bool), keyed by the strategy name in ConverterParameter. Used by the Hail Mary
-/// picker when a Cline-like client is active (Stage 0 = WaitForCline, Stage 1 = ExternalRescue).
+/// picker (TrimInAiFluxMux for any Client app; WaitForCline and ExternalRescue for Cline).
 /// </summary>
 public sealed class HailMaryStrategyToBoolConverter : IValueConverter
 {
@@ -20,7 +20,7 @@ public sealed class HailMaryStrategyToBoolConverter : IValueConverter
     // property with that default no matter which option the user picked. By remembering the
     // last selected value and returning it on unchecked, only the checked radio's
     // ConvertBack(true) actually mutates the property; the unchecked one is a no-op.
-    private HailMaryStrategy _lastSelected = HailMaryStrategy.WaitForCline;
+    private HailMaryStrategy _lastSelected = HailMaryStrategy.TrimInAiFluxMux;
 
     public object? Convert(object? value, Type targetType, object? parameter, System.Globalization.CultureInfo culture)
     {
@@ -41,7 +41,8 @@ public sealed class HailMaryStrategyToBoolConverter : IValueConverter
             var selected = name switch
             {
                 "ExternalRescue" => HailMaryStrategy.ExternalRescue,
-                _ => HailMaryStrategy.WaitForCline,
+                "WaitForCline" => HailMaryStrategy.WaitForCline,
+                _ => HailMaryStrategy.TrimInAiFluxMux,
             };
             _lastSelected = selected;
             return selected;

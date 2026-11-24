@@ -8,7 +8,7 @@ using Xunit;
 namespace FluxMux.Avalonia.Tests;
 
 /// <summary>
-/// Regression tests for "Long chats are shortened by: the Client app" (mode "none").
+/// Regression tests for "Context compaction controlled by: the Client app" (mode "none").
 /// When the per-profile settings callback returns null (profile unresolvable) or mode
 /// "none", the gateway does NOT run its regular or Port-rules compaction; it only
 /// shortens as a last resort once the prompt reaches 95% of the Context, so a turn the
@@ -150,7 +150,7 @@ public sealed class AutoCompactModeNoneTests
         var (state, payload) = BuildOverflowingState();
         var result = InvokeTryApplyForwardCompact(host, payload, state, compactOn: true);
 
-        Assert.True(result, "A turn over 95% of the Context must be shortened so it runs, even when the Client app shortens long chats.");
+        Assert.True(result, "A turn over 95% of the Context must be shortened so it runs, even when the Client app controls context compaction.");
     }
 
     [Fact]

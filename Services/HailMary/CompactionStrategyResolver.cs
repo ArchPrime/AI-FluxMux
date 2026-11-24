@@ -3,11 +3,15 @@ using System.Collections.Generic;
 namespace FluxMux.Avalonia.Services.HailMary;
 
 /// <summary>
-/// The Hail Mary strategy the user selected in the picker. Stage 0 = WaitForCline (default);
-/// Stage 1 adds ExternalRescue.
+/// The Hail Mary strategy the user selected in the picker. TrimInAiFluxMux (the picker's default)
+/// works for every Client app: AI-FluxMux drops older turns from the next forwarded request and
+/// carries the session essence into it, so a chat refused as too large runs again. WaitForCline
+/// (/smol) and ExternalRescue (Cline's compaction file) are Cline extras and are resolved here;
+/// TrimInAiFluxMux is handled by the gateway's middle-cut, not by an <see cref="ICompactionStrategy"/>.
 /// </summary>
 public enum HailMaryStrategy
 {
+    TrimInAiFluxMux,
     WaitForCline,
     ExternalRescue,
 }
