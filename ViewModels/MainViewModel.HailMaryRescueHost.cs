@@ -85,7 +85,11 @@ public partial class MainViewModel
         _harnessStartedUtc = DateTimeOffset.UtcNow;
         _harnessWebStopIntentional = false;
         var ready = await DeepSeekHarnessWebHost.WaitForWebUiAsync(port, TimeSpan.FromMinutes(2), cancellationToken).ConfigureAwait(false);
-        var url = DeepSeekHarnessSetup.ResolveOpenChatUrl(port, sessionId);
+        // Harness's web page does not take a chat from its address (a "?session=" link opens a new
+        // blank chat). It reopens the chat that was open last, which it keeps in the browser's own
+        // storage for this address and port — the stuck chat — so open the plain page.
+        _ = sessionId;
+        var url = DeepSeekHarnessSetup.ResolveOpenChatUrl(port);
         Dispatcher.UIThread.Post(() =>
         {
             RefreshHarnessProcessState();
