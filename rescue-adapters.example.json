@@ -1,0 +1,46 @@
+{
+  "notes": "Optional fluxmux_config.json key RescueAdapters: the Hail Mary 'can't continue — rebuild from outside' rescue, per Client app. Copy objects into that file — do not replace the whole config. Built-in cline-compaction-file and harness-session-log still run unless you list the same id with enabled false (or with your own steps). One entry per Client app that rebuilds its chat from a file it reads by itself. Steps run in order: find the newest chat file -> stop the Client app (if it holds the file) -> back it up -> steps -> reopen the same chat. Text takes placeholders {summary} {summaryJson} {summaryFile} {sessionId} {sessionDir} {sessionFile} {keepRecent} {rescueScripts} {nowMs} and %ENV% variables. Step kinds: command (exe, args, timeoutSeconds, expectJsonOk), write-file (path, content), delete (path), builtin (name). Stop kinds: none, process (target = program name), harness-web. Reopen kinds: none, url (target), command (target, args), harness-web. Test a new entry on a copy of a chat first.",
+  "RescueAdapters": [
+    {
+      "id": "harness-session-log",
+      "label": "Harness can't continue — rebuild & reopen this chat",
+      "clientApps": [ "DeepSeek Harness" ],
+      "enabled": true,
+      "keepRecent": 6,
+      "find": { "root": "%USERPROFILE%\\.dsh\\sessions", "dirs": "*\\session-*", "file": "session.v4.jsonl.zstd" },
+      "stop": { "kind": "harness-web", "waitSeconds": 15 },
+      "backup": true,
+      "steps": [
+        {
+          "kind": "command",
+          "exe": "node",
+          "args": [ "{rescueScripts}\\dsh-rescue.mjs", "--log", "{sessionFile}", "--summary-file", "{summaryFile}", "--keep", "{keepRecent}" ],
+          "timeoutSeconds": 120,
+          "expectJsonOk": true
+        },
+        { "kind": "delete", "path": "%USERPROFILE%\\.dsh\\storages\\session_projcache\\sessions\\{sessionId}.json" }
+      ],
+      "reopen": { "kind": "harness-web" },
+      "doneMessage": "Harness was restarted on the same chat. The older part of the chat is now a summary from AI-FluxMux, and the most recent messages are kept — carry on in that chat."
+    },
+    {
+      "id": "example-file-client",
+      "label": "Example Client can't continue — rebuild & reopen",
+      "clientApps": [ "Other" ],
+      "enabled": false,
+      "keepRecent": 6,
+      "find": { "root": "%USERPROFILE%\\.example-client\\chats", "dirs": "*", "file": "chat.json" },
+      "stop": { "kind": "process", "target": "example-client", "waitSeconds": 10 },
+      "backup": true,
+      "steps": [
+        {
+          "kind": "write-file",
+          "path": "{sessionDir}\\resume-summary.json",
+          "content": "{ \"createdMs\": {nowMs}, \"summary\": {summaryJson} }"
+        }
+      ],
+      "reopen": { "kind": "command", "target": "%LOCALAPPDATA%\\Programs\\example-client\\example-client.exe", "args": [ "--open-chat", "{sessionId}" ] },
+      "doneMessage": "The chat was rebuilt from AI-FluxMux's session note and reopened."
+    }
+  ]
+}

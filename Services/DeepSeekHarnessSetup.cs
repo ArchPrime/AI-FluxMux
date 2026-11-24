@@ -196,6 +196,42 @@ public static class DeepSeekHarnessSetup
             },
             rpcId);
 
+    /// <summary>
+    /// Name of the Windows semaphore a running Harness holds while it owns a chat's log
+    /// (dsh-session-persistence-jsonl: "Local\dsh-session-lock-" + sha256 of the lower-cased full
+    /// path of &lt;session folder&gt;\session.lock).
+    /// </summary>
+    public static string HarnessSessionLockName(string sessionDir)
+    {
+        var lockPath = Path.GetFullPath(Path.Combine(sessionDir, "session.lock")).ToLowerInvariant();
+        var hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(lockPath));
+        return @"Local\dsh-session-lock-" + Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>True while some Harness process has this chat open for writing (Windows only).</summary>
+    public static bool IsHarnessSessionLocked(string sessionDir)
+    {
+        if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(sessionDir))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (Semaphore.TryOpenExisting(HarnessSessionLockName(sessionDir), out var held))
+            {
+                held.Dispose();
+                return true;
+            }
+
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
     public static string BuildSessionPromptApiUrl(int webPort)
         => BuildChatUrl(webPort) + "/api/session/prompt";
 

@@ -15,6 +15,7 @@ Desktop router for local and cloud models. Designed for any OpenAI-compatible Cl
 - **Route requests** — when the loaded local cannot take a turn, or a ready cloud would spare RAM, AI-FluxMux asks before switching. Overlay temperature / max tokens can apply without a reload.
 - **Generation progress** — live progress bar that moves during thinking/prefill and generation phases, with data-driven prefill estimates and generation ETA.
 - **One choice for who controls context compaction** — each model profile says whether AI-FluxMux (Port rules or the profile's own settings) or the Client app (Cline Auto compact, Harness's own shortening) shortens a chat that outgrows the Context. With the Client app, AI-FluxMux leaves the chat alone and only shortens it as a last resort at 95 % of the Context, so the turn still runs.
+- **Hail Mary rescue for a Client app that no longer responds** — rebuilds the stuck chat in the Client app's own files from AI-FluxMux's session note and reopens it (Cline's compaction file; Harness's session log, with Harness stopped and reopened on the same chat). Other Client apps are added as `RescueAdapters` in `fluxmux_config.json` (see `rescue-adapters.example.json`).
 - **YaRN context extension** — extend a local model's context far beyond its VRAM budget, up to 1M tokens, by spilling the KV cache into system RAM.
 - **In-app Help** — install, llama-server, Cline, Harness, and Port rules. Setting Help links keep a stable topic id so a later Help text update does not break the jump.
 

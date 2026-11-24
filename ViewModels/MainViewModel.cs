@@ -858,6 +858,7 @@ public partial class MainViewModel : ViewModelBase
     {
         OnPropertyChanged(nameof(UserClientReinflatesContext));
         OnPropertyChanged(nameof(HailMaryRescueAvailable));
+        OnPropertyChanged(nameof(HailMaryRescueLabel));
         OnPropertyChanged(nameof(HailMarySmolAvailable));
         OnPropertyChanged(nameof(HailMaryUsesClientStrategy));
     }
@@ -5201,13 +5202,25 @@ public partial class MainViewModel : ViewModelBase
         = global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.TrimInAiFluxMux;
 
     /// <summary>
-    /// True when "Cline can't continue — compact externally" is offered: the Client app is Cline.
-    /// That strategy writes into Cline's own task files (~/.cline/data/sessions), which a fork or
-    /// any other Client app does not use, so it would only find, or overwrite, an unrelated task.
-    /// The default Hail Mary (AI-FluxMux trim) works for every Client app and needs none of this.
+    /// The "can't continue — rebuild from outside" rescue for the selected Client app: a built-in
+    /// (Cline's compaction file, Harness's session log) or one added under RescueAdapters in
+    /// fluxmux_config.json. Null when that Client app has none. Each adapter is tied to named
+    /// Client apps because it writes into that app's own chat files; run for another app it would
+    /// only find, or overwrite, an unrelated chat.
     /// </summary>
-    public bool HailMaryRescueAvailable =>
-        string.Equals(SelectedEndpointApp, "Cline", StringComparison.OrdinalIgnoreCase);
+    private global::FluxMux.Avalonia.Services.HailMary.RescueAdapterDefinition? CurrentRescueAdapter()
+        => global::FluxMux.Avalonia.Services.HailMary.RescueAdapterCatalog.ForClientApp(
+            global::FluxMux.Avalonia.Services.HailMary.RescueAdapterCatalog.Resolve(_config?.GetObjectArray(global::FluxMux.Avalonia.Services.HailMary.RescueAdapterCatalog.ConfigKey)),
+            SelectedEndpointApp);
+
+    /// <summary>True when the selected Client app has a "can't continue" rescue.</summary>
+    public bool HailMaryRescueAvailable => CurrentRescueAdapter() is not null;
+
+    /// <summary>Picker text for that rescue.</summary>
+    public string HailMaryRescueLabel => CurrentRescueAdapter()?.Label ?? string.Empty;
+
+    /// <summary>The configured rescue being prepared or confirmed; null for the built-in Cline one.</summary>
+    private global::FluxMux.Avalonia.Services.HailMary.ConfiguredRescueStrategy? _pendingConfiguredRescue;
 
     /// <summary>
     /// True when "Ask the Client app to compact (/smol)" is offered: Cline, or Other, which is
@@ -5267,6 +5280,14 @@ public partial class MainViewModel : ViewModelBase
     private async void RunClineCompactionStrategy()
     {
         var strategy = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Resolve(HailMarySelectedStrategy);
+        _pendingConfiguredRescue = null;
+        var rescueAdapter = CurrentRescueAdapter();
+        if (HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue
+            && rescueAdapter is { IsBuiltInCline: false })
+        {
+            _pendingConfiguredRescue = new global::FluxMux.Avalonia.Services.HailMary.ConfiguredRescueStrategy(rescueAdapter, new HailMaryRescueHost(this));
+            strategy = _pendingConfiguredRescue;
+        }
 
         // Read the live context fill so the rescue path can bound the summary to the chosen headroom.
         var (promptTokens, contextLimit, _) = _runtimeService.ReadLocalContextUsage();
@@ -5291,11 +5312,14 @@ public partial class MainViewModel : ViewModelBase
         HailMaryBannerVisible = false;
         HailMaryQueued = true;
 
-        if (strategy is global::FluxMux.Avalonia.Services.HailMary.ExternalRescueStrategy)
+        if (strategy is global::FluxMux.Avalonia.Services.HailMary.ExternalRescueStrategy or global::FluxMux.Avalonia.Services.HailMary.ConfiguredRescueStrategy)
         {
             // Rescue path: prepare first, then ask for confirmation before writing anything.
+            var isCline = strategy is global::FluxMux.Avalonia.Services.HailMary.ExternalRescueStrategy;
             SetHailMaryOutcome("Preparing external compaction…");
-            StatusMessage = "Hail Mary: preparing an external Cline compaction (from VIBE_STATE + Cline history). Review the preview, then confirm.";
+            StatusMessage = isCline
+                ? "Hail Mary: preparing an external Cline compaction (from VIBE_STATE + Cline history). Review the preview, then confirm."
+                : "Hail Mary: preparing to rebuild this chat from AI-FluxMux's session note. Review the preview, then confirm.";
             var prepared = await strategy.ExecuteAsync(ctx);
             if (!prepared.Success || string.IsNullOrWhiteSpace(prepared.SummaryPreview))
             {
@@ -5333,9 +5357,11 @@ public partial class MainViewModel : ViewModelBase
                 _runtimeService.Supervisor?.LogLaunchMonitor(
                     "[HailMary] rescue prepared -> HailMaryRescuePending=true (queued=" + HailMaryQueued + ")");
                 SetHailMaryOutcome("Review & confirm");
-                StatusMessage = string.IsNullOrWhiteSpace(prepared.Warning)
-                    ? "Hail Mary: review the external compaction preview, then confirm to write it. After confirming, close & reopen the chat (or restart Cline) to apply it."
-                    : "Hail Mary: review the preview — note the warning above — then confirm to write it. After confirming, close & reopen the chat (or restart Cline) to apply it.";
+                StatusMessage = !isCline
+                    ? "Hail Mary: review the preview, then confirm. " + prepared.Message
+                    : string.IsNullOrWhiteSpace(prepared.Warning)
+                        ? "Hail Mary: review the external compaction preview, then confirm to write it. After confirming, close & reopen the chat (or restart Cline) to apply it."
+                        : "Hail Mary: review the preview — note the warning above — then confirm to write it. After confirming, close & reopen the chat (or restart Cline) to apply it.";
             });
             return;
         }
@@ -5351,7 +5377,7 @@ public partial class MainViewModel : ViewModelBase
         var contextFillFraction = contextLimit > 0 ? (double)promptTokens / contextLimit : 0.0;
         var userExplicitlyChoseWaitForCline = HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.WaitForCline;
         // Only Cline has the compaction file this fallback writes; a fork keeps /smol.
-        if (contextFillFraction > 0.80 && !userExplicitlyChoseWaitForCline && HailMaryRescueAvailable)
+        if (contextFillFraction > 0.80 && !userExplicitlyChoseWaitForCline && CurrentRescueAdapter()?.IsBuiltInCline == true)
         {
             SetHailMaryOutcome("Context too full for /smol — writing external compaction…");
             StatusMessage = "Context is already " + (contextFillFraction * 100).ToString("0") + "% full. Cline can't process /smol at this fill level. Writing an external compaction file instead — close & reopen the chat (or restart Cline) after confirming to apply it.";
@@ -5431,6 +5457,24 @@ public partial class MainViewModel : ViewModelBase
                 return;
             }
 
+            if (_pendingConfiguredRescue is { } configured)
+            {
+                SetHailMaryOutcome("Rebuilding the chat…");
+                var rebuilt = await configured.CommitAsync(
+                    new global::FluxMux.Avalonia.Services.HailMary.CompactionContext { Log = line => _runtimeService.Supervisor?.LogLaunchMonitor(line) },
+                    _pendingRescue.Value);
+                global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    HailMaryRescuePending = false;
+                    SetHailMaryOutcome(rebuilt.Success ? "Chat rebuilt — carry on" : "Rebuild failed");
+                    StatusMessage = rebuilt.Message;
+                    HailMaryQueued = false;
+                    _pendingConfiguredRescue = null;
+                    ResetHailMaryPicker();
+                });
+                return;
+            }
+
             var strategy = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Resolve(
                 global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue);
             // Resolve the Cline session id so CommitAsync can write the .compaction.json to the
@@ -5484,10 +5528,11 @@ public partial class MainViewModel : ViewModelBase
     [RelayCommand]
     private void CancelHailMaryRescue()
     {
+        _pendingConfiguredRescue = null;
         HailMaryRescuePending = false;
         HailMaryRescuePreview = string.Empty;
         SetHailMaryOutcome("Cancelled");
-        StatusMessage = "External Cline compaction cancelled. Nothing was written.";
+        StatusMessage = "Hail Mary rescue cancelled. Nothing was written.";
         HailMaryQueued = false;
         ResetHailMaryPicker();
     }

@@ -3552,12 +3552,12 @@
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=WaitForCline}"
                                                  FontSize="11"
                                                  ToolTip.Tip="Waits for Cline (or a Cline fork with the same /smol command) to finish its turn, then asks it to compact the chat with /smol. VS Code takes focus briefly. If the chat is too full for the Client app to answer /smol, use the AI-FluxMux trim instead." />
-                                    <RadioButton Content="Cline can't continue — compact externally &amp; resurrect"
+                                    <RadioButton Content="{Binding HailMaryRescueLabel}"
                                                  GroupName="HailMaryStrategy"
                                      IsVisible="{Binding HailMaryRescueAvailable}"
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}"
                                                  FontSize="11"
-                                                 ToolTip.Tip="Use when Cline is stuck and cannot compact itself. AI-FluxMux writes a compacted version of the chat for Cline to pick up on its next turn, built from this chat's session note and recent messages. You see a preview before anything is written." />
+                                                 ToolTip.Tip="Use when the Client app is stuck and cannot compact itself, even when its chat no longer responds. AI-FluxMux rebuilds the chat in the Client app's own files from this chat's session note, keeping the most recent messages: for Cline it writes a compaction file Cline picks up when the chat reloads; for Harness it stops Harness, rewrites the chat and reopens it on the same chat. You see a preview before anything is written. Other Client apps can be added under RescueAdapters in fluxmux_config.json." />
                                     <!-- Headroom slider (only when the rescue strategy is selected) -->
                                     <StackPanel Spacing="2" Margin="0,4,0,0"
                                                IsVisible="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}">
