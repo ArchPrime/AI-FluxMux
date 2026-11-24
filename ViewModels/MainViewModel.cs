@@ -5219,6 +5219,16 @@ public partial class MainViewModel : ViewModelBase
     /// <summary>Picker text for that rescue.</summary>
     public string HailMaryRescueLabel => CurrentRescueAdapter()?.Label ?? string.Empty;
 
+    /// <summary>First line of the rescue confirmation, for the Client app being rescued.</summary>
+    [ObservableProperty]
+    public partial string HailMaryRescueIntro { get; set; } = string.Empty;
+
+    private const string ClineRescueIntro =
+        "This will write an external Cline compaction (.compaction.json) seeded from VIBE_STATE + the recent Cline history. Cline will read it on its next turn and resume compacted. Review the preview:";
+
+    private const string ConfiguredRescueIntro =
+        "This rebuilds the stuck chat in the Client app's own files: the older part of the chat becomes the summary below, the most recent messages are kept, and the original file is backed up first. If the Client app has the chat open, it is stopped first and reopened on the same chat. Review the preview:";
+
     /// <summary>The configured rescue being prepared or confirmed; null for the built-in Cline one.</summary>
     private global::FluxMux.Avalonia.Services.HailMary.ConfiguredRescueStrategy? _pendingConfiguredRescue;
 
@@ -5347,6 +5357,7 @@ public partial class MainViewModel : ViewModelBase
             _pendingRescue = prepared;
             global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
+                HailMaryRescueIntro = isCline ? ClineRescueIntro : ConfiguredRescueIntro;
                 HailMaryRescuePreview = prepared.SummaryPreview;
                 HailMaryRescueHeadroom = prepared.Message;
 
@@ -5396,6 +5407,7 @@ public partial class MainViewModel : ViewModelBase
                 }
 
                 _pendingRescue = directPrepared;
+                HailMaryRescueIntro = ClineRescueIntro;
                 HailMaryRescuePreview = directPrepared.SummaryPreview;
                 HailMaryRescueHeadroom = directPrepared.Message;
                 HailMaryRescueWarning = directPrepared.Warning ?? string.Empty;
@@ -5406,15 +5418,15 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        SetHailMaryOutcome("Waiting for Cline idle…");
-        StatusMessage = "Hail Mary: waiting for Cline to finish its current turn, then it will send /smol automatically (up to 90s). Focus will shift to VS Code briefly.";
+        SetHailMaryOutcome("Waiting for the Client app to be idle…");
+        StatusMessage = "Hail Mary: waiting for the Client app to finish its current turn, then it will send /smol automatically (up to 90s). Focus will shift to VS Code briefly.";
         var result = await strategy.ExecuteAsync(ctx);
         if (result.Success)
         {
             global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
                 SetHailMaryOutcome("/smol sent — compacting");
-                StatusMessage = "Cline's /smol command was triggered. Cline should now be compacting the conversation. If nothing happens, type /smol manually in Cline's chat input.";
+                StatusMessage = "The Client app's /smol command was triggered, so it should now be compacting the chat. If nothing happens, type /smol in its chat input.";
                 HailMaryQueued = false;
                 ResetHailMaryPicker();
             });
@@ -5430,8 +5442,8 @@ public partial class MainViewModel : ViewModelBase
         // could lead to double-compaction or compacting the wrong chat.
         global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
-            SetHailMaryOutcome("Cline not idle — /smol failed");
-            StatusMessage = "Cline didn't become idle in time (likely stuck after the failed turn). The /smol command was not sent. You can try the external compaction option, type /smol manually in Cline's chat input, or start a new chat.";
+            SetHailMaryOutcome("Client app not idle — /smol failed");
+            StatusMessage = "The Client app didn't become idle in time (likely stuck after the failed turn). The /smol command was not sent. You can try the \"can't continue\" option, type /smol in its chat input, or start a new chat.";
             HailMaryQueued = false;
             ResetHailMaryPicker();
         });

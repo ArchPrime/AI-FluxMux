@@ -318,7 +318,10 @@ public sealed class RescueAdapterTests
             var result = await RescueEngine.RunAsync(adapter, session!, "## Primary Request and Intent\n- Rescue test summary.", null, Path.Combine(ProjectRoot(), "Rescue"));
 
             Assert.True(result.Success, result.Message + " | " + string.Join(" | ", result.Log));
-            Assert.True(new FileInfo(copy).Length > originalLength);
+            // A chat Harness refused to resume is rewritten (broken tail dropped, one recompressed
+            // frame), so it may come out smaller; either way the file must have changed. The helper
+            // itself already re-ran Harness's resume check on what it wrote.
+            Assert.False(File.ReadAllBytes(copy).AsSpan().SequenceEqual(File.ReadAllBytes(source)));
             Assert.Single(Directory.GetFiles(chatDir, "*.hailmary-*.bak"));
             Assert.Equal(new FileInfo(source).Length, originalLength);
         }

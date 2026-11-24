@@ -433,7 +433,7 @@
                                                                                   <ComboBox ItemsSource="{Binding LocalAutoCompactModeOptions}" 
                                                                                             SelectedItem="{Binding SelectedLocalAutoCompactModeOption}"
                                                                                             HorizontalAlignment="Stretch"
-                                                                                            ToolTip.Tip="Who compacts a chat that grows too long for this profile&#x27;s Context. AI-FluxMux, Port rules settings: AI-FluxMux shortens older turns using Compact in Port rules, and Launch turns Cline Auto compact off. AI-FluxMux, this profile&#x27;s settings: the same, using the Trigger and Keep settings below. The Client app: AI-FluxMux leaves the chat as the Client app sends it (Cline Auto compact is turned back on at Launch; other Client apps use their own shortening, told the right Context size), and only shortens it itself as a last resort at 95% of the Context so the turn can still run. Applies from the next message." />
+                                                                                            ToolTip.Tip="Who compacts a chat that grows too long for this profile&#x27;s Context. AI-FluxMux, Port rules settings: AI-FluxMux shortens older turns using Compact in Port rules, and Launch turns Cline Auto compact off. AI-FluxMux, this profile&#x27;s settings: the same, using the Trigger and Keep settings below. The Client app: AI-FluxMux leaves the chat as the Client app sends it (Cline Auto compact is turned back on at Launch; other Client apps use their own shortening. Harness is told the largest Context of any usable profile, so with a smaller profile loaded it compacts late: for Harness an AI-FluxMux choice works better), and only shortens it itself as a last resort at 95% of the Context so the turn can still run. Applies from the next message." />
                                                                               </StackPanel>
                                                                               <StackPanel Orientation="Horizontal" Spacing="6"
                                                                                              IsVisible="{Binding LocalAutoCompactMode, Converter={x:Static vm:StringEqualsConverter.Instance}, ConverterParameter=per-profile}">
@@ -3347,7 +3347,7 @@
                                         Margin="0,0,8,4"
                                         Command="{Binding HailMaryShrinkTurnCommand}"
                                         Click="HailMaryBannerShrink_Click"
-                                        ToolTip.Tip="Prunes the older turns from this chat's forwarded history (keeping the system prompt, your last task, and the chosen number of recent turns) so the reply has room to complete, then re-sends the turn. The Client app still has the full chat." />
+                                        ToolTip.Tip="Prunes the older turns from this chat's forwarded history (keeping the system prompt, your last task, and the chosen number of recent turns) so the reply has room to complete. It applies to the next message the Client app sends: send or retry your message (for Harness, AI-FluxMux also asks Harness to retry the failed turn). The Client app still has the full chat." />
                                 <Button Content="Dismiss"
                                         Margin="0,0,8,4"
                                         Command="{Binding DismissHailMaryBannerCommand}"
@@ -3465,7 +3465,7 @@
                                 Foreground="White"
                                 BorderBrush="#333333"
                                 Click="HailMaryButton_Click"
-                                ToolTip.Tip="Use when this turn has run out of room and auto-compact did not kick in in time.&#10;&#10;Any Client app (the default): older turns are removed from what is sent to the model, keeping your latest task and recent turns, and a short summary of what they established is added. Send your next message to run it.&#10;&#10;Cline (and Cline forks set to Client app Other) can instead be asked to compact the chat itself with /smol (VS Code takes focus briefly); Cline can also have its chat rebuilt from outside when it is stuck.&#10;&#10;This keeps the chat going on a local model at some cost to fidelity. Switching to a model with more Context is better if you have one." />
+                                ToolTip.Tip="Use when this turn has run out of room and context compaction did not kick in in time.&#10;&#10;Any Client app (the default): older turns are removed from what is sent to the model, keeping your latest task and recent turns, and a short summary of what they established is added. Send your next message to run it; for Harness, AI-FluxMux also asks Harness to retry the failed turn.&#10;&#10;Cline, and Cline forks set to Client app Other, can instead be asked to compact the chat themselves with /smol (VS Code takes focus briefly).&#10;&#10;When the Client app no longer responds at all, or will not reopen the chat, the &#x27;can&#x27;t continue&#x27; option rebuilds the stuck chat in the Client app&#x27;s own files from the session note and reopens it. Built in for Cline and Harness; other Client apps can be added under RescueAdapters in fluxmux_config.json.&#10;&#10;This keeps the chat going on a local model at some cost to fidelity. Switching to a model with more Context is better if you have one." />
                         <TextBlock Grid.Row="1" Grid.Column="4"
                                    IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
                                    HorizontalAlignment="Center"
@@ -3508,7 +3508,7 @@
                                 <!-- ── Confirmation view (rescue prepared, awaiting confirm) ── -->
                                 <StackPanel Spacing="6" MaxWidth="360" IsVisible="{Binding HailMaryRescuePending}">
                                     <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.9"
-                                               Text="This will write an external Cline compaction (.compaction.json) seeded from VIBE_STATE + the recent Cline history. Cline will read it on its next turn and resume compacted. Review the preview:" />
+                                               Text="{Binding HailMaryRescueIntro}" />
                                     <Border Background="#F5F3FF" BorderBrush="#DDD6FE" BorderThickness="1" CornerRadius="3" Padding="6" MaxHeight="220">
                                         <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
                                             <TextBlock Text="{Binding HailMaryRescuePreview}" TextWrapping="Wrap" FontSize="10" FontFamily="Consolas, monospace" />
@@ -3545,19 +3545,19 @@
                                                  GroupName="HailMaryStrategy"
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=TrimInAiFluxMux}"
                                                  FontSize="11"
-                                                 ToolTip.Tip="Default. On the next message you send, AI-FluxMux drops older turns so the reply has room, and adds a short note of what those turns established. Works with Cline, Harness and any other Client app. Later turns keep fitting because AI-FluxMux keeps shortening them (at the latest at 95% of the Context)." />
+                                                 ToolTip.Tip="Default. On the next message you send, AI-FluxMux drops older turns so the reply has room, and adds a short note of what those turns established. Works with Cline, Harness and any other Client app; for Harness, AI-FluxMux also asks Harness to retry the failed turn, so nothing needs sending. Later turns keep fitting because AI-FluxMux keeps shortening them (at the latest at 95% of the Context)." />
                                     <RadioButton Content="Ask the Client app to compact itself (/smol)"
                                      IsVisible="{Binding HailMarySmolAvailable}"
                                                  GroupName="HailMaryStrategy"
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=WaitForCline}"
                                                  FontSize="11"
-                                                 ToolTip.Tip="Waits for Cline (or a Cline fork with the same /smol command) to finish its turn, then asks it to compact the chat with /smol. VS Code takes focus briefly. If the chat is too full for the Client app to answer /smol, use the AI-FluxMux trim instead." />
+                                                 ToolTip.Tip="Waits for Cline (or a Cline fork with the same /smol command, with Client app set to Other) to finish its turn, then asks it to compact the chat with /smol. VS Code takes focus briefly. If the chat is too full for the Client app to answer /smol, use the AI-FluxMux trim instead." />
                                     <RadioButton Content="{Binding HailMaryRescueLabel}"
                                                  GroupName="HailMaryStrategy"
                                      IsVisible="{Binding HailMaryRescueAvailable}"
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}"
                                                  FontSize="11"
-                                                 ToolTip.Tip="Use when the Client app is stuck and cannot compact itself, even when its chat no longer responds. AI-FluxMux rebuilds the chat in the Client app's own files from this chat's session note, keeping the most recent messages: for Cline it writes a compaction file Cline picks up when the chat reloads; for Harness it stops Harness, rewrites the chat and reopens it on the same chat. You see a preview before anything is written. Other Client apps can be added under RescueAdapters in fluxmux_config.json." />
+                                                 ToolTip.Tip="Use when the Client app is stuck and cannot compact itself, even when its chat no longer responds. AI-FluxMux rebuilds the chat in the Client app's own files from this chat's session note, keeping the most recent messages: for Cline it writes a compaction file Cline picks up when the chat reloads; for Harness it stops Harness, rewrites the chat (also repairing a chat Harness will not reopen) and reopens it on the same chat. The original file is backed up first, and you see a preview before anything is written. Other Client apps can be added under RescueAdapters in fluxmux_config.json." />
                                     <!-- Headroom slider (only when the rescue strategy is selected) -->
                                     <StackPanel Spacing="2" Margin="0,4,0,0"
                                                IsVisible="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}">
@@ -3566,12 +3566,12 @@
                                                      GroupName="HailMaryHeadroom"
                                                      IsChecked="{Binding HailMaryHeadroom, Converter={StaticResource HailMaryHeadroomToBool}, ConverterParameter=PreserveMore}"
                                                      FontSize="11"
-                                                     ToolTip.Tip="Maximizes the nuance preserved in the summary. Riskier: less free context to resume the chat." />
+                                                     ToolTip.Tip="Keeps more detail in the summary the chat is rebuilt from. Riskier: less free Context to resume the chat." />
                                         <RadioButton Content="Balanced (~40% free)"
                                                      GroupName="HailMaryHeadroom"
                                                      IsChecked="{Binding HailMaryHeadroom, Converter={StaticResource HailMaryHeadroomToBool}, ConverterParameter=Balanced}"
                                                      FontSize="11"
-                                                     ToolTip.Tip="The 'just enough' default: preserves essence &amp; nuance while leaving room to resume." />
+                                                     ToolTip.Tip="The 'just enough' default: keeps the essentials and some detail while leaving room to resume." />
                                         <RadioButton Content="Leave more room (drop nuance first, ~60% free)"
                                                      GroupName="HailMaryHeadroom"
                                                      IsChecked="{Binding HailMaryHeadroom, Converter={StaticResource HailMaryHeadroomToBool}, ConverterParameter=LeaveMoreRoom}"
