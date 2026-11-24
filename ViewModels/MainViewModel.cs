@@ -445,6 +445,7 @@ public partial class MainViewModel : ViewModelBase
         _dependencyAuditService = dependencyAuditService;
         _runtimeService = runtimeService;
         _harnessWebHost.ProcessExited += OnHarnessWebProcessExited;
+        global::FluxMux.Avalonia.Services.FluxMuxGatewayHost.ChatClientAppSeen += OnChatClientAppSeen;
         _config = _configService.Load();
         PortRules = new PortForwardingRulesViewModel(
             PortForwardingRulesStore.BesideConfig(_configService.ConfigPath),
@@ -5161,7 +5162,7 @@ public partial class MainViewModel : ViewModelBase
         StatusMessage = "Hail Mary Context Trim armed (" + stopName + imgBit + "): the next turn you send will have its older history trimmed to make room. Send your reply now.";
         _runtimeService.RequestHailMaryMiddleCut(HailMaryAggressionStop, HailMaryStripImages);
         ResetHailMaryPicker();
-        if (string.Equals(SelectedEndpointApp, "DeepSeek Harness", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(HailMaryClientApp, "DeepSeek Harness", StringComparison.OrdinalIgnoreCase))
         {
             _ = ContinueHarnessAfterHailMaryAsync();
         }
@@ -5211,7 +5212,45 @@ public partial class MainViewModel : ViewModelBase
     private global::FluxMux.Avalonia.Services.HailMary.RescueAdapterDefinition? CurrentRescueAdapter()
         => global::FluxMux.Avalonia.Services.HailMary.RescueAdapterCatalog.ForClientApp(
             global::FluxMux.Avalonia.Services.HailMary.RescueAdapterCatalog.Resolve(_config?.GetObjectArray(global::FluxMux.Avalonia.Services.HailMary.RescueAdapterCatalog.ConfigKey)),
-            SelectedEndpointApp);
+            HailMaryClientApp);
+
+    /// <summary>
+    /// The Client app Hail Mary acts on: the one whose chat request AI-FluxMux saw last, named by
+    /// its own system prompt (<see cref="global::FluxMux.Avalonia.Services.ClientAppDetector"/>),
+    /// else the Client app dropdown. The dropdown is setup notes and can say Cline while the
+    /// stuck chat is in Harness (25 Nov: the picker then offered /smol and Cline's rescue for a
+    /// Harness chat). An unrecognised client (a Cline fork, Other) falls back to the dropdown.
+    /// </summary>
+    private string HailMaryClientApp
+        => global::FluxMux.Avalonia.Services.FluxMuxGatewayHost.LastChatClientApp ?? SelectedEndpointApp;
+
+    /// <summary>
+    /// Status-row text naming the Client app whose chat requests AI-FluxMux is serving now, as
+    /// told by each request's own system prompt (not the Client app dropdown). Empty until a chat
+    /// arrives. Follows the operator switching Client apps while AI-FluxMux runs.
+    /// </summary>
+    [ObservableProperty]
+    public partial string ActiveClientAppText { get; set; } = string.Empty;
+
+    /// <summary>Tooltip for <see cref="ActiveClientAppText"/>: every Client app seen and when.</summary>
+    [ObservableProperty]
+    public partial string ActiveClientAppTooltip { get; set; } = string.Empty;
+
+    private void OnChatClientAppSeen(string clientApp)
+        => global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            var shortName = clientApp == global::FluxMux.Avalonia.Services.ClientAppDetector.Harness ? "Harness" : clientApp;
+            ActiveClientAppText = "Client app: " + shortName;
+            var lines = global::FluxMux.Avalonia.Services.FluxMuxGatewayHost.ClientAppActivity()
+                .Select(a => a.ClientApp + " — last chat request " + a.SeenUtc.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture));
+            ActiveClientAppTooltip = "The Client app that sent the latest chat request, named from its own system prompt. "
+                + "Hail Mary acts on this Client app"
+                + (clientApp == global::FluxMux.Avalonia.Services.FluxMuxGatewayHost.UnrecognisedClientApp
+                    ? " — for one it does not recognise, the Client app dropdown decides (" + SelectedEndpointApp + ")."
+                    : ".")
+                + "\n\nSeen since AI-FluxMux started:\n" + string.Join("\n", lines);
+            RefreshClientShorteningState();
+        });
 
     /// <summary>True when the selected Client app has a "can't continue" rescue.</summary>
     public bool HailMaryRescueAvailable => CurrentRescueAdapter() is not null;
@@ -5238,7 +5277,7 @@ public partial class MainViewModel : ViewModelBase
     /// Harness, which has neither.
     /// </summary>
     public bool HailMarySmolAvailable =>
-        !string.Equals(SelectedEndpointApp, "DeepSeek Harness", StringComparison.OrdinalIgnoreCase);
+        !string.Equals(HailMaryClientApp, "DeepSeek Harness", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// True when the chosen Hail Mary strategy runs on the Client app's side (/smol or Cline's

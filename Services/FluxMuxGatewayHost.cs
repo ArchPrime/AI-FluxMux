@@ -35,6 +35,77 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private readonly HttpClient _http;
     public static int SharedTurnCounter = 0;
 
+    /// <summary>
+    /// The Client app that sent the latest chat request, when its system prompt says
+    /// (<see cref="ClientAppDetector"/>); null when the latest agent request came from a Client
+    /// app it does not recognise, or none has been seen. Hail Mary follows this, and the Client
+    /// app dropdown when it is null. An unrecognised agent request (one carrying tools) clears it
+    /// rather than leaving the last recognised name: kept, a Harness name would offer the Harness
+    /// rescue — which rebuilds the newest Harness chat — for a stuck chat in some other app.
+    /// Requests without tools and an unrecognised prompt (Harness's chat-title request, for
+    /// example) leave it alone. Kept in <c>last_chat_client_app.txt</c> beside the gateway
+    /// state file, because a frozen chat may send nothing after AI-FluxMux is relaunched, and
+    /// that is exactly the chat Hail Mary is opened for.
+    /// </summary>
+    public static string? LastChatClientApp
+    {
+        get
+        {
+            // "" = known to be unrecognised; null = not read from the file yet.
+            if (_lastChatClientApp is null && _lastChatClientAppPath is { } path)
+            {
+                try
+                {
+                    _lastChatClientApp = File.Exists(path) ? File.ReadAllText(path).Trim() : string.Empty;
+                }
+                catch
+                {
+                }
+            }
+
+            return string.IsNullOrEmpty(_lastChatClientApp) ? null : _lastChatClientApp;
+        }
+    }
+
+    private static volatile string? _lastChatClientApp;
+    private static volatile string? _lastChatClientAppPath;
+
+    /// <summary>Name shown for an agent request whose Client app is not recognised.</summary>
+    public const string UnrecognisedClientApp = "an unrecognised Client app";
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> ClientAppLastSeen = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Raised on each chat request whose sender could be told (recognised, or an unrecognised
+    /// agent request), with that name. The window's status row shows the Client app working with
+    /// AI-FluxMux right now; the operator may switch between Client apps while it runs.
+    /// </summary>
+    public static event Action<string>? ChatClientAppSeen;
+
+    /// <summary>Each Client app seen since start-up and when its latest chat request came, newest first.</summary>
+    public static IReadOnlyList<(string ClientApp, DateTime SeenUtc)> ClientAppActivity()
+        => ClientAppLastSeen.OrderByDescending(p => p.Value).Select(p => (p.Key, p.Value)).ToList();
+
+    private static void NoteChatClientApp(string sender)
+    {
+        if (string.Equals(_lastChatClientApp, sender, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastChatClientApp = sender;
+        if (_lastChatClientAppPath is { } path)
+        {
+            try
+            {
+                File.WriteAllText(path, sender);
+            }
+            catch
+            {
+            }
+        }
+    }
+
     // KV-cache reuse diagnostic: tracks the previous turn's measured prompt-token count so we
     // can compute the DELTA in prompt size between consecutive turns. If the llama-server KV
     // cache is being reused across turns, the prefill time for turn N+1 should scale with the
@@ -98,6 +169,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         IdleSessionCoordinator? idleSession = null)
     {
         _statePath = statePath;
+        _lastChatClientAppPath = Path.Combine(Path.GetDirectoryName(statePath) ?? AppContext.BaseDirectory, "last_chat_client_app.txt");
         _lastServedPath = lastServedPath;
         _recommendPath = recommendPath;
         _cloudBreakerPath = cloudBreakerPath;
@@ -722,6 +794,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
         if (!isProbeRequest)
         {
             EnsureVibeConversationScope(payload);
+            var sender = ClientAppDetector.FromPayload(payload);
+            if (sender is not null || payload["tools"] is JsonArray { Count: > 0 })
+            {
+                NoteChatClientApp(sender ?? string.Empty);
+                var shown = sender ?? UnrecognisedClientApp;
+                ClientAppLastSeen[shown] = DateTime.UtcNow;
+                ChatClientAppSeen?.Invoke(shown);
+            }
         }
 
         // If the user's client reinflates the context (forwards the full chat each turn, e.g. Cline),
