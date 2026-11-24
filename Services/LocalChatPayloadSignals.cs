@@ -371,7 +371,11 @@ public static class LocalChatPayloadSignals
     }
 
     // The assistant messages of the trailing run of identical calls, newest first.
-    private static List<int> RepeatRunMessages(JsonObject payload, List<(string Fingerprint, int Message)> calls)
+    // A call is a repeat only when the WHOLE call matches (name and every argument), not just its
+    // fingerprint: an edit's fingerprint is "edit <path>", and Harness answers every successful
+    // edit with the same "has been updated successfully" line, so three different edits to one
+    // file read as the same command run three times and paused the turn (24 Nov, fantasy-rpg).
+    private static List<int> RepeatRunMessages(JsonObject payload, List<(string Fingerprint, string Exact, int Message)> calls)
     {
         var run = new List<int>();
         if (calls.Count == 0 || payload["messages"] is not JsonArray messages)
@@ -380,19 +384,19 @@ public static class LocalChatPayloadSignals
         }
 
         var objects = messages.OfType<JsonObject>().ToList();
-        var (last, lastMessage) = calls[^1];
+        var (last, lastExact, lastMessage) = calls[^1];
         var needSameResult = IsClosedLoopFingerprint(last);
         var lastResult = needSameResult ? ResultTextAfter(objects, lastMessage) : null;
         run.Add(lastMessage);
         for (var i = calls.Count - 2; i >= 0; i--)
         {
-            var (fingerprint, message) = calls[i];
+            var (_, exact, message) = calls[i];
             if (message == run[^1])
             {
                 continue; // another call in the same assistant message
             }
 
-            if (!string.Equals(fingerprint, last, StringComparison.Ordinal)
+            if (!string.Equals(exact, lastExact, StringComparison.Ordinal)
                 || (needSameResult && !string.Equals(ResultTextAfter(objects, message), lastResult, StringComparison.Ordinal)))
             {
                 break;
@@ -508,9 +512,10 @@ public static class LocalChatPayloadSignals
         return true;
     }
 
-    private static List<(string Fingerprint, int Message)> CollectToolFingerprintsInOrder(JsonObject payload)
+    // Fingerprint names the call for logs and notes; Exact is the whole call, for repeat matching.
+    private static List<(string Fingerprint, string Exact, int Message)> CollectToolFingerprintsInOrder(JsonObject payload)
     {
-        var found = new List<(string, int)>();
+        var found = new List<(string, string, int)>();
         if (payload["messages"] is not JsonArray messages)
         {
             return found;
@@ -529,7 +534,7 @@ public static class LocalChatPayloadSignals
                         var fingerprint = FingerprintToolCall(node);
                         if (!string.IsNullOrWhiteSpace(fingerprint))
                         {
-                            found.Add((fingerprint, index));
+                            found.Add((fingerprint, ExactToolCall(node, fingerprint), index));
                             foundCalls = true;
                         }
                     }
@@ -539,7 +544,7 @@ public static class LocalChatPayloadSignals
                 {
                     foreach (var fingerprint in FingerprintXmlToolCalls(MessageText(msg)))
                     {
-                        found.Add((fingerprint, index));
+                        found.Add((fingerprint, fingerprint, index));
                     }
                 }
             }
@@ -1313,6 +1318,20 @@ public static class LocalChatPayloadSignals
         }
 
         return node?.DeepClone();
+    }
+
+    // The whole call: name plus the full argument text. A shell call keeps its command fingerprint,
+    // which is already the whole command.
+    private static string ExactToolCall(JsonObject call, string fingerprint)
+    {
+        var name = (call["function"]?["name"]?.ToString() ?? call["name"]?.ToString() ?? string.Empty).Trim();
+        if (IsShellTool(name))
+        {
+            return fingerprint;
+        }
+
+        var args = (call["function"]?["arguments"] ?? call["arguments"])?.ToString() ?? string.Empty;
+        return name + " " + CollapseWhitespace(args);
     }
 
     private static string FingerprintToolCall(JsonObject call)

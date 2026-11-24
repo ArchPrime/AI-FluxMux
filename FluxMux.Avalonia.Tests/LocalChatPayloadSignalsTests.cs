@@ -575,6 +575,31 @@ public sealed class LocalChatPayloadSignalsTests
         Assert.Equal(2, LocalChatPayloadSignals.CollapseRepeatedToolRun(payload));
     }
 
+    [Fact]
+    public void Different_edits_to_one_file_with_the_same_success_line_are_not_a_repeat()
+    {
+        // From a Harness chat (24 Nov): three different edits to main.js, each answered with the
+        // same "has been updated successfully" line, paused the turn as "the same command 3 times".
+        static JsonObject Edit(string oldText, string newText) => new()
+        {
+            ["type"] = "function",
+            ["function"] = new JsonObject
+            {
+                ["name"] = "edit",
+                ["arguments"] = new JsonObject { ["file_path"] = "main.js", ["old_string"] = oldText, ["new_string"] = newText }.ToJsonString()
+            }
+        };
+
+        var different = PayloadWithAssistantCalls(Edit("a", "a1"), Edit("b", "b1"), Edit("c", "c1"));
+        Assert.Equal(1, LocalChatPayloadSignals.CountRepeatedToolCommand(different, out _));
+        Assert.Equal(0, LocalChatPayloadSignals.CollapseRepeatedToolRun(different));
+
+        // The same edit three times with the same answer is still a repeat.
+        var same = PayloadWithAssistantCalls(Edit("a", "a1"), Edit("a", "a1"), Edit("a", "a1"));
+        Assert.Equal(3, LocalChatPayloadSignals.CountRepeatedToolCommand(same, out var command));
+        Assert.Equal("edit main.js", command);
+    }
+
     [Theory]
     // Cline (OpenAI Compatible) sends each result as the JSON of its result list.
     [InlineData("[{\"query\":\"VRAM\",\"result\":\"\",\"error\":\"Search failed: Search timed out after 30000ms\",\"success\":false}]", true)]
