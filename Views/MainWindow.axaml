@@ -1681,11 +1681,11 @@
                                                             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
                                                                 <CheckBox VerticalAlignment="Center" Content="Closed-loop mill ceiling"
                                                                           IsChecked="{Binding PortRules.ClosedLoopCeilingEnabled}"
-                                                                          ToolTip.Tip="Last-resort stop once this many older tool results have been shortened, even if the recent tools still look useful." />
+                                                                          ToolTip.Tip="Last-resort stop once the model has run this many tools since your last message without stopping, even if the recent tools still look useful. Counts this Client-app turn only, so a long chat never reaches it just by being long." />
                                                                 <NumericUpDown Grid.Column="1" Minimum="32" Maximum="512"
                                                                                IsEnabled="{Binding PortRules.ClosedLoopCeilingEnabled}"
                                                                                Value="{Binding PortRules.ClosedLoopRunawayOmittedResults}" 
-                                                                                            ToolTip.Tip="Last-resort stop once this many older tool results have been shortened, even if the recent tools still look useful." />
+                                                                                            ToolTip.Tip="Last-resort stop once the model has run this many tools since your last message without stopping, even if the recent tools still look useful. Counts this Client-app turn only, so a long chat never reaches it just by being long." />
                                                                 <views:HelpTopicLink Grid.Column="2"
                                                                                      TopicId="{x:Static svc:HelpTopicIds.PortRules}"
                                                                                      ToolTip.Tip="Open the Port rules Help topic." />

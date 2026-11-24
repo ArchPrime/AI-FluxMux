@@ -46,14 +46,17 @@ public static class LocalToolResultClearing
             return true;
         }
 
+        // The ceiling counts tools since the person's latest message, not the whole chat
+        // (see LocalChatPayloadSignals.CountToolResultsSinceHumanMessage).
+        if (live.ClosedLoopCeilingEnabled
+            && LocalChatPayloadSignals.CountToolResultsSinceHumanMessage(payload) >= live.ClosedLoopRunawayOmittedResults)
+        {
+            return true;
+        }
+
         if (omitted < live.RunawayOmittedResults)
         {
             return false;
-        }
-
-        if (live.ClosedLoopCeilingEnabled && omitted >= live.ClosedLoopRunawayOmittedResults)
-        {
-            return true;
         }
 
         if (!live.MillAtOmittedEnabled)

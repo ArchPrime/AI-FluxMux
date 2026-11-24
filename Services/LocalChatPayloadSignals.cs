@@ -280,6 +280,46 @@ public static class LocalChatPayloadSignals
            + "spelled correctly, or take a smaller step that you can confirm works.";
 
     /// <summary>
+    /// Tool results since the latest message the person wrote: how long the model has been
+    /// working on its own in this Client-app turn. The Closed-loop mill ceiling compares THIS,
+    /// not the chat's whole tool history. Counting the whole chat paused a productive Harness
+    /// chat (25 Nov, fantasy-rpg: 272 tool calls over 10 turns, at most 60 in one turn, 6
+    /// errors, the last turn 22 different edits then a syntax and a browser check) simply for
+    /// being long — every long chat reaches any fixed total. A runaway is many calls in one go
+    /// with no word from the person; the other Mill rules judge whether recent work is useful.
+    /// </summary>
+    public static int CountToolResultsSinceHumanMessage(JsonObject payload)
+    {
+        if (payload["messages"] is not JsonArray messages)
+        {
+            return 0;
+        }
+
+        var count = 0;
+        for (var i = messages.Count - 1; i >= 0; i--)
+        {
+            if (messages[i] is not JsonObject message)
+            {
+                continue;
+            }
+
+            if (LocalToolResultClearing.IsToolResult(message))
+            {
+                count++;
+                continue;
+            }
+
+            if (Str(message, "role").Equals("user", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(ContextEngine.ConversationText.HumanPart(MessageText(message))))
+            {
+                break;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// How many of the newest tool results failed in a row. Counting stops at the first result that
     /// succeeded, or at a message the person wrote (new guidance resets the run).
     /// </summary>

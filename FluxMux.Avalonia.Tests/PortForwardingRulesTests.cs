@@ -178,10 +178,24 @@ public sealed class PortForwardingRulesTests
         };
         Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted: 117, off));
         Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted: 128, off));
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(
+        // The ceiling counts tools since the person's latest message, not older results in the
+        // whole chat: a deep chat alone stays open, a long run of tools in one go pauses.
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(
             payload,
             omitted: LocalToolResultClearing.ClosedLoopRunawayOmittedResults,
             off));
+        var runaway = new JsonArray { new JsonObject { ["role"] = "user", ["content"] = "watch" } };
+        for (var i = 0; i < LocalToolResultClearing.ClosedLoopRunawayOmittedResults; i++)
+        {
+            runaway.Add(new JsonObject
+            {
+                ["role"] = "assistant",
+                ["tool_calls"] = new JsonArray { new JsonObject { ["id"] = "c" + i, ["type"] = "function", ["function"] = new JsonObject { ["name"] = "edit", ["arguments"] = "{\"path\":\"f" + i + "\"}" } } },
+            });
+            runaway.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = "c" + i, ["content"] = "ok " + i });
+        }
+
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(new JsonObject { ["messages"] = runaway }, omitted: 0, off));
         Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(
             payload,
             omitted: 32,

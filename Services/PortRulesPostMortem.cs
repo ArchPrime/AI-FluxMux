@@ -102,9 +102,27 @@ public static class PortRulesPostMortem
     public const string NoPortRuleForOverflow =
         "Changing Port rules will not fix one over-full Client-app message.";
 
-    public static string? FormatMill(int omitted, bool rapidChurn, int rapidStreak, PortForwardingRules? rules)
+    /// <param name="toolsThisTurn">Tool results since the person's latest message (the Closed-loop
+    /// mill ceiling's count); -1 when the caller does not know, which never names the ceiling.</param>
+    public static string? FormatMill(int omitted, bool rapidChurn, int rapidStreak, PortForwardingRules? rules, int toolsThisTurn = -1)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
+        if (live.ClosedLoopCeilingEnabled && toolsThisTurn >= live.ClosedLoopRunawayOmittedResults)
+        {
+            return ChatTurnCannotContinue
+                + "the model in the Client app has run "
+                + toolsThisTurn.ToString(CultureInfo.InvariantCulture)
+                + " tools since your last message without stopping. "
+                + StoppedWhenRuleHit(
+                    ClosedLoopMillCeiling,
+                    toolsThisTurn.ToString(CultureInfo.InvariantCulture) + " tools since your last message",
+                    live.ClosedLoopRunawayOmittedResults.ToString(CultureInfo.InvariantCulture))
+                + " "
+                + RaiseSettingAdvice(ClosedLoopMillCeiling)
+                + " "
+                + MillBreakAdvice;
+        }
+
         if (omitted < live.RunawayOmittedResults && !rapidChurn)
         {
             var count = live.ObserveOnlyMillCount.ToString(CultureInfo.InvariantCulture);
@@ -137,23 +155,8 @@ public static class PortRulesPostMortem
                 + NarrowerChatAdvice;
         }
 
-        if (omitted >= live.ClosedLoopRunawayOmittedResults)
-        {
-            return ChatTurnCannotContinue
-                + "the Client app has run too many tools. "
-                + StoppedWhenRuleHit(
-                    ClosedLoopMillCeiling,
-                    omitted.ToString(CultureInfo.InvariantCulture) + " older tool results",
-                    live.ClosedLoopRunawayOmittedResults.ToString(CultureInfo.InvariantCulture))
-                + " "
-                + RaiseSettingAdvice(ClosedLoopMillCeiling)
-                + " "
-                + MillBreakAdvice;
-        }
-
         var lookback = live.ClosedLoopMillLookback.ToString(CultureInfo.InvariantCulture);
         var floor = live.RunawayOmittedResults.ToString(CultureInfo.InvariantCulture);
-        var ceiling = live.ClosedLoopRunawayOmittedResults.ToString(CultureInfo.InvariantCulture);
         return ChatTurnCannotContinue
             + "the Client app has run too many tools. You already passed "
             + NamePortRule(MillAtOmitted)
@@ -166,14 +169,10 @@ public static class PortRulesPostMortem
             + lookback
             + ") tools no longer looked like a read/edit/search loop ("
             + omitted.ToString(CultureInfo.InvariantCulture)
-            + " older tool results; "
-            + NamePortRule(ClosedLoopMillCeiling)
-            + " is "
-            + ceiling
-            + "). You can raise "
+            + " older tool results). You can raise "
             + NamePortRule(ClosedLoopLookback)
             + " or "
-            + NamePortRule(ClosedLoopMillCeiling)
+            + NamePortRule(MillAtOmitted)
             + " in "
             + PortRulesLocation
             + ". "

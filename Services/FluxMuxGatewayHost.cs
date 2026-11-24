@@ -866,6 +866,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         var haltAsToolMill = LocalToolResultClearing.ShouldHaltAsToolMill(payload, millDepth, portRules);
+        var toolsThisTurn = LocalChatPayloadSignals.CountToolResultsSinceHumanMessage(payload);
         // Rapid-churn is retired. It paused a deep pack when four tool turns came < 3 s apart, which
         // only ever meant a runaway loop while each turn spent ~9 s rereading its prompt. With the
         // prompt cache working a turn takes ~1 s, so it paused ordinary fast work; and everything it
@@ -888,6 +889,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
         {
             HasLocalTurn = true,
             Omitted = millDepth,
+            ToolsThisTurn = toolsThisTurn,
             ObserveOnly = LocalChatPayloadSignals.CountRecentObserveOnlyTools(
                 payload,
                 portRules.ObserveOnlyMillCount),
@@ -1648,7 +1650,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     millDepth,
                     rapidChurn,
                     rapidStreak,
-                    portRules);
+                    portRules,
+                    toolsThisTurn);
                 var pause = await AskPortRulePauseAsync(finding ?? string.Empty, portRules).ConfigureAwait(false);
                 if (pause == FluxMuxGatewayRouting.Cloud)
                 {
@@ -1681,7 +1684,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                             millDepth,
                             rapidChurn,
                             rapidStreak,
-                            portRules),
+                            portRules,
+                            toolsThisTurn),
                         400,
                         FluxMuxGatewayRouting.ToolMillType).ConfigureAwait(false);
                     Log("cline_tool_mill: llama-server was not asked after omitting "

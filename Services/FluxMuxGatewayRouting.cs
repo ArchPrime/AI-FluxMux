@@ -635,11 +635,12 @@ public static class FluxMuxGatewayRouting
         int omitted,
         bool rapidChurn,
         int rapidStreak,
-        PortForwardingRules? rules)
+        PortForwardingRules? rules,
+        int toolsThisTurn = -1)
     {
         _ = state;
         return PortRulesPostMortem.WithStopAdvice(
-            PortRulesPostMortem.FormatMill(omitted, rapidChurn, rapidStreak, rules));
+            PortRulesPostMortem.FormatMill(omitted, rapidChurn, rapidStreak, rules, toolsThisTurn));
     }
 
     public static string FormatRepeatedToolConsentReason(string? command)

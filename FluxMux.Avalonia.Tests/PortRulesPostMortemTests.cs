@@ -73,7 +73,8 @@ public sealed class PortRulesPostMortemTests
         Assert.Contains("**Mill at omitted**", text);
         Assert.Contains("You already passed", text);
         Assert.Contains("**Closed-loop lookback**", text);
-        Assert.Contains("**Closed-loop mill ceiling**", text);
+        // The ceiling counts tools since the person's last message, so it is not this rule's fix.
+        Assert.DoesNotContain("**Closed-loop mill ceiling**", text);
         Assert.DoesNotContain(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.MillAtOmitted), text);
         Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
         Assert.Contains(PortRulesPostMortem.NarrowerChatAdvice, text);
@@ -83,8 +84,9 @@ public sealed class PortRulesPostMortemTests
     [Fact]
     public void Long_closed_loop_names_Closed_loop_mill_ceiling()
     {
-        var text = PortRulesPostMortem.FormatMill(256, rapidChurn: false, rapidStreak: 0, PortForwardingRules.Defaults);
+        var text = PortRulesPostMortem.FormatMill(256, rapidChurn: false, rapidStreak: 0, PortForwardingRules.Defaults, toolsThisTurn: 256);
         Assert.Contains("Closed-loop mill ceiling", text);
+        Assert.Contains("256 tools since your last message", text);
         Assert.Contains("the current setting is 256", text);
         Assert.Contains(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.ClosedLoopMillCeiling), text);
         Assert.Contains(PortRulesPostMortem.MillBreakAdvice, text);
@@ -297,7 +299,7 @@ public sealed class PortRulesPostMortemTests
         Assert.Contains("You already passed", text);
         Assert.Contains("**Mill at omitted**", text);
         Assert.Contains("**Closed-loop lookback**", text);
-        Assert.Contains("**Closed-loop mill ceiling**", text);
+        Assert.DoesNotContain("**Closed-loop mill ceiling**", text);
         Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, text);
         Assert.DoesNotContain(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.MillAtOmitted), text);
     }
