@@ -10475,9 +10475,11 @@ public partial class MainViewModel : ViewModelBase
         _lastHealthDetail = details;
         ConnectionHealthText = details;
         RunContextFillStressTestCommand.NotifyCanExecuteChanged();
+        // The launch itself records the load time once, when llama-server and Port are both
+        // ready (FluxMuxRuntimeService, "launch SUCCESS"). Recording it here as well put two
+        // samples of every load into the eight-sample window, so it only held four loads.
         if (recordLaunchTelemetry && launchElapsedMs is int elapsedMs && elapsedMs > 0)
         {
-            _runtimeService.RecordLocalLaunchTelemetry(model, variant, elapsedMs, "ready");
             UpdateLocalLaunchTelemetrySummary();
         }
 

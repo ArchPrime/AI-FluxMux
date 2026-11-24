@@ -8634,29 +8634,59 @@ public sealed class FluxMuxRuntimeService
 		return ((double)milliseconds / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + " s";
 	}
 
-	private JsonObject GetOrCreateFluxMuxMeta(JsonObject root)
+
+	/// <summary>
+	/// Launch-time history (the load countdown's data) lives in its OWN file,
+	/// <c>local_launch_telemetry.json</c> next to the config, for the same reason as
+	/// <see cref="LastLaunchedLocalPath"/>: <c>FluxMuxConfigService.Save()</c> rewrites the whole
+	/// main config from the copy MainViewModel loaded at start-up, so history written into
+	/// <c>FluxMuxMeta.LocalLaunchTelemetry</c> was put back to its start-up state by the next
+	/// settings save. Seen 24 Nov: loads of 11-16 s all day, yet the running profile's history
+	/// still dated from 27 Oct, so the countdown never followed recent loads. The old key is
+	/// copied over once (<see cref="LoadLaunchTelemetry"/>) and then left alone in the config.
+	/// </summary>
+	private string LocalLaunchTelemetryPath
+		=> Path.Combine(Path.GetDirectoryName(_configPath) ?? AppContext.BaseDirectory, "local_launch_telemetry.json");
+
+	/// <summary>The launch history (key → entry), creating the file from the config's old key once.</summary>
+	private JsonObject LoadLaunchTelemetry()
 	{
-		JsonObject jsonObject = root["FluxMuxMeta"] as JsonObject;
-		if (jsonObject == null)
+		var path = LocalLaunchTelemetryPath;
+		if (File.Exists(path))
 		{
-			jsonObject = (JsonObject)(root["FluxMuxMeta"] = new JsonObject());
+			return LoadJsonCached(path);
 		}
-		return jsonObject;
+
+		var migrated = new JsonObject();
+		try
+		{
+			if (LoadJsonCached(_configPath)["FluxMuxMeta"]?["LocalLaunchTelemetry"] is JsonObject old)
+			{
+				migrated = (JsonObject)old.DeepClone();
+			}
+		}
+		catch
+		{
+		}
+
+		SaveLaunchTelemetry(migrated);
+		return migrated;
+	}
+
+	private void SaveLaunchTelemetry(JsonObject telemetry)
+	{
+		var path = LocalLaunchTelemetryPath;
+		AtomicFile.WriteAllTextResilient(path, telemetry.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+		DateTime written = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.UtcNow;
+		lock (_jsonCacheLock)
+		{
+			_jsonCache[path] = (written, telemetry);
+		}
 	}
 
 	private JsonObject? GetLocalLaunchTelemetryEntry(string model, string variant)
 	{
-		JsonObject jsonObject = LoadJsonCached(_configPath);
-		if (!(jsonObject["FluxMuxMeta"] is JsonObject jsonObject2))
-		{
-			System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] GetLocalLaunchTelemetryEntry: no FluxMuxMeta in config");
-			return null;
-		}
-		if (!(jsonObject2["LocalLaunchTelemetry"] is JsonObject jsonObject3))
-		{
-			System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] GetLocalLaunchTelemetryEntry: no LocalLaunchTelemetry in FluxMuxMeta");
-			return null;
-		}
+		JsonObject jsonObject3 = LoadLaunchTelemetry();
 		string propertyName = BuildLocalLaunchTelemetryKey(model, variant);
 		System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] GetLocalLaunchTelemetryEntry: looking for key='{propertyName}'");
 		var entry = jsonObject3[propertyName] as JsonObject;
@@ -8889,13 +8919,7 @@ public sealed class FluxMuxRuntimeService
 		try
 		{
 			System.Diagnostics.Debug.WriteLine($"[LaunchTelemetry] Recording: model={model}, variant={variant}, elapsedMs={elapsedMs}, status={status}");
-			JsonObject jsonObject = LoadJsonCached(_configPath);
-			JsonObject orCreateFluxMuxMeta = GetOrCreateFluxMuxMeta(jsonObject);
-			JsonObject jsonObject2 = orCreateFluxMuxMeta["LocalLaunchTelemetry"] as JsonObject;
-			if (jsonObject2 == null)
-			{
-				jsonObject2 = (JsonObject)(orCreateFluxMuxMeta["LocalLaunchTelemetry"] = new JsonObject());
-			}
+			JsonObject jsonObject2 = LoadLaunchTelemetry();
 			string propertyName = BuildLocalLaunchTelemetryKey(model, variant);
 			JsonObject jsonObject3 = jsonObject2[propertyName] as JsonObject;
 			if (jsonObject3 == null)
@@ -8931,15 +8955,7 @@ public sealed class FluxMuxRuntimeService
 			jsonObject3["slowest_ms"] = countdownMs;
 			jsonObject3["last_status"] = status;
 			jsonObject3["last_updated_utc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
-			File.WriteAllText(_configPath, jsonObject.ToJsonString(new JsonSerializerOptions
-			{
-				WriteIndented = true
-			}));
-			DateTime item = (File.Exists(_configPath) ? File.GetLastWriteTimeUtc(_configPath) : DateTime.UtcNow);
-			lock (_jsonCacheLock)
-			{
-				_jsonCache[_configPath] = (item, jsonObject);
-			}
+			SaveLaunchTelemetry(jsonObject2);
 		}
 		catch
 		{
