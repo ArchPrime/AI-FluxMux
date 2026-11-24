@@ -11,6 +11,15 @@ namespace FluxMux.Avalonia.Services;
 /// <c>tool_calls</c> when the Client app declared those names. Prose before
 /// the markup is forwarded immediately. Native grammar-mode calls go through
 /// untouched and cancel a held XML buffer (it was the same call in text form).
+///
+/// Native streamed tool calls are HELD until the call is complete (the choice's finish_reason,
+/// or [DONE]) and then sent as one piece. A streamed call arrives in fragments — the first
+/// carries the id and name with empty arguments, later ones carry only argument text — and the
+/// outgoing-write filter (<see cref="LocalSessionArtifactPolicy.FilterMessageToolCalls"/>) used
+/// to judge each fragment alone: "write, no path" was dropped, the nameless argument fragments
+/// were not, and the Client app assembled a call with no name and broken arguments. Harness
+/// failed the turn on it ("Tool call \"\": Unexpected non-whitespace character after JSON");
+/// seen 24 Nov on almost every Harness turn that wrote a file. The filter now sees whole calls.
 /// </summary>
 public sealed class LocalToolCallHealSession
 {
@@ -21,6 +30,9 @@ public sealed class LocalToolCallHealSession
     private bool _holding;
     private bool _nativeToolCalls;
     private bool _emittedFinish;
+
+    /// <summary>Native streamed tool calls being assembled, by their stream index.</summary>
+    private readonly SortedDictionary<int, JsonObject> _assembling = new();
 
     public LocalToolCallHealSession(
         IReadOnlyCollection<string> declaredTools,
@@ -105,6 +117,25 @@ public sealed class LocalToolCallHealSession
 
     public IReadOnlyList<string> TakeFinishChunks()
     {
+        if (_assembling.Count > 0)
+        {
+            // The stream ended without a finish_reason on the choice: send what was assembled.
+            var flush = new JsonObject();
+            var finish = FlushAssembled(flush);
+            _holding = false;
+            return ["data: " + new JsonObject
+            {
+                ["id"] = "chatcmpl-fluxmux-tool-calls",
+                ["object"] = "chat.completion.chunk",
+                ["created"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+                ["model"] = "local",
+                ["choices"] = new JsonArray
+                {
+                    new JsonObject { ["index"] = 0, ["delta"] = flush, ["finish_reason"] = finish },
+                },
+            }.ToJsonString()];
+        }
+
         if (_emittedFinish || !_holding || _nativeToolCalls || _held.Length == 0)
         {
             _holding = false;
@@ -145,7 +176,8 @@ public sealed class LocalToolCallHealSession
             }
 
             var delta = choice["delta"] as JsonObject;
-            if (delta is not null && HasStructuredCalls(delta))
+            var finishNow = choice["finish_reason"]?.ToString();
+            if (delta is not null && delta["tool_calls"] is JsonArray { Count: > 0 } streamedCalls)
             {
                 _nativeToolCalls = true;
                 if (_holding)
@@ -154,11 +186,41 @@ public sealed class LocalToolCallHealSession
                     _holding = false;
                 }
 
-                if (LocalSessionArtifactPolicy.FilterMessageToolCalls(delta, _artifacts) > 0)
+                foreach (var fragment in streamedCalls.OfType<JsonObject>())
                 {
-                    BlockedWrites = true;
+                    MergeFragment(fragment);
                 }
 
+                delta.Remove("tool_calls");
+            }
+
+            if (_assembling.Count > 0)
+            {
+                if (!string.IsNullOrEmpty(finishNow))
+                {
+                    if (delta is null)
+                    {
+                        delta = new JsonObject();
+                        choice["delta"] = delta;
+                    }
+
+                    choice["finish_reason"] = FlushAssembled(delta);
+                    continue;
+                }
+
+                // Still assembling: forward the chunk only if it carries something else.
+                if (!HasOtherDeltaFields(delta))
+                {
+                    forward = false;
+                }
+
+                continue;
+            }
+
+            if (delta is not null && HasStructuredCalls(delta))
+            {
+                // Legacy single function_call: passed through as before.
+                _nativeToolCalls = true;
                 continue;
             }
 
@@ -234,6 +296,87 @@ public sealed class LocalToolCallHealSession
         }
 
         return forward;
+    }
+
+    /// <summary>Adds one streamed fragment to the call with the same index.</summary>
+    private void MergeFragment(JsonObject fragment)
+    {
+        var index = fragment["index"] is JsonValue v && v.TryGetValue<int>(out var i) ? i : _assembling.Count;
+        if (!_assembling.TryGetValue(index, out var call))
+        {
+            call = new JsonObject { ["type"] = "function", ["function"] = new JsonObject { ["name"] = "", ["arguments"] = "" } };
+            _assembling[index] = call;
+        }
+
+        if (fragment["id"]?.ToString() is { Length: > 0 } id)
+        {
+            call["id"] = id;
+        }
+
+        if (fragment["type"]?.ToString() is { Length: > 0 } type)
+        {
+            call["type"] = type;
+        }
+
+        if (fragment["function"] is JsonObject function)
+        {
+            var target = (JsonObject)call["function"]!;
+            if (function["name"]?.ToString() is { Length: > 0 } name)
+            {
+                target["name"] = (target["name"]?.ToString() ?? string.Empty) + name;
+            }
+
+            if (function["arguments"]?.ToString() is { Length: > 0 } args)
+            {
+                target["arguments"] = (target["arguments"]?.ToString() ?? string.Empty) + args;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Puts the assembled calls (whole, filtered) onto <paramref name="delta"/> and returns the
+    /// finish_reason to send: tool_calls when any call is left, stop when all were dropped.
+    /// </summary>
+    private string FlushAssembled(JsonObject delta)
+    {
+        var calls = new JsonArray();
+        foreach (var call in _assembling.Values)
+        {
+            calls.Add(call);
+        }
+
+        _assembling.Clear();
+        var message = new JsonObject { ["tool_calls"] = calls };
+        if (ReadDeltaContent(delta).Length > 0)
+        {
+            message["content"] = ReadDeltaContent(delta);
+        }
+
+        if (LocalSessionArtifactPolicy.FilterMessageToolCalls(message, _artifacts) > 0)
+        {
+            BlockedWrites = true;
+        }
+
+        if (message["tool_calls"] is JsonArray { Count: > 0 } kept)
+        {
+            for (var i = 0; i < kept.Count; i++)
+            {
+                if (kept[i] is JsonObject call)
+                {
+                    call["index"] = i;
+                }
+            }
+
+            delta["tool_calls"] = kept.DeepClone();
+            return "tool_calls";
+        }
+
+        if (message["content"]?.ToString() is { Length: > 0 } note && ReadDeltaContent(delta).Length == 0)
+        {
+            delta["content"] = note;
+        }
+
+        return "stop";
     }
 
     private bool TryHealHeld(string held, out JsonObject chunk, bool includeFinish = true)
