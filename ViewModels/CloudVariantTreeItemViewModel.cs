@@ -12,13 +12,29 @@ public sealed partial class CloudVariantTreeItemViewModel : ObservableObject
     private static readonly IBrush DefaultHeaderBorder = new SolidColorBrush(Color.FromRgb(0x1E, 0x29, 0x3B));
     private static readonly IBrush DefaultHeaderForeground = new SolidColorBrush(Color.FromRgb(0xF8, 0xFA, 0xFC));
     private static readonly IBrush DefaultHeaderMuted = new SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE1));
-    private static readonly IBrush CopyHeaderBackground = new SolidColorBrush(Color.FromRgb(0xF3, 0xF4, 0xF6));
-    private static readonly IBrush CopyHeaderBorder = new SolidColorBrush(Color.FromRgb(0xCB, 0xD5, 0xE1));
-    private static readonly IBrush CopyHeaderForeground = new SolidColorBrush(Color.FromRgb(0x0F, 0x17, 0x2A));
-    private static readonly IBrush CopyHeaderMuted = new SolidColorBrush(Color.FromRgb(0x47, 0x55, 0x69));
-    private static readonly IBrush ValidatedStatusForeground = new SolidColorBrush(Color.FromRgb(0x15, 0x80, 0x3D));
-    private static readonly IBrush StaleStatusForeground = new SolidColorBrush(Color.FromRgb(0xB4, 0x53, 0x09));
-    private static readonly IBrush PendingStatusForeground = new SolidColorBrush(Color.FromRgb(0x47, 0x55, 0x69));
+    // The default profile's header is dark in both themes. A variant's header and the status
+    // colours follow the theme: these brushes are shared by every row and their colour is swapped
+    // by ApplyTheme, so all bound rows update together. They were fixed light colours, so in Dark
+    // every variant row stayed near-white with dark text (26 Nov).
+    private static readonly SolidColorBrush CopyHeaderBackground = new(Color.FromRgb(0xF3, 0xF4, 0xF6));
+    private static readonly SolidColorBrush CopyHeaderBorder = new(Color.FromRgb(0xCB, 0xD5, 0xE1));
+    private static readonly SolidColorBrush CopyHeaderForeground = new(Color.FromRgb(0x0F, 0x17, 0x2A));
+    private static readonly SolidColorBrush CopyHeaderMuted = new(Color.FromRgb(0x47, 0x55, 0x69));
+    private static readonly SolidColorBrush ValidatedStatusForeground = new(Color.FromRgb(0x15, 0x80, 0x3D));
+    private static readonly SolidColorBrush StaleStatusForeground = new(Color.FromRgb(0xB4, 0x53, 0x09));
+    private static readonly SolidColorBrush PendingStatusForeground = new(Color.FromRgb(0x47, 0x55, 0x69));
+
+    /// <summary>Sets the theme-dependent row colours (called whenever the app theme is applied).</summary>
+    public static void ApplyTheme(bool dark)
+    {
+        CopyHeaderBackground.Color = dark ? Color.FromRgb(0x1F, 0x29, 0x37) : Color.FromRgb(0xF3, 0xF4, 0xF6);
+        CopyHeaderBorder.Color = dark ? Color.FromRgb(0x37, 0x41, 0x51) : Color.FromRgb(0xCB, 0xD5, 0xE1);
+        CopyHeaderForeground.Color = dark ? Color.FromRgb(0xF1, 0xF5, 0xF9) : Color.FromRgb(0x0F, 0x17, 0x2A);
+        CopyHeaderMuted.Color = dark ? Color.FromRgb(0x94, 0xA3, 0xB8) : Color.FromRgb(0x47, 0x55, 0x69);
+        ValidatedStatusForeground.Color = dark ? Color.FromRgb(0x4A, 0xDE, 0x80) : Color.FromRgb(0x15, 0x80, 0x3D);
+        StaleStatusForeground.Color = dark ? Color.FromRgb(0xFB, 0xBF, 0x24) : Color.FromRgb(0xB4, 0x53, 0x09);
+        PendingStatusForeground.Color = dark ? Color.FromRgb(0x94, 0xA3, 0xB8) : Color.FromRgb(0x47, 0x55, 0x69);
+    }
 
     public CloudVariantTreeItemViewModel(
         string modelName,

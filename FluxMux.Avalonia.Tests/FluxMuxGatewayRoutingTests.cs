@@ -411,7 +411,7 @@ public sealed class FluxMuxGatewayRoutingTests
             payload));
         var filling = FluxMuxGatewayRouting.FormatFillingBlockedMessage(state, payload);
         Assert.Contains("This chat turn failed as it was too large to fit into the remaining Context space", filling, System.StringComparison.Ordinal);
-        Assert.Contains("Hail Mary", filling, System.StringComparison.Ordinal);
+        Assert.Contains("Create hand over brief for fresh chat", filling, System.StringComparison.Ordinal);
         Assert.Contains("Consider making a more focussed or simpler request", filling, System.StringComparison.Ordinal);
         Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, filling, System.StringComparison.Ordinal);
         Assert.DoesNotContain("AI-FluxMux measured the messages", FluxMuxGatewayRouting.LocalFillingBlockedMessage, System.StringComparison.Ordinal);

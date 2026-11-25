@@ -494,19 +494,6 @@ public partial class MainViewModel : ViewModelBase
         {
             SafeUiInvoke(() => ApplyHailMaryOffer(line));
         };
-        // When an armed Hail Mary rear-prune is actually consumed on a turn, clear the "queued"
-        // pulse (the button is a one-off) and refresh the context gauge with the new, smaller
-        // prompt-token count. This is the "clear pulsing when the action has actually occurred"
-        // fix: previously HailMaryQueued was only cleared on a failure report, so a successful
-        // (or no-op) armed prune left the pulse running forever.
-        _runtimeService.HailMaryAppliedNotice += tokens =>
-        {
-            SafeUiInvoke(() =>
-            {
-                HailMaryQueued = false;
-                SetHailMaryOutcome("Prune applied");
-            });
-        };
         // Surface every gateway log line (Hail Mary results, context
         // measurements, route decisions) into the live diagnostic terminal so the user can see
         // what is happening, especially during significant delays.
@@ -862,6 +849,7 @@ public partial class MainViewModel : ViewModelBase
         OnPropertyChanged(nameof(HailMaryRescueLabel));
         OnPropertyChanged(nameof(HailMarySmolAvailable));
         OnPropertyChanged(nameof(HailMaryUsesClientStrategy));
+        OnPropertyChanged(nameof(HailMaryHasNoOption));
     }
 
     /// <summary>
@@ -3077,6 +3065,55 @@ public partial class MainViewModel : ViewModelBase
         PostRecoveryFollowThrough(RefreshCloudRecommendBanner);
     }
 
+    /// <summary>
+    /// "Create hand over brief for fresh chat": builds <see cref="HandoverBrief"/> from the latest
+    /// chat that came through Port, copies it to the clipboard and saves it in a "Hand over briefs"
+    /// folder beside the config, so a task parked for weeks can be picked up from the file. Used to
+    /// recover a stuck chat, to move a task to another Client app or model, or to park it.
+    /// </summary>
+    [RelayCommand]
+    private async Task CreateHandoverBrief()
+    {
+        var latest = global::FluxMux.Avalonia.Services.FluxMuxGatewayHost.LatestChat();
+        var brief = latest is { } chat ? HandoverBrief.Build(chat.Messages, chat.ClientApp, chat.SentUtc) : null;
+        if (brief is null)
+        {
+            StatusMessage = "No chat to brief from yet: a hand over brief is made from the latest chat a Client app sent through Port.";
+            return;
+        }
+
+        string? savedAs = null;
+        try
+        {
+            var folder = Path.Combine(Path.GetDirectoryName(_configService.ConfigPath) ?? AppContext.BaseDirectory, "Hand over briefs");
+            Directory.CreateDirectory(folder);
+            savedAs = Path.Combine(folder, HandoverBrief.FileName(latest!.Value.Messages, latest.Value.SentUtc));
+            await File.WriteAllTextAsync(savedAs, brief);
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "Could not save the hand over brief (" + ex.Message + "); trying the clipboard.";
+            savedAs = null;
+        }
+
+        var copied = false;
+        var clipboard = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow?.Clipboard;
+        if (clipboard is not null)
+        {
+            try
+            {
+                await clipboard.SetTextAsync(brief);
+                copied = true;
+            }
+            catch
+            {
+            }
+        }
+
+        StatusMessage = (copied ? "Hand over brief copied: paste it as the first message of a new chat." : "Clipboard unavailable.")
+            + (savedAs is null ? string.Empty : " Saved as " + savedAs);
+    }
+
     [RelayCommand]
     private async Task RunGitCheckpoint()
     {
@@ -5129,62 +5166,20 @@ public partial class MainViewModel : ViewModelBase
         _runtimeService.Supervisor?.LogLaunchMonitor(
             "[HailMary] HailMaryShrinkTurn invoked (clientShortens=" + UserClientReinflatesContext +
             ", clineRescue=" + HailMaryRescueAvailable + ", selectedStrategy=" + HailMarySelectedStrategy + ")");
-        // Default, for every Client app: the AI-FluxMux trim below. The Client app resends its
-        // full chat on later turns, but AI-FluxMux compaction (or, when the profile leaves
-        // shortening to the Client app, the 95 % last resort) keeps those turns fitting, so the
-        // revived chat stays alive. Cline extras, when picked and usable for this Client app:
-        // WaitForCline (Cline's own /smol, also for Cline forks set to Other) and ExternalRescue
-        // (write Cline's .compaction.json when Cline itself is stuck).
+        // Every option here works on the Client app's own side: /smol, or rebuilding the chat in
+        // its files. "Trimming it in AI-FluxMux" was retired (26 Nov): it cut only the next
+        // request, the Client app resent the whole chat after it, and the automatic compaction
+        // and 95 % last resort already did the rest. A Client app with neither option is pointed
+        // to the hand over brief.
         if (HailMaryUsesClientStrategy)
         {
             RunClineCompactionStrategy();
             return;
         }
 
-        // The non-destructive prune pipeline (stages 1-4) already ran automatically when the
-        // turn 400'd on context overflow. This button runs a one-off REAR-context prune: it
-        // drops older conversational turns (the "rear") so the full forward turn can complete
-        // with the headroom the chosen stop requests. The system prompt, last real user task,
-        // and active tool-pair are always preserved. Not persisted — a one-off emergency choice.
-        System.Diagnostics.Debug.WriteLine("[HailMary] Button clicked, requesting rear-context prune stop=" + HailMaryAggressionStop + " stripImages=" + HailMaryStripImages);
-        HailMaryBannerVisible = false;
-        HailMaryQueued = true;
-        var stopName = HailMaryAggressionStop switch
-        {
-            HailMaryCompaction.HailMaryAggression.Gentle => "Gentle",
-            HailMaryCompaction.HailMaryAggression.Aggressive => "Aggressive",
-            _ => "Balanced"
-        };
-        var imgBit = HailMaryStripImages ? ", strip older images" : string.Empty;
-        SetHailMaryOutcome("Armed — prunes next turn");
-        StatusMessage = "Hail Mary Context Trim armed (" + stopName + imgBit + "): the next turn you send will have its older history trimmed to make room. Send your reply now.";
-        _runtimeService.RequestHailMaryMiddleCut(HailMaryAggressionStop, HailMaryStripImages);
+        StatusMessage = "Hail Mary has no rescue for " + HailMaryClientApp
+            + ". Use Create hand over brief for fresh chat and paste it into a new chat.";
         ResetHailMaryPicker();
-        if (string.Equals(HailMaryClientApp, "DeepSeek Harness", StringComparison.OrdinalIgnoreCase))
-        {
-            _ = ContinueHarnessAfterHailMaryAsync();
-        }
-    }
-
-    /// <summary>
-    /// Harness after a failed turn waits for the user. Rather than make them send something,
-    /// ask Harness (through its own local web interface) to retry the failed turn in the same
-    /// chat; the armed trim then shortens that retry so it fits. Falls back to asking the user
-    /// to send a message when Harness is not reachable or declines.
-    /// </summary>
-    private async Task ContinueHarnessAfterHailMaryAsync()
-    {
-        var sessionId = DeepSeekHarnessSetup.ResolveMostRecentSessionId();
-        var port = (int)HarnessWebPort;
-        var openUrl = DeepSeekHarnessSetup.ResolveOpenChatUrl(port);
-        DeepSeekHarnessSetup.TryExtractWebAuthToken(openUrl, out var authToken);
-        var asked = sessionId is not null
-            && await DeepSeekHarnessSetup.TryContinueFailedSessionAsync(port, authToken, sessionId).ConfigureAwait(true);
-        _runtimeService.Supervisor?.LogLaunchMonitor(
-            "[HailMary] Harness retry of the failed turn " + (asked ? "requested" : "not possible") + " (session " + (sessionId ?? "none") + ")");
-        StatusMessage = asked
-            ? "Hail Mary Context Trim armed, and Harness was asked to retry the failed turn in the same chat. Watch it continue in Harness."
-            : "Hail Mary Context Trim armed. Harness could not be asked to retry by itself, so send a message (for example \"continue\") in the same Harness chat.";
     }
 
     private bool CanHailMaryShrinkTurn => HailMaryButtonVisible;
@@ -5192,13 +5187,21 @@ public partial class MainViewModel : ViewModelBase
     // ── Hail Mary Cline compaction strategies (Stage 0 = wait-for-cline, Stage 1 = external rescue) ──
 
     /// <summary>
-    /// The Cline compaction strategy selected in the Hail Mary picker. Default is WaitForCline
-    /// (the existing /smol behavior). Stage 1 adds ExternalRescue. Not persisted — resets each
-    /// time the picker opens.
+    /// The option selected in the Hail Mary picker (see <see cref="DefaultHailMaryStrategy"/>).
+    /// Not persisted — resets each time the picker opens.
     /// </summary>
     [ObservableProperty]
     public partial global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy HailMarySelectedStrategy { get; set; }
-        = global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.TrimInAiFluxMux;
+        = global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue;
+
+    /// <summary>
+    /// The option the picker opens on: rebuilding the chat in the Client app's files when this
+    /// Client app has that rescue (it works even when the chat no longer answers), else /smol.
+    /// </summary>
+    private global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy DefaultHailMaryStrategy
+        => HailMaryRescueAvailable || !HailMarySmolAvailable
+            ? global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue
+            : global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.WaitForCline;
 
     /// <summary>
     /// The "can't continue — rebuild from outside" rescue for the selected Client app: a built-in
@@ -5278,13 +5281,15 @@ public partial class MainViewModel : ViewModelBase
         !string.Equals(HailMaryClientApp, "DeepSeek Harness", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// True when the chosen Hail Mary strategy runs on the Client app's side (/smol or Cline's
-    /// compaction file) rather than as the AI-FluxMux trim. A Cline strategy the current Client
-    /// app cannot use falls back to the trim, so a dead chat is always revived somehow.
+    /// True when the chosen Hail Mary option can run for the current Client app (/smol, or its
+    /// "can't continue" rescue). False when that Client app has neither.
     /// </summary>
     public bool HailMaryUsesClientStrategy =>
         (HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.WaitForCline && HailMarySmolAvailable)
         || (HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue && HailMaryRescueAvailable);
+
+    /// <summary>True when the current Client app has neither /smol nor a rescue: the picker then points to the hand over brief.</summary>
+    public bool HailMaryHasNoOption => !HailMarySmolAvailable && !HailMaryRescueAvailable;
 
     /// <summary>
     /// True when a rescue compaction has been prepared and is awaiting user confirmation. While
@@ -5587,21 +5592,7 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// One-off Hail Mary aggression stop chosen on the button (default Balanced). Not
-    /// persisted — resets each time the button/banner becomes visible.
-    /// </summary>
-    [ObservableProperty]
-    public partial HailMaryCompaction.HailMaryAggression HailMaryAggressionStop { get; set; } = HailMaryCompaction.HailMaryAggression.Balanced;
-
-    /// <summary>
-    /// One-off Hail Mary choice: also strip older embedded images (independent of the stop).
-    /// Default off. Not persisted.
-    /// </summary>
-    [ObservableProperty]
-    public partial bool HailMaryStripImages { get; set; }
-
-    /// <summary>
-    /// Resets the one-off Hail Mary picker to its defaults (Balanced, no image-strip). Called
+    /// Resets the one-off Hail Mary picker to its defaults. Called
     /// when the button/banner becomes visible so each emergency choice starts fresh.
     /// </summary>
     private void ResetHailMaryPicker()
@@ -5613,9 +5604,7 @@ public partial class MainViewModel : ViewModelBase
             "[HailMary] ResetHailMaryPicker (wasPending=" + HailMaryRescuePending +
             ", queued=" + HailMaryQueued + ") caller=" +
             System.Environment.StackTrace.Split('\n').SkipWhile(l => !l.Contains("MainViewModel")).FirstOrDefault()?.Trim());
-        HailMaryAggressionStop = HailMaryCompaction.HailMaryAggression.Balanced;
-        HailMaryStripImages = false;
-        HailMarySelectedStrategy = global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.TrimInAiFluxMux;
+        HailMarySelectedStrategy = DefaultHailMaryStrategy;
         HailMaryHeadroom = global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroomPolicy.Default;
         HailMaryRescuePending = false;
         HailMaryRescuePreview = string.Empty;
@@ -11110,6 +11099,20 @@ public partial class MainViewModel : ViewModelBase
             ConnectionHealthText = result.Details;
             SwitchBenchmarkResultText = "Test complete.\n\n" + result.Details;
             UpdateSwitchBenchmarkDisplay(result);
+            // The test ends with Profile A loaded (its last phase, or put back after a failure), but
+            // the route was cleared above, so the Diagnostics header fell back to whatever profile
+            // the Model Profiles editor had selected (26 Nov it named "YaRN test 393k" while max
+            // fidelity was running). Record Profile A as mounted, as a normal Launch does.
+            if (profileA.RouteType.Equals("Local", StringComparison.OrdinalIgnoreCase))
+            {
+                LocalRouteIndicatorState = RouteIndicatorState.Live;
+                RememberMountedLocal(profileA.Model, profileA.Variant);
+            }
+            else
+            {
+                CloudRouteIndicatorState = RouteIndicatorState.Live;
+                RememberMountedCloud(profileA.Provider, profileA.Model, profileA.Variant);
+            }
             _benchmarkStatusActive = false;
             _benchmarkProgressText = string.Empty;
             StopLocalLaunchCountdownMonitor();
@@ -16582,7 +16585,10 @@ public partial class MainViewModel : ViewModelBase
         }
 
         HailMaryBannerText = text;
-        HailMaryBannerTooltip = "What it does: removes older turns from what is sent to the model so the current turn fits its Context. Your latest task and the most recent turns are kept, and a short summary of what the removed turns established (goal, decisions, dead ends) is added. Your chat app still has the full conversation.\n\nWhen to use: a last resort to revive a chat that grew too big before auto-compact could step in.\n\nTrade-off: the model loses the detail of the removed turns, so it may repeat some work. That is still far less disruptive than starting a new chat. If you have a model with more Context ready, such as a cloud model, switching to it keeps the whole chat instead.";
+        HailMaryBannerTooltip = "AI-FluxMux already shortened the chat it forwards, and this turn still does not fit.\n\n"
+            + "Create hand over brief for fresh chat copies a brief of this chat (the opening request and latest turns word for word, the rest summarised) to paste as the first message of a new chat.\n\n"
+            + "Hail Mary rebuilds this chat in the Client app's own files, where AI-FluxMux knows how (Cline, Harness), so it continues in place.\n\n"
+            + "A model profile with more Context, or a cloud model, keeps the whole chat instead.";
         HailMaryBannerUrgency = 0; // red — this is a failure state
         HailMaryBannerVisible = true;
         // Do NOT reset the picker or clear the queued flag while a rescue is awaiting confirmation

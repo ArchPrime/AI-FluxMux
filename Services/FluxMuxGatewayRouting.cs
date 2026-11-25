@@ -27,8 +27,8 @@ public static class FluxMuxGatewayRouting
     public const string LocalFillingBlockedMessage =
         "This chat turn failed as it was too large to fit into the remaining Context space. "
         + "You can try recovering the chat by launching a model profile with larger Context, if you have one, "
-        + "or using the **Hail Mary** context trimmer, then retrying. "
-        + "Otherwise start a new chat. Consider making a more focussed or simpler request.";
+        + "then retrying. Otherwise start a new chat: AI-FluxMux's **Create hand over brief for fresh chat** "
+        + "writes a brief to paste into it. Consider making a more focussed or simpler request.";
     /// <summary>
     /// Standard overflow wording added to a too-large refusal. Harness (and other Client apps
     /// built on OpenAI-style error handling) only start their own recovery — compact the chat and
@@ -48,21 +48,8 @@ public static class FluxMuxGatewayRouting
     public const string LocalContextOverflowMessage =
         "This chat turn failed as it was too large to fit into the remaining Context space. "
         + "You can try recovering the chat by launching a model profile with larger Context, if you have one, "
-        + "or using the **Hail Mary** context trimmer, then retrying. "
-        + "Otherwise start a new chat. Consider making a more focussed or simpler request.";
-    /// <summary>
-    /// Honest "turn too large" message (Fix 2). Appended to the block message when a Hail Mary
-    /// middle-cut was applied but the prompt STILL exceeds the window even after trimming history
-    /// down to the protected floor (system + initial brief + last task + recent turns). This tells
-    /// the user the turn itself is too big to fit — trimming history won't help — and points them
-    /// to the real options (bigger-context model, or a smaller turn).
-    /// </summary>
-    public const string LocalTurnTooLargeAfterTrimMessage =
-        "Note: Hail Mary already trimmed the older context (keeping the system prompt, your initial request, "
-        + "and the most recent turns), but this turn is still too large to fit even with that. "
-        + "Trimming more history won't help — the turn itself is bigger than the free space. "
-        + "Use a model profile with a larger Context, or make this turn smaller (e.g. read the file in chunks, "
-        + "or paste less).";
+        + "then retrying. Otherwise start a new chat: AI-FluxMux's **Create hand over brief for fresh chat** "
+        + "writes a brief to paste into it. Consider making a more focussed or simpler request.";
     public const string RepeatedToolType = "cline_repeated_command";
     public const string RepeatedToolMessage =
         PortRulesPostMortem.ChatTurnCannotContinue
@@ -527,8 +514,7 @@ public static class FluxMuxGatewayRouting
         int promptChars = 0,
         string? lastServedKind = null,
         string? lastServedCloudLabel = null,
-        string? portRuleDetails = null,
-        bool hailMaryStillOver = false)
+        string? portRuleDetails = null)
         => LoadedLocalCannotTakeTurn(state, payload)
             ? FormatLocalVisionUnavailableMessage(state)
             : FormatFillingBlockedMessage(
@@ -537,8 +523,7 @@ public static class FluxMuxGatewayRouting
                 promptChars,
                 lastServedKind,
                 lastServedCloudLabel,
-                portRuleDetails,
-                hailMaryStillOver);
+                portRuleDetails);
 
     public static string FormatForwardedBasis(JsonObject state, JsonObject payload, int promptChars = 0)
     {
@@ -576,8 +561,7 @@ public static class FluxMuxGatewayRouting
         int promptChars = 0,
         string? lastServedKind = null,
         string? lastServedCloudLabel = null,
-        string? portRuleDetails = null,
-        bool hailMaryStillOver = false)
+        string? portRuleDetails = null)
     {
         _ = payload;
         _ = promptChars;
@@ -585,14 +569,6 @@ public static class FluxMuxGatewayRouting
             ? LocalReloadRouting.FormatCloudContextLead(lastServedCloudLabel)
             : LocalFillingBlockedMessage;
         var finished = PortRulesPostMortem.FinishClientError(body, portRuleDetails);
-        // Honest "turn too large" message (Fix 2): when a Hail Mary middle-cut was applied but
-        // the prompt STILL exceeds the window even after trimming history down to the protected
-        // floor (system + initial brief + last task + recent turns), the turn itself is too big
-        // to fit. Say so plainly instead of silently re-blocking with the generic message.
-        if (hailMaryStillOver)
-        {
-            finished += " " + LocalTurnTooLargeAfterTrimMessage;
-        }
         return WithStandardOverflowPhrase(state, finished);
     }
 

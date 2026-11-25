@@ -24,7 +24,6 @@
 
     <Window.Resources>
         <vm:StringToVisibilityConverter x:Key="StringToVisibility" />
-        <vm:HailMaryStopToBoolConverter x:Key="HailMaryStopToBool" />
         <vm:HailMaryStrategyToBoolConverter x:Key="HailMaryStrategyToBool" />
         <vm:HailMaryHeadroomToBoolConverter x:Key="HailMaryHeadroomToBool" />
         <x:String x:Key="IdleTimeoutTooltip">Set how many idle minutes before AI-FluxMux stops the local model. This saves power, and frees VRAM for other apps. A reply that is still being prepared does not count as idle, even if that turn takes a long time. While a reply is being worked on, AI-FluxMux asks Windows to stay awake so the turn can finish. Note however that if using a laptop, closing the lid can still trigger sleep. Windows can also sleep when no reply is in progress. After the PC wakes, idle time includes the time spent asleep. After an idle timeout, when you send the next chat, the local model must reload and rebuild the context from the chat history, which is slower and risks reduced model understanding of what was most pertinent. Leave the idle timeout setting off to keep the local model loaded and ready in memory.</x:String>
@@ -3331,37 +3330,19 @@
                                        TextWrapping="Wrap"
                                        FontSize="{DynamicResource FluxFontSizeBody}" />
                             <WrapPanel>
-                                <TextBlock Text="Prune:" VerticalAlignment="Center" Margin="0,0,4,4" FontSize="{DynamicResource FluxFontSizeBody}" />
-                                <RadioButton Content="Gentle"
-                                             GroupName="HailMaryBannerStop"
-                                             IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Gentle}"
-                                             Margin="0,0,8,4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeBody}"
-                                             ToolTip.Tip="Keep ~8 recent turns; just fit under the window." />
-                                <RadioButton Content="Balanced"
-                                             GroupName="HailMaryBannerStop"
-                                             IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Balanced}"
-                                             Margin="0,0,8,4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeBody}"
-                                             ToolTip.Tip="Keep ~4 recent turns; leave ~20% room for the reply." />
-                                <RadioButton Content="Aggressive"
-                                             GroupName="HailMaryBannerStop"
-                                             IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Aggressive}"
-                                             Margin="0,0,8,4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeBody}"
-                                             ToolTip.Tip="Keep ~2 recent turns; leave ~40% room for the reply." />
-                                <CheckBox Content="also strip older images"
-                                          IsChecked="{Binding HailMaryStripImages}"
-                                          Margin="0,0,8,4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeBody}"
-                                          ToolTip.Tip="Also strip older embedded images (keeps the most recent). Independent of the prune stop." />
-                            </WrapPanel>
-                            <WrapPanel>
-                                <Button Content="Hail Mary Context Trim: shrink this turn"
+                                <Button Content="📝 Create hand over brief for fresh chat"
                                         Margin="0,0,8,4"
-                                        Command="{Binding HailMaryShrinkTurnCommand}"
-                                        Click="HailMaryBannerShrink_Click"
-                                        ToolTip.Tip="Prunes the older turns from this chat's forwarded history (keeping the system prompt, your last task, and the chosen number of recent turns) so the reply has room to complete. It applies to the next message the Client app sends: send or retry your message (for Harness, AI-FluxMux also asks Harness to retry the failed turn). The Client app still has the full chat." />
+                                        FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                        Command="{Binding CreateHandoverBriefCommand}"
+                                        ToolTip.Tip="Copies a brief of this chat to paste as the first message of a new chat, and saves it in the Hand over briefs folder." />
+                                <Button Content="Hail Mary…"
+                                        Margin="0,0,8,4"
+                                        Click="HailMaryBannerOpen_Click"
+                                        ToolTip.Tip="Rebuild this chat in the Client app's own files so it continues in place (Cline, Harness), or ask Cline to compact itself with /smol." />
                                 <Button Content="Dismiss"
                                         Margin="0,0,8,4"
                                         Command="{Binding DismissHailMaryBannerCommand}"
-                                        ToolTip.Tip="Hide this suggestion. Start a fresh chat or take another action instead." />
+                                        ToolTip.Tip="Hide this suggestion." />
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -3439,7 +3420,7 @@
 
                 <!-- Row 1: Diagnostics label + controls -->
                 <StackPanel Grid.Row="1" Spacing="4">
-                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="6" ClipToBounds="False" VerticalAlignment="Top">
+                    <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto,Auto,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="6" ClipToBounds="False" VerticalAlignment="Top">
                         <TextBlock Grid.Column="0" VerticalAlignment="Center" FontWeight="SemiBold" Text="Diagnostics" />
                         <shapes:Ellipse Grid.Column="1"
                                         Width="14"
@@ -3478,12 +3459,12 @@
                                 VerticalContentAlignment="Center"
                                 FontFamily="Segoe UI Emoji, Segoe UI, Arial"
                                 FontSize="{DynamicResource FluxFontSizeBody}"
-                                Content="🙏&#xFE0E; Hail Mary Context Trim"
+                                Content="🙏&#xFE0E; Hail Mary"
                                 Background="#1A1A1A"
                                 Foreground="White"
                                 BorderBrush="#333333"
                                 Click="HailMaryButton_Click"
-                                ToolTip.Tip="Use when this turn has run out of room and context compaction did not kick in in time.&#10;&#10;Any Client app (the default): older turns are removed from what is sent to the model, keeping your latest task and recent turns, and a short summary of what they established is added. Send your next message to run it; for Harness, AI-FluxMux also asks Harness to retry the failed turn.&#10;&#10;Cline, and Cline forks set to Client app Other, can instead be asked to compact the chat themselves with /smol (VS Code takes focus briefly).&#10;&#10;When the Client app no longer responds at all, or will not reopen the chat, the &#x27;can&#x27;t continue&#x27; option rebuilds the stuck chat in the Client app&#x27;s own files from the session note and reopens it. Built in for Cline and Harness; other Client apps can be added under RescueAdapters in fluxmux_config.json.&#10;&#10;This keeps the chat going on a local model at some cost to fidelity. Switching to a model with more Context is better if you have one." />
+                                ToolTip.Tip="Use when a chat is stuck: refused as too large, or the Client app no longer answers or will not reopen it.&#10;&#10;Rebuild the chat in the Client app&#x27;s own files from the session note, keeping the most recent messages, and reopen it so it continues in place. Built in for Cline and Harness; other Client apps can be added under RescueAdapters in fluxmux_config.json.&#10;&#10;Cline, and Cline forks set to Client app Other, can instead be asked to compact the chat themselves with /smol (VS Code takes focus briefly).&#10;&#10;For any other Client app, or to start over cleanly, use Create hand over brief for fresh chat. A model profile with more Context keeps the whole chat instead." />
                         <TextBlock Grid.Row="1" Grid.Column="4"
                                    IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
                                    HorizontalAlignment="Center"
@@ -3510,6 +3491,18 @@
                                 BorderBrush="#333333"
                                 Click="GitCheckpointButton_Click"
                                 ToolTip.Tip="Creates a git checkpoint in the workspace. This is a safety net: if the model goes off the rails, you can reset to this checkpoint.&#10;&#10;The checkpoint is a git commit with a message like 'fluxmux-checkpoint: manual checkpoint' so it's easy to find and reset to later." />
+                        <Button Grid.Row="0" Grid.Column="6"
+                                MinHeight="32"
+                                VerticalAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                FontSize="{DynamicResource FluxFontSizeBody}"
+                                Content="📝 Create hand over brief for fresh chat"
+                                Background="#1A1A1A"
+                                Foreground="White"
+                                BorderBrush="#333333"
+                                Command="{Binding CreateHandoverBriefCommand}"
+                                ToolTip.Tip="Writes a brief of the latest chat a Client app sent through Port and copies it, ready to paste as the first message of a new chat: the opening request and the latest turns word for word, and the rest summarised (your messages, decisions, values found, commands run, files changed).&#10;&#10;Use it to carry on after a chat is stuck, to move the task to another Client app or model, or to park a task for later. Each brief is also saved in the Hand over briefs folder beside the AI-FluxMux config.&#10;&#10;File contents are left out: the new chat rereads the files it needs." />
                         <Popup Grid.Row="0" x:Name="HailMaryPickerPopup"
                                 IsOpen="False"
                                 PlacementTarget="{Binding ElementName=HailMaryButton}"
@@ -3521,7 +3514,7 @@
                                     CornerRadius="4"
                                     Padding="0">
                                 <StackPanel Spacing="8" Margin="8" MinWidth="240">
-                                <TextBlock Text="Hail Mary Context Trim" FontWeight="SemiBold" FontSize="{DynamicResource FluxFontSizeBody}" />
+                                <TextBlock Text="Hail Mary" FontWeight="SemiBold" FontSize="{DynamicResource FluxFontSizeBody}" />
 
                                 <!-- ── Confirmation view (rescue prepared, awaiting confirm) ── -->
                                 <StackPanel Spacing="6" MaxWidth="360" IsVisible="{Binding HailMaryRescuePending}">
@@ -3555,21 +3548,21 @@
                                 <!-- ── Strategy / prune view (not yet pending) ── -->
                                 <StackPanel Spacing="6"
                                            IsVisible="{Binding HailMaryRescuePending, Converter={x:Static vm:InvertedBoolConverter.Instance}}">
-                                <!-- How to revive the chat. The AI-FluxMux trim works for every Client app and is the default;
-                                     /smol is offered for Cline and Cline forks (Client app Other), the external rescue for Cline only. -->
+                                <!-- How to revive the chat: the Client app's own /smol (Cline and forks set to Other), or
+                                     rebuilding the chat in its files (built in for Cline and Harness). The AI-FluxMux trim was
+                                     retired on 26 Nov; a Client app with neither is pointed to the hand over brief. -->
                                 <StackPanel Spacing="2">
                                     <TextBlock Text="Revive this chat by:" FontSize="{DynamicResource FluxFontSizeCaption}" FontWeight="SemiBold" />
-                                    <RadioButton Content="Trimming it in AI-FluxMux (any Client app)"
-                                                 GroupName="HailMaryStrategy"
-                                                 IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=TrimInAiFluxMux}"
-                                                 FontSize="{DynamicResource FluxFontSizeCaption}"
-                                                 ToolTip.Tip="Default. On the next message you send, AI-FluxMux drops older turns so the reply has room, and adds a short note of what those turns established. Works with Cline, Harness and any other Client app; for Harness, AI-FluxMux also asks Harness to retry the failed turn, so nothing needs sending. Later turns keep fitting because AI-FluxMux keeps shortening them (at the latest at 95% of the Context)." />
+                                    <TextBlock Text="This Client app has no Hail Mary rescue. Use Create hand over brief for fresh chat instead."
+                                               TextWrapping="Wrap" MaxWidth="320"
+                                               FontSize="{DynamicResource FluxFontSizeCaption}"
+                                               IsVisible="{Binding HailMaryHasNoOption}" />
                                     <RadioButton Content="Ask the Client app to compact itself (/smol)"
                                      IsVisible="{Binding HailMarySmolAvailable}"
                                                  GroupName="HailMaryStrategy"
                                                  IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=WaitForCline}"
                                                  FontSize="{DynamicResource FluxFontSizeCaption}"
-                                                 ToolTip.Tip="Waits for Cline (or a Cline fork with the same /smol command, with Client app set to Other) to finish its turn, then asks it to compact the chat with /smol. VS Code takes focus briefly. If the chat is too full for the Client app to answer /smol, use the AI-FluxMux trim instead." />
+                                                 ToolTip.Tip="Waits for Cline (or a Cline fork with the same /smol command, with Client app set to Other) to finish its turn, then asks it to compact the chat with /smol. VS Code takes focus briefly. If the chat is too full for the Client app to answer /smol, rebuild it in the Client app's files or start a new chat with a hand over brief." />
                                     <RadioButton Content="{Binding HailMaryRescueLabel}"
                                                  GroupName="HailMaryStrategy"
                                      IsVisible="{Binding HailMaryRescueAvailable}"
@@ -3598,34 +3591,10 @@
                                     </StackPanel>
                                 </StackPanel>
 
-                                <!-- Trim options (only when the AI-FluxMux trim is chosen) -->
-                                <StackPanel Spacing="6"
-                                           IsVisible="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=TrimInAiFluxMux}">
-                                    <TextBlock TextWrapping="Wrap" FontSize="{DynamicResource FluxFontSizeCaption}" Opacity="0.85"
-                                               Text="Drop older turns so the reply has room to complete. The system prompt, your last task, and the active tool-pair are always kept." />
-                                    <StackPanel Spacing="2">
-                                        <TextBlock Text="Prune strength:" FontSize="{DynamicResource FluxFontSizeCaption}" FontWeight="SemiBold" />
-                                        <RadioButton Content="Gentle — keep ~8 recent turns, just fit"
-                                                     GroupName="HailMaryDiagStop"
-                                                     IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Gentle}"
-                                                     FontSize="{DynamicResource FluxFontSizeCaption}" />
-                                        <RadioButton Content="Balanced — keep ~4 recent turns, ~20% room"
-                                                     GroupName="HailMaryDiagStop"
-                                                     IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Balanced}"
-                                                     FontSize="{DynamicResource FluxFontSizeCaption}" />
-                                        <RadioButton Content="Aggressive — keep ~2 recent turns, ~40% room"
-                                                     GroupName="HailMaryDiagStop"
-                                                     IsChecked="{Binding HailMaryAggressionStop, Converter={StaticResource HailMaryStopToBool}, ConverterParameter=Aggressive}"
-                                                     FontSize="{DynamicResource FluxFontSizeCaption}" />
-                                    </StackPanel>
-                                    <CheckBox Content="Also strip older embedded images"
-                                              IsChecked="{Binding HailMaryStripImages}"
-                                              FontSize="{DynamicResource FluxFontSizeCaption}"
-                                              ToolTip.Tip="Independent of the prune strength. Keeps the most recent image." />
-                                </StackPanel>
                                 <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button Content="Armed"
+                                    <Button Content="Start"
                                             Command="{Binding HailMaryShrinkTurnCommand}"
+                                            IsVisible="{Binding HailMaryHasNoOption, Converter={x:Static vm:InvertedBoolConverter.Instance}}"
                                             FontSize="{DynamicResource FluxFontSizeCaption}" Padding="10,4"
                                             Click="HailMaryPickerArm_Click" />
                                     <Button Content="Cancel"

@@ -321,19 +321,14 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Opens the Hail Mary picker popup when the user clicks the banner's "shrink this turn"
-    /// button when a Client-app strategy (Cline /smol or the external rescue) is chosen. The banner button and the picker's "Armed" button both run
-    /// HailMaryShrinkTurnCommand; for Cline that command prepares an external rescue whose
-    /// confirmation preview lives INSIDE the picker popup. Without opening the popup here, the
-    /// user sees the banner disappear but has no way to reach the "Confirm write" button — the
-    /// next context-overflow offer re-shows the banner and the flow loops with no exit.
-    /// For the default AI-FluxMux trim the command arms a one-off prune and needs no popup.
+    /// The banner's "Hail Mary…" button opens the picker, where the rescue is chosen and its
+    /// confirmation preview lives. Before the trim was retired (26 Nov) the banner ran the trim
+    /// directly; the rescues need the popup, or there is no way to reach "Confirm write".
     /// </summary>
-    private void HailMaryBannerShrink_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
+    private void HailMaryBannerOpen_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
     {
-        var vm = DataContext as MainViewModel;
-        vm?.RefreshClientShorteningState();
-        if (vm is not null && vm.HailMaryUsesClientStrategy && HailMaryPickerPopup is not null)
+        (DataContext as MainViewModel)?.RefreshClientShorteningState();
+        if (HailMaryPickerPopup is not null)
         {
             HailMaryPickerPopup.IsOpen = true;
         }
@@ -342,7 +337,7 @@ public partial class MainWindow : Window
     /// <summary>
     /// Toggles the Hail Mary picker popup on the Diagnostics bar. Clicking the button opens
     /// the picker (if closed) or closes it (if open). The picker's radio buttons / checkbox
-    /// update the ViewModel bindings; arming only happens on the "Armed" button.
+    /// update the ViewModel bindings; nothing runs until "Start".
     /// </summary>
     private void HailMaryButton_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
     {
@@ -363,10 +358,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Closes the Hail Mary picker popup after the user arms the prune (the "Armed" button
-    /// already ran the command; this just dismisses the popup). For the external-rescue strategy
-    /// the command is async and shows a confirmation preview inside the popup, so the popup must
-    /// STAY OPEN — only close it for the wait-for-cline / non-Cline paths.
+    /// After "Start": the rescue shows its confirmation preview inside the popup, so the popup
+    /// stays open whenever an option ran; it closes only when there was nothing to run.
     /// </summary>
     private void HailMaryPickerArm_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
     {
@@ -377,9 +370,6 @@ public partial class MainWindow : Window
 
         var vm = DataContext as MainViewModel;
 
-        // Keep the popup open for Cline mode: both the ExternalRescue strategy AND the
-        // 80%-threshold / fall-through paths can show a confirmation preview inside the
-        // popup. Only close it for the non-Cline (middle-cut) path.
         if (vm is not null && vm.HailMaryUsesClientStrategy)
         {
             return;
@@ -413,9 +403,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Closes the Hail Mary picker popup without arming the prune. The picker's radio buttons /
-    /// checkbox already updated the ViewModel bindings, so the choice is retained for next time
-    /// the popup opens (it is still one-off — arming only happens on the "Armed" button).
+    /// Closes the Hail Mary picker popup without running anything.
     /// </summary>
     private void HailMaryPickerCancel_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
     {

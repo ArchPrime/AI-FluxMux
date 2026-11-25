@@ -484,13 +484,6 @@ public sealed class FluxMuxRuntimeService
 	public event Action<string>? HailMaryOffered;
 
 	/// <summary>
-	/// Raised when an armed Hail Mary rear-prune is actually consumed on a turn (success or
-	/// no-op), carrying the new prompt-token count. The UI uses this to clear the "queued" pulse
-	/// (the button is a one-off) and to refresh the context gauge with the smaller prompt.
-	/// </summary>
-	public event Action<int>? HailMaryAppliedNotice;
-
-	/// <summary>
 	/// Raised for every gateway log line (Hail Mary results, context
 	/// measurements, route decisions, etc.) so the UI diagnostic terminal can show them live.
 	/// </summary>
@@ -577,20 +570,6 @@ public sealed class FluxMuxRuntimeService
 			CloudBreakerOpen: false);
 		return _supervisor.PredictPrefillSeconds(scenario, promptTokens, model);
 	}
-
-	/// <summary>
-	/// When armed, the next local forward applies the Hail Mary REAR-context prune to the
-	/// payload before sending, using the chosen one-off aggression stop + image-strip choice.
-	/// Set by <see cref="RequestHailMaryMiddleCut"/>, cleared after one use. Not persisted —
-	/// a one-off emergency choice.
-	/// </summary>
-	private volatile bool _hailMaryMiddleCutRequested;
-
-	/// <summary>The one-off Hail Mary aggression stop chosen on the button (default Balanced).</summary>
-	private HailMaryCompaction.HailMaryAggression _hailMaryAggression = HailMaryCompaction.HailMaryAggression.Balanced;
-
-	/// <summary>Whether the one-off Hail Mary choice also strips older embedded images.</summary>
-	private volatile bool _hailMaryStripImages;
 
 	private sealed record ParkedLocalLaunch(
 		string Model,
@@ -908,12 +887,10 @@ public sealed class FluxMuxRuntimeService
 		host.VibeScope = new FluxMux.Avalonia.Services.ContextEngine.VibeConversationScope(_vibeStatePath, essenceLogPath);
 		host.EssenceReasserter = new FluxMux.Avalonia.Services.ContextEngine.EssenceReasserter(essenceLog);
 
-		host.ReportHailMaryApplied = tokens => HailMaryAppliedNotice?.Invoke(tokens);
 		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);
 		host.ReportPortRulesTelemetry = snap => PortRulesTelemetryNotice?.Invoke(snap);
 		host.ReportContextUsage = WriteLocalContextUsage;
 		host.ReportHailMaryOffer = line => OfferHailMary(line);
-		host.ConsumeHailMaryMiddleCut = ConsumeHailMaryMiddleCutRequest;
 		host.ReportLog = line =>
 		{
 			// Only forward user-relevant lines to the terminal. The gateway logs many internal
@@ -2062,42 +2039,6 @@ public sealed class FluxMuxRuntimeService
 				WriteIndented = true
 			}));
 		}
-	}
-
-	/// <summary>
-	/// Requests that the next local forward apply the Hail Mary stage-5 middle-cut to the
-	/// payload before sending. Called by the UI when the user clicks the Hail Mary button.
-	/// The flag is consumed by the gateway on the next forward and cleared.
-	/// </summary>
-	public void RequestHailMaryMiddleCut()
-		=> RequestHailMaryMiddleCut(HailMaryCompaction.HailMaryAggression.Balanced, stripImages: false);
-
-	/// <summary>
-	/// Arms the one-off Hail Mary REAR-context prune for the next local forward, with the
-	/// chosen aggression stop and image-strip choice. Not persisted.
-	/// </summary>
-	public void RequestHailMaryMiddleCut(HailMaryCompaction.HailMaryAggression stop, bool stripImages)
-	{
-		_hailMaryAggression = stop;
-		_hailMaryStripImages = stripImages;
-		_hailMaryMiddleCutRequested = true;
-	}
-
-	/// <summary>
-	/// Returns the armed Hail Mary choice (stop + image-strip) and clears it. Called by the
-	/// gateway before forwarding a local payload. The <c>WasArmed</c> flag is true only when the
-	/// user actually clicked the Hail Mary button; when false the gateway should skip the prune
-	/// entirely (previously it ran the prune on every turn and logged a no-op each time).
-	/// </summary>
-	public (HailMaryCompaction.HailMaryAggression Stop, bool StripImages, bool WasArmed) ConsumeHailMaryMiddleCutRequest()
-	{
-		if (_hailMaryMiddleCutRequested)
-		{
-			_hailMaryMiddleCutRequested = false;
-			return (_hailMaryAggression, _hailMaryStripImages, true);
-		}
-
-		return (HailMaryCompaction.HailMaryAggression.Balanced, false, false);
 	}
 
 	/// <summary>

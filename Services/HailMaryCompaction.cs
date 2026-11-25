@@ -18,10 +18,11 @@ namespace FluxMux.Avalonia.Services;
 /// tool-call / read loops, truncates oversized tool results, and strips embedded
 /// image blobs — in that order, stopping as soon as the prompt fits.
 ///
-/// Stages 1-4 are non-destructive to the user's task and the conversation structure
-/// (they only remove waste), so they may run automatically on a context-overflow 400.
-/// Stage 5 (the blunt middle-cut of older turns) is destructive and stays behind the
-/// operator's prompted button.
+/// These stages are non-destructive to the user's task and the conversation structure
+/// (they only remove waste), so they run automatically. The tool-pair-safe rear cut
+/// (<see cref="MiddleCutOlderTurns"/>) is used only to fit a Client app's own summary
+/// request (<see cref="FitClientSummaryRequest"/>); the operator-armed trim that also used
+/// it was retired on 26 Nov.
 /// </summary>
 public static class HailMaryCompaction
 {
@@ -62,70 +63,6 @@ public static class HailMaryCompaction
     /// tool result from its call, and it never drops the last real user task.
     /// </summary>
     public const int MiddleCutKeepTurns = 8;
-
-    /// <summary>
-    /// One-off aggression stops for the manual Hail Mary button. The button is a REAR-context
-    /// prune: it drops older conversational turns so the full forward turn can complete with
-    /// room to spare. Each stop trades "how much rear context to keep" against "how much
-    /// headroom to leave for the forward turn". Always preserved regardless of stop: the
-    /// system prompt, the last real user task, and the active tool-pair (tool-pair-safe).
-    /// </summary>
-    public enum HailMaryAggression
-    {
-        /// <summary>Keep ~8 recent rear turns; just fit under the window. "Nudge it under."</summary>
-        Gentle,
-        /// <summary>Keep ~4 recent rear turns; leave ~20% of the window as headroom.</summary>
-        Balanced,
-        /// <summary>Keep ~2 recent rear turns; leave ~40% of the window as headroom.</summary>
-        Aggressive,
-    }
-
-    /// <summary>Rear turns kept for each stop.</summary>
-    public static int KeepTurnsFor(HailMaryAggression stop) => stop switch
-    {
-        HailMaryAggression.Gentle => 8,
-        HailMaryAggression.Balanced => 4,
-        HailMaryAggression.Aggressive => 2,
-        _ => MiddleCutKeepTurns,
-    };
-
-    /// <summary>Fraction of the context window to leave as headroom for the forward turn.</summary>
-    public static double HeadroomFractionFor(HailMaryAggression stop) => stop switch
-    {
-        HailMaryAggression.Gentle => 0.0,
-        HailMaryAggression.Balanced => 0.20,
-        HailMaryAggression.Aggressive => 0.40,
-        _ => 0.0,
-    };
-
-    /// <summary>
-    /// Manual, one-off REAR-context prune for the Hail Mary button. Drops older conversational
-    /// turns (the "rear") so the full forward turn can complete with the headroom the chosen
-    /// stop requests. Unlike <see cref="Salvage"/> (a forward prune that shrinks the current
-    /// payload stage-by-stage), this aims the middle-cut at a headroom target derived from the
-    /// stop, and optionally strips older embedded images (independent of the stop).
-    /// The system prompt, last real user task, and active tool-pair are always preserved.
-    /// </summary>
-    public static HailMaryResult RearContextPrune(
-        JsonObject payload,
-        int contextTokens,
-        HailMaryAggression stop,
-        bool stripImages,
-        int? measuredTokens = null)
-    {
-        if (payload is null || contextTokens <= 0)
-        {
-            return HailMaryResult.None;
-        }
-
-        // Use the model's measured token count when available; the 4-chars/token estimate
-        // over-counts for dense tokenizers (Qwen, ~3-4 chars/token), which made this prune a
-        // no-op (before <= target) even when the prompt genuinely exceeded the window.
-        var before = measuredTokens ?? LocalRequestOverlayRouting.EstimatePromptTokens(payload);
-        var headroomFraction = HeadroomFractionFor(stop);
-        var target = (int)(contextTokens * (1.0 - headroomFraction));
-        return PruneToTarget(payload, before, target, KeepTurnsFor(stop), stripImages, measuredTokens);
-    }
 
     /// <summary>
     /// Least number of recent messages kept when fitting a Client app's own summary request.
@@ -253,21 +190,16 @@ public static class HailMaryCompaction
     }
 
     /// <summary>
-    /// Runs the full Hail Mary pipeline on the payload, mutating it in place.
-    /// Stages 1-4 run automatically; stage 5 (middle-cut) only runs when
-    /// <paramref name="allowMiddleCut"/> is true (the operator's button).
-    /// Stops as soon as the prompt fits under <paramref name="contextTokens"/>.
+    /// Runs the automatic clean-up on the payload, mutating it in place: duplicates, repeated
+    /// tool loops, oversized older tool results and (when asked) older images, stopping as soon
+    /// as the prompt fits under <paramref name="contextTokens"/>. It never drops a turn; the
+    /// operator-armed middle-cut that did was retired with "Trimming it in AI-FluxMux" (26 Nov).
     /// Returns a report naming what was cut and the token delta.
-    /// <paramref name="middleCutKeepTurnsOverride"/> lets the caller make the middle-cut more
-    /// aggressive (keep fewer turns) when the prompt is clearly over the context window and the
-    /// default keep-turns count is too conservative to free enough space.
     /// </summary>
     public static HailMaryResult Salvage(
         JsonObject payload,
         int contextTokens,
         int headroom = LocalHistoryCompaction.Headroom,
-        bool allowMiddleCut = false,
-        int middleCutKeepTurnsOverride = 0,
         bool stripImages = true)
     {
         if (payload is null || contextTokens <= 0)
@@ -341,20 +273,6 @@ public static class HailMaryCompaction
             if (t <= target)
             {
                 return report.ToResult();
-            }
-        }
-
-        // Stage 5 (button-gated): blunt middle-cut of older turns, tool-pair-safe.
-        // Token-driven: drops the oldest turns until the prompt fits under the target,
-        // keeping at least minKeepTurns recent turns for conversational context.
-        if (allowMiddleCut)
-        {
-            var minKeepTurns = middleCutKeepTurnsOverride > 0 ? middleCutKeepTurnsOverride : MiddleCutKeepTurns;
-            if (MiddleCutOlderTurns(payload, report, target, minKeepTurns))
-            {
-                var t = LocalRequestOverlayRouting.EstimatePromptTokens(payload);
-                bestTokens = Math.Min(bestTokens, t);
-                report.AfterTokens = t;
             }
         }
 

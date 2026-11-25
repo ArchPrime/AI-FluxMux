@@ -70,6 +70,90 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private static volatile string? _lastChatClientApp;
     private static volatile string? _lastChatClientAppPath;
 
+    /// <summary>
+    /// The latest agent chat exactly as its Client app sent it (before Omit, compaction or any
+    /// other rewrite), for "Create hand over brief for fresh chat" (<see cref="HandoverBrief"/>).
+    /// Also written to <c>Logs\last_chat_for_handover.json</c>, off the request thread, so a brief
+    /// can still be made after a relaunch — a stuck or parked chat may never send again. A Client
+    /// app's own compaction request and a tool-less request of under four messages (Harness's
+    /// chat-title request) are not kept: neither is the chat the person is working in.
+    /// </summary>
+    public static (JsonArray Messages, string? ClientApp, DateTime SentUtc)? LatestChat()
+    {
+        if (_latestChat is { } held)
+        {
+            return ((JsonArray)held.Messages.DeepClone(), held.ClientApp, held.SentUtc);
+        }
+
+        try
+        {
+            if (_latestChatPath is { } path && File.Exists(path) && JsonNode.Parse(File.ReadAllText(path)) is JsonObject saved
+                && saved["messages"] is JsonArray messages)
+            {
+                var app = saved["clientApp"]?.ToString();
+                var sent = DateTime.TryParse(saved["sentUtc"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var at)
+                    ? at
+                    : File.GetLastWriteTimeUtc(path);
+                return ((JsonArray)messages.DeepClone(), string.IsNullOrWhiteSpace(app) ? null : app, sent);
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private static volatile LatestChatRecord? _latestChat;
+    private static volatile string? _latestChatPath;
+    private static int _latestChatWriteQueued;
+
+    private sealed record LatestChatRecord(JsonArray Messages, string? ClientApp, DateTime SentUtc);
+
+    private static void KeepLatestChat(JsonObject payload, string? sender)
+    {
+        if (payload["messages"] is not JsonArray messages
+            || ClientCompactionRequest.IsSummaryRequest(payload)
+            || (payload["tools"] is not JsonArray { Count: > 0 } && messages.Count < 4))
+        {
+            return;
+        }
+
+        _latestChat = new LatestChatRecord((JsonArray)messages.DeepClone(), sender, DateTime.UtcNow);
+        if (_latestChatPath is null || Interlocked.Exchange(ref _latestChatWriteQueued, 1) == 1)
+        {
+            return;
+        }
+
+        // One write in flight at a time, always of the newest chat: a Client app that sends turns
+        // quickly must not queue a multi-megabyte write per turn.
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                Interlocked.Exchange(ref _latestChatWriteQueued, 0);
+                if (_latestChat is not { } latest || _latestChatPath is not { } path)
+                {
+                    return;
+                }
+
+                var record = new JsonObject
+                {
+                    ["clientApp"] = latest.ClientApp ?? string.Empty,
+                    ["sentUtc"] = latest.SentUtc.ToString("o", CultureInfo.InvariantCulture),
+                    ["messages"] = latest.Messages.DeepClone(),
+                };
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                var tmp = path + ".tmp";
+                File.WriteAllText(tmp, record.ToJsonString());
+                File.Move(tmp, path, overwrite: true);
+            }
+            catch
+            {
+            }
+        });
+    }
+
     /// <summary>Name shown for an agent request whose Client app is not recognised.</summary>
     public const string UnrecognisedClientApp = "an unrecognised Client app";
 
@@ -170,6 +254,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         _statePath = statePath;
         _lastChatClientAppPath = Path.Combine(Path.GetDirectoryName(statePath) ?? AppContext.BaseDirectory, "last_chat_client_app.txt");
+        _latestChatPath = Path.Combine(Path.GetDirectoryName(logPath) ?? AppContext.BaseDirectory, "last_chat_for_handover.json");
         _lastServedPath = lastServedPath;
         _recommendPath = recommendPath;
         _cloudBreakerPath = cloudBreakerPath;
@@ -274,13 +359,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// meaningful (avoids false edges from tiny early-chat counts).</summary>
     private const int ClineMinPreviousMessages = 20;
 
-    /// <summary>
-    /// Raised when the armed Hail Mary rear-prune is actually consumed on a turn (success or
-    /// no-op), so the UI can clear the "queued" pulse and refresh the context gauge with the new
-    /// (smaller) prompt-token count. Fires exactly once per armed prune.
-    /// </summary>
-    public Action<int>? ReportHailMaryApplied { get; set; }
-
     public Action<string>? ReportPortRulesPostMortem { get; set; }
 
     public Action<PortRulesTelemetry>? ReportPortRulesTelemetry { get; set; }
@@ -297,14 +375,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// Hail Mary banner with a button to run the destructive stage-5 middle-cut.
     /// </summary>
     public Action<string>? ReportHailMaryOffer { get; set; }
-
-    /// <summary>
-    /// Returns and clears the armed Hail Mary REAR-context prune choice (stop + image-strip).
-    /// When armed, the next local forward applies the rear-context prune to the payload before
-    /// sending, using the chosen one-off aggression stop. The <c>WasArmed</c> flag is true only
-    /// when the user actually clicked the button; when false the gateway skips the prune entirely.
-    /// </summary>
-    public Func<(HailMaryCompaction.HailMaryAggression Stop, bool StripImages, bool WasArmed)>? ConsumeHailMaryMiddleCut { get; set; }
 
     /// <summary>
     /// Raised for every gateway log line (Hail Mary results, context
@@ -771,6 +841,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 var shown = sender ?? UnrecognisedClientApp;
                 ClientAppLastSeen[shown] = DateTime.UtcNow;
                 ChatClientAppSeen?.Invoke(shown);
+                KeepLatestChat(payload, sender);
             }
         }
 
@@ -802,10 +873,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
         // the prompt and prevent KV cache reuse — the same reasoning as the session-artifact skip above.
         if (portRules.ToolResultClearingEnabled && GetUserClientReinflatesContext?.Invoke() != true)
         {
+            // Omit decides before this request is measured, so it reads the Context in estimate
+            // units using the ratio measured on earlier turns: on a code-heavy chat the chars / 4
+            // estimate is ~1.5x low, so "half the Context" was really ~75 % (26 Nov).
+            var omitContext = ParseInt(Str(state, "local_context"), 0);
             clearedResults = LocalToolResultClearing.ClearOlderResultsWhenFilling(
                 payload,
                 portRules,
-                ParseInt(Str(state, "local_context"), 0));
+                omitContext > 0 ? (int)(omitContext / _smoothedPromptTokenRatio) : 0);
         }
         if (clearedResults > 0)
         {
@@ -1034,6 +1109,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     Str(state, "local_preferred_model")).ConfigureAwait(false);
                 if (measuredPromptTokens is not null)
                 {
+                    // Smoothed so one unusual turn cannot flip Omit on and off between turns,
+                    // which would cost the prompt cache.
+                    var turnRatio = PromptTokenRatio(payload, measuredPromptTokens);
+                    _smoothedPromptTokenRatio = Math.Clamp(_smoothedPromptTokenRatio * 0.7 + turnRatio * 0.3, 0.5, 3.0);
                     Log("local prompt tokens (measured): "
                         + measuredPromptTokens.Value.ToString(CultureInfo.InvariantCulture)
                         + " (estimate "
@@ -1115,100 +1194,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // chars/4 estimate, which over-counts for dense tokenizers like Qwen and would
             // falsely trigger "approaching VRAM limit" at low context fill).
             OfferSpillCompactIfNeeded(state, payload, compactApplied, isProbeRequest, measuredPromptTokens);
-
-            // Hail Mary stage-5 middle-cut: if the user clicked the Hail Mary button after a
-            // context-overflow 400, apply the destructive middle-cut to this payload before
-            // sending. This is the one-shot retry that gives the turn a chance to fit.
-            //
-            // The middle-cut is now token-driven: it drops the oldest (least useful) turns until
-            // the prompt fits under the target, keeping at least MiddleCutKeepTurns recent turns
-            // for conversational context. This scales with chat length — in a 500-turn chat it
-            // drops hundreds of turns; in a 12-turn chat it drops only what is needed.
-            //
-            // hailMaryStillOver: true when the middle-cut dropped turns down to the protected
-            // floor (system + initial brief + last task + recent turns) but the prompt STILL
-            // exceeds the target — i.e. the turn itself is too large to fit even after trimming
-            // history. This feeds the honest "turn too large" block message (Fix 2).
-            var hailMaryStillOver = false;
-            if (!isProbeRequest && ConsumeHailMaryMiddleCut is not null)
-            {
-                var (hailStop, hailStripImages, hailWasArmed) = ConsumeHailMaryMiddleCut.Invoke();
-                // Only run the rear-prune when the user actually armed it (clicked the button).
-                // Previously this ran on every turn and logged a no-op each time, cluttering the
-                // terminal. Now it's a true one-off.
-                if (hailWasArmed)
-                {
-                    var hotContextForHailMary = ParseInt(Str(state, "local_context"), 0);
-                    if (hotContextForHailMary > 0)
-                    {
-                    // Manual, one-off REAR-context prune: drop older conversational turns so the
-                    // full forward turn can complete with the headroom the chosen stop requests.
-                    // The system prompt, last real user task, and active tool-pair are preserved.
-                    // Pass the model's measured token count (when available) so the prune's
-                    // before/target check uses the real count, not the over-counting estimate
-                    // (which made the prune a no-op on dense tokenizers like Qwen).
-                    var hailMary = HailMaryCompaction.RearContextPrune(payload, hotContextForHailMary, hailStop, hailStripImages, measuredPromptTokens);
-                    hailMaryStillOver = hailMary.MiddleCutStillOver;
-                    if (hailMary.MiddleCutDropped > 0 || hailMary.ImagesStripped > 0)
-                    {
-                        Log("hail-mary (" + hailStop + (hailStripImages ? ", strip-img" : "") + "): " + hailMary.DiagnosticsLine);
-                        if (hailMary.MiddleCutDropped > 0)
-                        {
-                            // Carry the dropped turns' meaning forward. The middle-cut keeps only
-                            // the system prompt, the last real user task and the active tool pair,
-                            // so goal changes, decisions and dead ends recorded in the essence log
-                            // would otherwise be lost — for every Client app, not just Cline (whose
-                            // rescue path writes Cline's own compaction file instead).
-                            var essenceBlock = EssenceReasserter?.BuildRescueBlock();
-                            var newestUser = payload["messages"] is JsonArray hailMessages ? LastUserMessage(hailMessages) : null;
-                            if (!string.IsNullOrWhiteSpace(essenceBlock) && newestUser is not null)
-                            {
-                                AppendTextToMessage(newestUser, "\n\n" + HailMaryEssenceHeader + "\n" + essenceBlock);
-                                Log("hail-mary: carried the preserved session essence (" + essenceBlock.Length + " chars) into the trimmed request");
-                            }
-                        }
-
-                        if (hailMary.MiddleCutStillOver)
-                        {
-                            Log("hail-mary: still over after trimming to the protected floor — the turn itself is too large to fit");
-                        }
-                        var hailInserted = LocalChatTemplateGuard.EnsureUserQuery(payload);
-                        if (hailInserted > 0)
-                        {
-                            Log("local chat: inserted a user turn so the Qwen template has a query");
-                        }
-                    }
-                    else
-                    {
-                        Log("hail-mary (" + hailStop + "): no-op (too few turns or tool-pair-locked, " + (measuredPromptTokens?.ToString() ?? "n/a") + " tokens)");
-                    }
-
-                    // The armed rear-prune has now actually occurred (whether it dropped turns or
-                    // was a no-op). Report back so the UI clears the "queued" pulse and refreshes
-                    // the context gauge with the new (smaller) prompt-token count. Re-measure when
-                    // a daemon port is available so the gauge reflects the pruned prompt.
-                    int? gaugeTokens = measuredPromptTokens;
-                    var hailLocalPort = ParseInt(Str(state, "local_port"), 0);
-                    if (hailLocalPort > 0)
-                    {
-                        var reMeasured = await LocalPromptTokenCounter.CountAsync(
-                            hailLocalPort,
-                            payload,
-                            Str(state, "local_preferred_model")).ConfigureAwait(false);
-                        if (reMeasured is not null)
-                        {
-                            gaugeTokens = reMeasured;
-                            measuredPromptTokens = reMeasured;
-                        }
-                    }
-                    if (gaugeTokens is not null)
-                    {
-                        ReportContextUsage?.Invoke(gaugeTokens.Value, hotContextForHailMary, Str(state, "local_preferred_model"));
-                        ReportHailMaryApplied?.Invoke(gaugeTokens.Value);
-                    }
-                }
-                }
-            }
 
             // A Client app's own "summarise this chat" request (Harness compaction, whether it
             // started by itself after an overflow error or the user typed /compact). It carries
@@ -1294,8 +1279,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         promptChars,
                         lastServed.Kind,
                         lastServed.Label,
-                        fillingDetails,
-                        hailMaryStillOver),
+                        fillingDetails),
                     400,
                     FluxMuxGatewayRouting.LocalFillingBlockedType).ConfigureAwait(false);
                 Log("local_context_filling: blocked llama-server on a filling turn n_ctx="
@@ -1490,13 +1474,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     if (!isProbeRequest)
                     {
                         ReportPortRulesFinding(overflowDetails);
-                        // Offer the Hail Mary banner: the non-destructive prune pipeline
-                        // (stages 1-4) already ran in TryApplyForwardCompact. If the turn
-                        // still can't fit, the user can click the button to run the
-                        // destructive stage-5 middle-cut and re-send.
+                        // The automatic shortening already ran; offer a fresh chat with a hand
+                        // over brief, or Hail Mary's rebuild in the Client app's own files.
                         ReportHailMaryOffer?.Invoke(
-                            "hail-mary: this turn is too large for the loaded Context even after pruning. "
-                            + "Click 'Hail Mary: shrink this turn' to cut the middle of the history and re-send.");
+                            HailMaryOfferText);
                     }
                     return;
                 }
@@ -2046,8 +2027,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         ReportPortRulesFinding(PortRulesPostMortem.FormatContextOverflow(compactApplied, portRules, portRulesActiveForProfile4));
                         // Offer the Hail Mary banner (upstream 400 path).
                         ReportHailMaryOffer?.Invoke(
-                            "hail-mary: this turn is too large for the loaded Context even after pruning. "
-                            + "Click 'Hail Mary: shrink this turn' to cut the middle of the history and re-send.");
+                            HailMaryOfferText);
                     }
                 }
                 else if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
@@ -3046,6 +3026,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// still gets a mostly reusable prompt cache. Returns false (prompt untouched) below the
     /// threshold or when nothing older can be shortened.
     /// </summary>
+    /// <summary>The measured tokens per estimated token over recent turns (1 until a turn is
+    /// measured), for decisions taken before a request is measured (Omit's start).</summary>
+    private double _smoothedPromptTokenRatio = 1.0;
+
     /// <summary>
     /// The loaded model's real tokens per chars / 4 estimate for this request (1 when it was not
     /// measured). The estimate is off in both directions — Qwen prose counts fewer tokens, a
@@ -3271,7 +3255,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 ClearForwardCompactFlag();
                 return true;
             }
-            var hailMary = HailMaryCompaction.Salvage(payload, forceHotContext, rules.CompactHeadroom, allowMiddleCut: false, stripImages: false);
+            var hailMary = HailMaryCompaction.Salvage(payload, forceHotContext, rules.CompactHeadroom, stripImages: false);
             if (hailMary.TokensSaved > 0)
             {
                 Log("hail-mary: " + hailMary.DiagnosticsLine);
@@ -3425,7 +3409,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // pipeline (stages 1-4: dedupe, loop-collapse, result-truncate, image-strip)
             // fixes without a model round-trip. Run it automatically as a last resort.
             // Stage 5 (the blunt middle-cut) stays behind the operator's button.
-            var hailMary = HailMaryCompaction.Salvage(payload, hotContext, rules.CompactHeadroom, allowMiddleCut: false, stripImages: false);
+            var hailMary = HailMaryCompaction.Salvage(payload, hotContext, rules.CompactHeadroom, stripImages: false);
             if (hailMary.TokensSaved > 0)
             {
                 Log("hail-mary: " + hailMary.DiagnosticsLine);
@@ -4534,8 +4518,15 @@ public sealed class FluxMuxGatewayHost : IDisposable
         return result;
     }
 
-    /// <summary>Marks the essence added after a Hail Mary middle-cut.</summary>
-    internal const string HailMaryEssenceHeader = "[AI-FluxMux: earlier turns were removed to fit the context window; this is what they established — background, not part of the user's message]";
+    /// <summary>
+    /// The banner shown after a turn was refused as too large even after shortening. Trimming the
+    /// next request is not offered: the Client app resends the whole chat, so it could not last
+    /// (retired 26 Nov). A fresh chat with a hand over brief, or rebuilding the chat in the Client
+    /// app's own files, can.
+    /// </summary>
+    internal const string HailMaryOfferText =
+        "This turn is too large for the loaded Context even after AI-FluxMux shortened the chat. "
+        + "Start a new chat with **Create hand over brief for fresh chat**, or use **Hail Mary** to rebuild this chat in the Client app's own files.";
 
     /// <summary>Marks the injected text so the model does not read it as the person's words.</summary>
     internal const string VibeBlockHeader = "[AI-FluxMux session note — background, not part of the user's message]";

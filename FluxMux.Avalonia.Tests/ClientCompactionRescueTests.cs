@@ -36,7 +36,7 @@ public sealed class ClientCompactionRescueTests
         var overflow = FluxMuxGatewayRouting.FormatLocalContextOverflowMessage(state);
         Assert.Equal(expected, filling.Contains(FluxMuxGatewayRouting.StandardOverflowPhrase, StringComparison.Ordinal));
         Assert.Equal(expected, overflow.Contains(FluxMuxGatewayRouting.StandardOverflowPhrase, StringComparison.Ordinal));
-        Assert.Contains("Hail Mary", filling, StringComparison.Ordinal);
+        Assert.Contains("Create hand over brief for fresh chat", filling, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -151,50 +151,4 @@ public sealed class ClientCompactionRescueTests
         Assert.False(string.IsNullOrWhiteSpace(ClientCompactionRequest.BuildFallbackCheckpoint(null)));
     }
 
-    [Fact]
-    public void Continue_request_is_an_empty_queued_prompt_for_the_session()
-    {
-        var json = JsonNode.Parse(DeepSeekHarnessSetup.BuildSessionContinueRequestJson("session-abc", "rpc-1"))!;
-        Assert.Equal("session/prompt", json["method"]!.ToString());
-        var request = json["payload"]!["args"]!["request"]!;
-        Assert.Equal("session-abc", request["sessionId"]!.ToString());
-        Assert.Equal("queue", request["mode"]!.ToString());
-        Assert.Empty((JsonArray)request["content"]!);
-        Assert.StartsWith("fluxmux-hail-mary-", request["requestId"]!.ToString(), StringComparison.Ordinal);
-        Assert.EndsWith("/api/session/prompt", DeepSeekHarnessSetup.BuildSessionPromptApiUrl(7777), StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Most_recent_session_is_the_one_whose_log_was_written_last()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "fluxmux-dsh-sessions-" + Path.GetRandomFileName());
-        try
-        {
-            var older = Path.Combine(root, "--ws-a--", "session-older");
-            var newer = Path.Combine(root, "--ws-b--", "session-newer");
-            Directory.CreateDirectory(older);
-            Directory.CreateDirectory(newer);
-            var olderLog = Path.Combine(older, "session.v4.jsonl.zstd");
-            var newerLog = Path.Combine(newer, "session.v4.jsonl.zstd");
-            File.WriteAllText(olderLog, "x");
-            File.WriteAllText(newerLog, "x");
-            File.SetLastWriteTimeUtc(olderLog, DateTime.UtcNow.AddMinutes(-10));
-            File.SetLastWriteTimeUtc(newerLog, DateTime.UtcNow);
-            Assert.Equal("session-newer", DeepSeekHarnessSetup.ResolveMostRecentSessionId(root));
-            Assert.Null(DeepSeekHarnessSetup.ResolveMostRecentSessionId(Path.Combine(root, "missing")));
-        }
-        finally
-        {
-            Directory.Delete(root, recursive: true);
-        }
-    }
-
-    [Theory]
-    [InlineData("{\"type\":\"server-response\",\"result\":{\"value\":{\"accepted\":true}}}", true)]
-    [InlineData("{\"type\":\"server-error\",\"error\":{\"message\":\"nope\"}}", false)]
-    [InlineData("{\"result\":{\"type\":\"session/agent-busy\"}}", false)]
-    [InlineData("", false)]
-    [InlineData(null, false)]
-    public void Harness_reply_check_spots_refusals(string? reply, bool expected)
-        => Assert.Equal(expected, DeepSeekHarnessSetup.HarnessRpcSucceeded(reply));
 }

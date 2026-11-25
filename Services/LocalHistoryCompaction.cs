@@ -385,7 +385,7 @@ public static class LocalHistoryCompaction
         return false;
     }
 
-    private static int AlignKeepStart(JsonArray messages, int keepStart)
+    internal static int AlignKeepStart(JsonArray messages, int keepStart)
     {
         keepStart = Math.Clamp(keepStart, 1, Math.Max(1, messages.Count - 1));
         while (keepStart > 1 && IsToolFollowUp(messages[keepStart] as JsonObject))
@@ -401,7 +401,7 @@ public static class LocalHistoryCompaction
         return keepStart;
     }
 
-    private static int IndexOfFirstRealUser(JsonArray messages)
+    internal static int IndexOfFirstRealUser(JsonArray messages)
     {
         for (var i = 0; i < messages.Count; i++)
         {
@@ -414,7 +414,7 @@ public static class LocalHistoryCompaction
         return -1;
     }
 
-    private static int IndexOfLastRealUser(JsonArray messages)
+    internal static int IndexOfLastRealUser(JsonArray messages)
     {
         for (var i = messages.Count - 1; i >= 0; i--)
         {
@@ -427,7 +427,7 @@ public static class LocalHistoryCompaction
         return -1;
     }
 
-    private static string? BuildForwardSummary(JsonArray messages, int keepStart)
+    internal static string? BuildForwardSummary(JsonArray messages, int keepStart, int maxNotes = MaxDroppedNotes, int maxChars = MaxSummaryChars)
     {
         var lines = new List<string>
         {
@@ -454,7 +454,7 @@ public static class LocalHistoryCompaction
         // The person's earlier messages are kept in every chat. They used to be summarised only
         // when there was no tool ledger, so in any agent chat a requirement or a ruled-out option
         // the person gave disappeared with the turn it was in (Live-Switch test, 26 Nov).
-        var notes = CollectDroppedNotes(messages, keepStart);
+        var notes = CollectDroppedNotes(messages, keepStart, maxNotes);
         if (notes.Count > 0)
         {
             lines.Add("Earlier messages from the person:");
@@ -479,7 +479,7 @@ public static class LocalHistoryCompaction
         }
 
         var summaryText = string.Join("\n", lines);
-        return summaryText.Length > MaxSummaryChars ? summaryText[..MaxSummaryChars] : summaryText;
+        return summaryText.Length > maxChars ? summaryText[..maxChars] : summaryText;
     }
 
     /// <summary>
@@ -587,16 +587,21 @@ public static class LocalHistoryCompaction
     /// <summary>The summary's length cap: small next to the room the fill-based cut leaves.</summary>
     public const int MaxSummaryChars = 8000;
 
-    private const int MaxDroppedNotes = 20;
+    /// <summary>How many of the person's earlier messages compaction's summary lists.</summary>
+    public const int MaxDroppedNotes = 20;
 
     /// <summary>
     /// The person's dropped messages: the most informative are chosen (names, numbers, paths and
     /// codes count) and then listed in chat order. "Carry on" style messages carry nothing to keep;
-    /// the first eight messages of any kind used to be all that was kept.
+    /// the first eight messages of any kind used to be all that was kept. A message repeated with
+    /// only its numbers changed ("Carry on with the next module (12).") is boilerplate: only the
+    /// newest copy is a candidate, and it scores nothing, because 40 such copies — each with one
+    /// digit — outscored a plain-words requirement ("Ondrea Vatsk will review the change") and
+    /// pushed it out of the hand over brief (26 Nov).
     /// </summary>
-    private static List<string> CollectDroppedNotes(JsonArray messages, int keepStart)
+    private static List<string> CollectDroppedNotes(JsonArray messages, int keepStart, int maxNotes = MaxDroppedNotes)
     {
-        var candidates = new List<(int Index, int Score, string Text)>();
+        var candidates = new List<(int Index, int Score, string Text, string Shape)>();
         for (var i = 0; i < keepStart; i++)
         {
             if (messages[i] is not JsonObject message || !IsRealUserTask(message))
@@ -604,7 +609,10 @@ public static class LocalHistoryCompaction
                 continue;
             }
 
-            var text = CollapseWhitespace(ExtractText(message["content"]));
+            // Only what the person wrote: a Client app's own text in a user message (Cline's
+            // environment_details file lists, tool results, resume prompts) would otherwise score
+            // as "informative" for its paths and crowd out the person's own words.
+            var text = CollapseWhitespace(ContextEngine.ConversationText.HumanPart(ExtractText(message["content"])));
             if (string.IsNullOrWhiteSpace(text))
             {
                 continue;
@@ -615,24 +623,47 @@ public static class LocalHistoryCompaction
                 text = text[..200] + "…";
             }
 
-            candidates.Add((i, InformationScore(text), text));
+            candidates.Add((i, InformationScore(text), text, Digits.Replace(text.ToLowerInvariant(), "#")));
         }
 
+        var repeated = candidates.GroupBy(c => c.Shape).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
         return candidates
+            .Where(c => !repeated.Contains(c.Shape) || c.Index == candidates.Last(o => o.Shape == c.Shape).Index)
+            .Select(c => repeated.Contains(c.Shape) ? c with { Score = 0 } : c)
             .OrderByDescending(c => c.Score)
             .ThenByDescending(c => c.Index)
-            .Take(MaxDroppedNotes)
+            .Take(maxNotes)
             .OrderBy(c => c.Index)
             .Select(c => "- user: " + c.Text)
             .ToList();
     }
 
-    /// <summary>Words that carry a specific value: with digits, inner capitals, or - _ . / in them.</summary>
+    private static readonly Regex Digits = new(@"\d+", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Words that carry a specific value: with digits, inner capitals, or - _ . / in them, and
+    /// names — a capitalised word that does not start a sentence ("Ondrea Vatsk"), "I" aside.
+    /// </summary>
     private static int InformationScore(string text)
-        => text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
-            .Count(w => w.Any(char.IsDigit)
-                        || w.Skip(1).Any(char.IsUpper)
-                        || w.Trim('.', ',', ';', ':', '(', ')').IndexOfAny(['-', '_', '/', '.']) > 0);
+    {
+        var words = text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        var score = 0;
+        for (var i = 0; i < words.Length; i++)
+        {
+            var w = words[i];
+            var bare = w.Trim('.', ',', ';', ':', '(', ')', '"', '\'', '!', '?');
+            var sentenceStart = i == 0 || words[i - 1].EndsWith('.') || words[i - 1].EndsWith('!') || words[i - 1].EndsWith('?') || words[i - 1].EndsWith(':');
+            if (w.Any(char.IsDigit)
+                || w.Skip(1).Any(char.IsUpper)
+                || bare.IndexOfAny(['-', '_', '/', '.']) > 0
+                || (!sentenceStart && bare.Length > 1 && char.IsUpper(bare[0])))
+            {
+                score++;
+            }
+        }
+
+        return score;
+    }
 
     // A setting with a literal value (metrics_port = 47193), not code (total = sum(...)).
     private static readonly Regex SettingLine = new(
@@ -719,7 +750,7 @@ public static class LocalHistoryCompaction
         return facts;
     }
 
-    private static string CollapseWhitespace(string text)
+    internal static string CollapseWhitespace(string text)
         => string.Join(" ", (text ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 
     private static JsonObject? PreserveUserTask(JsonObject? message, int preservedUserChars = PreservedUserChars)
@@ -746,7 +777,7 @@ public static class LocalHistoryCompaction
         return clone;
     }
 
-    private static bool IsRealUserTask(JsonObject message)
+    internal static bool IsRealUserTask(JsonObject message)
     {
         if (RoleOf(message) != "user" || IsToolFollowUp(message))
         {
@@ -757,7 +788,7 @@ public static class LocalHistoryCompaction
         return !text.StartsWith("Compressed prior conversation context", StringComparison.Ordinal);
     }
 
-    private static bool IsToolFollowUp(JsonObject? message)
+    internal static bool IsToolFollowUp(JsonObject? message)
     {
         if (message is null)
         {
@@ -781,10 +812,10 @@ public static class LocalHistoryCompaction
             || text.StartsWith("Tool output", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string RoleOf(JsonObject message)
+    internal static string RoleOf(JsonObject message)
         => (message["role"]?.ToString() ?? string.Empty).Trim().ToLowerInvariant();
 
-    private static string ExtractText(JsonNode? content)
+    internal static string ExtractText(JsonNode? content)
     {
         if (content is null)
         {

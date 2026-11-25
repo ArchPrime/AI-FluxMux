@@ -211,9 +211,10 @@ public partial class App : Application
             return;
         }
 
-        Current.RequestedThemeVariant = string.Equals(theme, "Dark", StringComparison.OrdinalIgnoreCase)
-            ? ThemeVariant.Dark
-            : ThemeVariant.Light;
+        var dark = string.Equals(theme, "Dark", StringComparison.OrdinalIgnoreCase);
+        Current.RequestedThemeVariant = dark ? ThemeVariant.Dark : ThemeVariant.Light;
+        // Colours set in code do not follow the theme dictionaries; update them with it.
+        FluxMux.Avalonia.ViewModels.CloudVariantTreeItemViewModel.ApplyTheme(dark);
     }
 
     public static bool IsDarkTheme

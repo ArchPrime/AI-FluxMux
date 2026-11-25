@@ -16,7 +16,8 @@ using Xunit.Abstractions;
 namespace FluxMux.Avalonia.Tests;
 
 /// <summary>
-/// Hail Mary for a Client app AI-FluxMux knows nothing about, run through the real gateway over
+/// A chat from a Client app AI-FluxMux knows nothing about keeps running with no Hail Mary at all
+/// (the 95 % last resort shortens it), run through the real gateway over
 /// HTTP: a plain OpenAI-compatible client (unrecognised system prompt, its own tool names) whose
 /// chat no longer fits the loaded Context. A fake llama-server behind the daemon port counts
 /// tokens (chars / 4) and records exactly what it was sent, so the test checks what the model
@@ -197,9 +198,6 @@ public sealed class HailMaryUnknownClientEndToEndTests
             Path.Combine(dir, "state.json"), Path.Combine(dir, "served.json"), Path.Combine(dir, "rec.json"),
             Path.Combine(dir, "breaker.json"), Path.Combine(dir, "reload.json"), Path.Combine(dir, "log.txt"),
             Path.Combine(dir, "ctx.json"), Path.Combine(dir, "route.json"));
-        var armed = 0;
-        host.ConsumeHailMaryMiddleCut = () =>
-            (HailMaryCompaction.HailMaryAggression.Balanced, false, Interlocked.Exchange(ref armed, 0) == 1);
         // The Client app shortens its own chat (as most agent clients do): AI-FluxMux keeps only
         // its 95 % last resort, so this is the case Hail Mary is for.
         host.GetLocalAutoCompactSettings = (_, _) => ("none", 0.80, 6, 8, 2000);
@@ -223,18 +221,10 @@ public sealed class HailMaryUnknownClientEndToEndTests
             _out.WriteLine("client sends ~" + Tokens(chat["messages"]) + " tokens to a " + Context + "-token Context");
 
             var first = await Send(chat);
-            _out.WriteLine("turn 1 (not armed): HTTP " + first.Status + ", llama-server asked " + llama.Completions.Count + " time(s); " + Trim(first.Body));
+            _out.WriteLine("turn 1: HTTP " + first.Status + ", llama-server asked " + llama.Completions.Count + " time(s); " + Trim(first.Body));
             Assert.Equal(200, first.Status);
             Assert.True(Tokens(llama.Completions.Last()["messages"]) < Context, "turn 1 was forwarded over the Context");
 
-            // The operator clicks Hail Mary (trim, Balanced) and the client sends its next message.
-            Interlocked.Exchange(ref armed, 1);
-            var before = llama.Completions.Count;
-            var second = await Send(chat);
-            _out.WriteLine("turn 2 (armed): HTTP " + second.Status + "; " + Trim(second.Body));
-
-            Assert.Equal(200, second.Status);
-            Assert.True(llama.Completions.Count > before, "llama-server was not asked after Hail Mary");
             var sent = llama.Completions.Last();
             var messages = (JsonArray)sent["messages"]!;
             var sentTokens = Tokens(messages);
@@ -254,8 +244,7 @@ public sealed class HailMaryUnknownClientEndToEndTests
 
             var text = messages.ToJsonString();
             Assert.Contains("Now add a health bar for the goblin.", text);
-            Assert.Contains("Picking up where we left off.", second.Body);
-            Assert.Equal(0, Volatile.Read(ref armed));
+            Assert.Contains("Picking up where we left off.", first.Body);
 
             // Every tool call that was kept still has its result, so no client or model rejects it.
             var calls = messages.OfType<JsonObject>().SelectMany(m => (m["tool_calls"] as JsonArray)?.OfType<JsonObject>() ?? Enumerable.Empty<JsonObject>())
@@ -263,9 +252,9 @@ public sealed class HailMaryUnknownClientEndToEndTests
             var results = messages.OfType<JsonObject>().Where(m => m["role"]?.ToString() == "tool").Select(m => m["tool_call_id"]!.ToString()).ToHashSet();
             Assert.True(calls.SetEquals(results), "a kept tool call lost its result, or a result lost its call");
 
-            // The next ordinary turn (not armed) from the same still-growing chat keeps working.
+            // The next turn from the same still-growing chat keeps working.
             var third = await Send(UnknownClientChat(turns: 82, stream: false));
-            _out.WriteLine("turn 3 (not armed, chat grew): HTTP " + third.Status + ", sent ~" + Tokens(llama.Completions.Last()["messages"]) + " tokens; " + Trim(third.Body));
+            _out.WriteLine("turn 2 (chat grew): HTTP " + third.Status + ", sent ~" + Tokens(llama.Completions.Last()["messages"]) + " tokens; " + Trim(third.Body));
             Assert.Equal(200, third.Status);
             Assert.True(Tokens(llama.Completions.Last()["messages"]) < Context);
         }

@@ -88,4 +88,28 @@ public sealed class CompactionKeepsFactsTests
         Assert.Equal("system", kept[0]["role"]!.ToString());
         Assert.Contains("report-Q3.csv", kept[1]["content"]!.ToString(), StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void A_Cline_environment_dump_does_not_crowd_out_what_the_person_wrote()
+    {
+        var messages = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "agent" },
+            new JsonObject { ["role"] = "user", ["content"] = "<task>Port the exporter to Rust.</task>" },
+        };
+        for (var i = 0; i < 30; i++)
+        {
+            var env = "<environment_details>\n# VSCode Visible Files\nsrc/a" + i + ".rs\nsrc/b" + i + ".rs\nsrc/c" + i + ".rs\n</environment_details>";
+            var said = i == 3 ? "Keep the CSV header order: id, name, total_v2." : "Continue.";
+            messages.Add(new JsonObject { ["role"] = "user", ["content"] = "<feedback>" + said + "</feedback>\n" + env });
+            messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = "Working on step " + i + "." });
+        }
+
+        var payload = new JsonObject { ["messages"] = messages };
+        Assert.True(LocalHistoryCompaction.TryCompactPayload(payload, PortForwardingRules.Defaults, force: true));
+        var summary = payload["messages"]!.AsArray().OfType<JsonObject>()
+            .First(m => m["content"]?.ToString().StartsWith("Compressed prior conversation context", StringComparison.Ordinal) == true)["content"]!.ToString();
+        Assert.Contains("total_v2", summary, StringComparison.Ordinal);
+        Assert.DoesNotContain("VSCode Visible Files", summary, StringComparison.Ordinal);
+    }
 }
