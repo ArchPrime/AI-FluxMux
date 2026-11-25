@@ -76,7 +76,7 @@ public static class MarkedText
         var block = new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
-            MaxWidth = 420
+            MaxWidth = FluxTextSize.Get("FluxReadableTextMaxWidth", 420)
         };
         ApplyTo(block, text);
         ToolTip.SetTip(control, block);

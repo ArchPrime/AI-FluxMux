@@ -53,7 +53,7 @@ public sealed class ClosedLoopCeilingPerTurnTests
         // The paused chat's shape: 272 tool calls over 10 turns, at most 60 in one turn.
         var chat = Chat(24, 26, 10, 2, 40, 60, 50, 11, 23, 26);
         Assert.Equal(26, LocalChatPayloadSignals.CountToolResultsSinceHumanMessage(chat));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(chat, omitted: 256, CeilingOnly));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(chat, CeilingOnly));
     }
 
     [Fact]
@@ -61,6 +61,6 @@ public sealed class ClosedLoopCeilingPerTurnTests
     {
         var chat = Chat(5, 256);
         Assert.Equal(256, LocalChatPayloadSignals.CountToolResultsSinceHumanMessage(chat));
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(chat, omitted: 0, CeilingOnly));
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(chat, CeilingOnly));
     }
 }

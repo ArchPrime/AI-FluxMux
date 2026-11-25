@@ -9,41 +9,39 @@ namespace FluxMux.Avalonia.Tests;
 public sealed class PortRulesTelemetryTests
 {
     [Fact]
-    public void Omitted_28_of_32_formats_this_turn()
+    public void Mill_check_28_of_32_counts_since_your_last_message()
     {
         var rules = PortForwardingRules.Defaults with { RunawayOmittedResults = 32 };
-        var snap = new PortRulesTelemetry { HasLocalTurn = true, Omitted = 28 };
-        Assert.Equal("28 / 32 this turn", snap.MillAtOmittedLine(rules));
+        var snap = new PortRulesTelemetry { HasLocalTurn = true, ToolsThisTurn = 28 };
+        Assert.Equal("28 / 32 since your last message", snap.MillCheckLine(rules));
         Assert.Equal("28 / 32", PortRulesTelemetry.Fraction(28, 32));
     }
 
     [Fact]
     public void Off_rules_and_no_local_turn_omit_the_tally_line()
     {
-        var snap = new PortRulesTelemetry { HasLocalTurn = true, Omitted = 28, ObserveOnly = 5, RapidStreak = 2 };
+        var snap = new PortRulesTelemetry { HasLocalTurn = true, ToolsThisTurn = 28, ObserveOnly = 5 };
         var off = PortForwardingRules.Defaults with
         {
             MillAtOmittedEnabled = false,
             ObserveOnlyMillEnabled = false,
-            RapidChurnEnabled = false,
             MaxPicturesEnabled = false,
             HangEnabled = false,
             Loading503Enabled = false,
             DiagnosticDumpEnabled = false,
             RepeatedCommandEnabled = false
         };
-        Assert.Equal(string.Empty, snap.MillAtOmittedLine(off));
+        Assert.Equal(string.Empty, snap.MillCheckLine(off));
         Assert.Equal(string.Empty, snap.ObserveOnlyLine(off));
-        Assert.Equal(string.Empty, snap.RapidChurnLine(off));
         Assert.Equal(string.Empty, snap.MaxPicturesLine(off));
         Assert.Equal(string.Empty, snap.HangLine(off));
         Assert.Equal(string.Empty, snap.Loading503Line(off));
         Assert.Equal(string.Empty, snap.DumpLine(off));
         Assert.Equal(string.Empty, snap.RepeatedCommandLine(off));
-        Assert.Equal(string.Empty, PortRulesTelemetry.Empty.MillAtOmittedLine(PortForwardingRules.Defaults));
+        Assert.Equal(string.Empty, PortRulesTelemetry.Empty.MillCheckLine(PortForwardingRules.Defaults));
         Assert.Equal(
             string.Empty,
-            snap.MillAtOmittedLine(PortForwardingRules.Defaults with { Enabled = false }));
+            snap.MillCheckLine(PortForwardingRules.Defaults with { Enabled = false }));
         Assert.Equal(
             string.Empty,
             snap.CompactDiagnosticLine(PortForwardingRules.Defaults with { Enabled = false }));
@@ -59,16 +57,16 @@ public sealed class PortRulesTelemetryTests
         vm.Load();
         Assert.Equal(string.Empty, vm.StatusText);
 
-        vm.ApplyTelemetry(new PortRulesTelemetry { HasLocalTurn = true, Omitted = 28 });
-        Assert.Equal("28 / 32 this turn", vm.MillAtOmittedTally);
+        vm.ApplyTelemetry(new PortRulesTelemetry { HasLocalTurn = true, ToolsThisTurn = 28 });
+        Assert.Equal("28 / 32 since your last message", vm.MillCheckTally);
         Assert.Equal(string.Empty, vm.StatusText);
 
         vm.MillAtOmittedEnabled = false;
-        Assert.Equal(string.Empty, vm.MillAtOmittedTally);
+        Assert.Equal(string.Empty, vm.MillCheckTally);
 
         vm.MillAtOmittedEnabled = true;
         vm.Enabled = false;
-        Assert.Equal(string.Empty, vm.MillAtOmittedTally);
+        Assert.Equal(string.Empty, vm.MillCheckTally);
         Assert.Contains("without intervention", vm.StatusText, StringComparison.Ordinal);
         Directory.Delete(dir, recursive: true);
     }
@@ -81,9 +79,9 @@ public sealed class PortRulesTelemetryTests
         Assert.Contains("pause runaway looping", axaml, StringComparison.Ordinal);
         Assert.Contains("simply forward turns to llama-server without intervention", axaml, StringComparison.Ordinal);
         Assert.Contains("Cloud models do not use Port rules", axaml, StringComparison.Ordinal);
-        Assert.Contains("Ends this Client-app turn once this many older tool results have been shortened", axaml, StringComparison.Ordinal);
+        Assert.Contains("Once the model has run this many tools since your last message", axaml, StringComparison.Ordinal);
         Assert.Contains("End this Client-app turn when the Client app dumps a large diagnostic artifact", axaml, StringComparison.Ordinal);
-        var millAt = axaml.IndexOf("Content=\"Mill at omitted\"", StringComparison.Ordinal);
+        var millAt = axaml.IndexOf("Content=\"Mill check\"", StringComparison.Ordinal);
         var dumpAt = axaml.IndexOf("Content=\"Diagnostic dump\"", StringComparison.Ordinal);
         Assert.True(millAt >= 0);
         Assert.True(dumpAt >= 0);

@@ -14758,6 +14758,11 @@ public partial class MainViewModel : ViewModelBase
         StatusMessage = "Loaded configuration from " + _configService.ConfigPath;
         OnPropertyChanged(nameof(EndpointModelAddressText));
         OnPropertyChanged(nameof(HarnessServersSummaryText));
+        OnPropertyChanged(nameof(ClineEndpointHintText));
+        // The Help notes' {Address} / {Port} / {HarnessChatUrl} must follow the loaded config.
+        // The port setters skip this while _isLoadingConfig is set, so without it a note kept the
+        // code default (http://127.0.0.1:8080) for the whole session while Port said 5001 (25 Nov).
+        PublishHelpNoteValues();
         RefreshClineSettingsStatus();
         TryAdoptHarnessFromPriorSession();
         RefreshHarnessProcessState();

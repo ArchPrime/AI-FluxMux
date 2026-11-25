@@ -1776,48 +1776,21 @@ public partial class MainWindow : Window
             return;
         }
 
-        var header = Convert.ToString(item.Header);
-        double baseMinWidth = header switch
-        {
-            "Quick Select" => 700.0,
-            "Servers" => 800.0,
-            "Model Profiles" => 750.0,
-            "Live-Switch Testing" => 700.0,
-            "Environment" => 700.0,
-            "Settings" => 700.0,
-            "Help" => 600.0,
-            _ => 640.0
-        };
-
-        // The "UI enforce clean width" setting limits how narrow the window can be shrunk,
-        // to protect the visibility of controls on all tabs. At Normal UI scale this is 1024px;
-        // smaller UI scales reduce it proportionally (via the scale factor applied below).
-        const double enforceCleanWidthBase = 1024.0;
-
-        // Use the maximum of the tab's minimum width and the enforce-clean-width base.
-        var effectiveMinWidth = Math.Max(baseMinWidth, enforceCleanWidthBase);
-
-        // Apply the UI scale factor to the base minimum width.
+        // The "UI enforce clean width" setting limits how narrow the window can be shrunk.
+        // Both floors are in device-independent units (so they follow Windows display scaling)
+        // and are multiplied by the app's own UI scale. A per-tab table of smaller minimums
+        // (600-800) used to sit here, but it was compared with Math.Max against 1024, so it never
+        // took effect; it was removed on 25 Nov rather than kept as numbers that look tuned.
         var mainVm = DataContext as MainViewModel;
         var scale = mainVm?.UiScaleFactor ?? 1.0;
-        var newMinWidth = effectiveMinWidth * scale;
-        
-        // Only enforce the minimum width if "UI enforce clean width" is checked.
-        if (mainVm != null && mainVm.EnforceCleanWidth)
-        {
-            System.Diagnostics.Debug.WriteLine($"[MinWidth] Tab={header}, base={baseMinWidth}, enforce={enforceCleanWidthBase}, scale={scale}, newMinWidth={newMinWidth}, currentMinWidth={MinWidth}");
-            MinWidth = newMinWidth;
-            System.Diagnostics.Debug.WriteLine($"[MinWidth] Set MinWidth to {MinWidth}");
-        }
-        else
-        {
-            // If "UI enforce clean width" is unchecked, use a smaller minimum width to allow
-            // the window to shrink much smaller, at the cost of controls wrapping or compressing.
-            var wrapMinWidth = 500.0 * scale;
-            System.Diagnostics.Debug.WriteLine($"[MinWidth] Wrap mode: Tab={header}, scale={scale}, wrapMinWidth={wrapMinWidth}");
-            MinWidth = wrapMinWidth;
-        }
+        MinWidth = (mainVm is { EnforceCleanWidth: true } ? CleanWidthMinimum : WrapWidthMinimum) * scale;
     }
+
+    /// <summary>Narrowest window with "UI enforce clean width" on: every tab's controls fit on one line.</summary>
+    private const double CleanWidthMinimum = 1024.0;
+
+    /// <summary>Narrowest window with it off: controls may wrap or compress.</summary>
+    private const double WrapWidthMinimum = 500.0;
 
     private bool IsHelpTabSelected(TabControl? tabs = null)
     {

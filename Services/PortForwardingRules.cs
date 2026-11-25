@@ -43,7 +43,6 @@ public sealed record PortForwardingRules
     public bool ClosedLoopLookbackEnabled { get; init; } = true;
     public bool ClosedLoopCeilingEnabled { get; init; } = true;
     public bool ObserveOnlyMillEnabled { get; init; } = true;
-    public bool RapidChurnEnabled { get; init; } = true;
     public bool HangEnabled { get; init; } = true;
     public bool Loading503Enabled { get; init; } = true;
     public bool RepeatedCommandEnabled { get; init; } = true;
@@ -73,8 +72,6 @@ public sealed record PortForwardingRules
     public int ClosedLoopRunawayOmittedResults { get; init; } = LocalToolResultClearing.ClosedLoopRunawayOmittedResults;
     public int ObserveOnlyMillCount { get; init; } = LocalToolResultClearing.ObserveOnlyMillCount;
     public int ClosedLoopMillLookback { get; init; } = LocalToolResultClearing.ClosedLoopMillLookback;
-    public double RapidChurnSeconds { get; init; } = LocalToolResultClearing.RapidChurnSeconds;
-    public int RapidChurnConsecutive { get; init; } = LocalToolResultClearing.RapidChurnConsecutive;
     public int MinResultCharsToClear { get; init; } = LocalToolResultClearing.MinResultCharsToClear;
     public int MaxForwardedImages { get; init; } = LocalChatPayloadSignals.MaxForwardedImages;
 
@@ -127,7 +124,6 @@ public sealed record PortForwardingRules
             ClosedLoopLookbackEnabled = false,
             ClosedLoopCeilingEnabled = false,
             ObserveOnlyMillEnabled = false,
-            RapidChurnEnabled = false,
             HangEnabled = false,
             Loading503Enabled = false,
             RepeatedCommandEnabled = false,
@@ -154,8 +150,6 @@ public sealed record PortForwardingRules
                 Math.Clamp(ClosedLoopRunawayOmittedResults, 32, 512)),
             ObserveOnlyMillCount = Math.Clamp(ObserveOnlyMillCount, 4, 24),
             ClosedLoopMillLookback = Math.Clamp(ClosedLoopMillLookback, 2, 16),
-            RapidChurnSeconds = Math.Clamp(RapidChurnSeconds, 1, 15),
-            RapidChurnConsecutive = Math.Clamp(RapidChurnConsecutive, 2, 12),
             MinResultCharsToClear = Math.Clamp(MinResultCharsToClear, 80, 2000),
             MaxForwardedImages = Math.Clamp(MaxForwardedImages, 1, 8),
             FirstByteSeconds = Math.Clamp(FirstByteSeconds, 5, 120),

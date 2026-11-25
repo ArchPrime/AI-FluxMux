@@ -22,7 +22,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         var payload = ClosedLoopCarRacing(rounds: 40);
         var omitted = LocalToolResultClearing.ClearOlderResults(payload);
         Assert.True(omitted >= LocalToolResultClearing.RunawayOmittedResults);
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
         Assert.False(LocalChatPayloadSignals.HasRepeatedToolCommand(payload, out _));
         Assert.True(LocalChatPayloadSignals.RecentToolsAreClosedLoop(payload));
 
@@ -54,7 +54,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         Assert.True(LocalChatPayloadSignals.RecentToolsAreObserveOnlyMill(
             payload,
             LocalToolResultClearing.ObserveOnlyMillCount));
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]
@@ -80,11 +80,11 @@ public sealed class LocalClosedLoopPortPolicyTests
         Assert.False(LocalChatPayloadSignals.RecentToolsAreObserveOnlyMill(
             payload,
             LocalToolResultClearing.ObserveOnlyMillCount));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted: 0));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]
-    public void Distinct_file_reads_do_not_trip_mill_at_omitted()
+    public void Distinct_file_reads_do_not_trip_mill_check()
     {
         var messages = new JsonArray
         {
@@ -107,7 +107,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         Assert.True(LocalChatPayloadSignals.RecentToolsAreDiverseInvestigation(
             payload,
             LocalToolResultClearing.ClosedLoopMillLookback));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]
@@ -129,7 +129,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         Assert.True(LocalChatPayloadSignals.RecentToolsAreFileReadInvestigation(
             payload,
             LocalToolResultClearing.ClosedLoopMillLookback));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]
@@ -159,7 +159,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         var omitted = LocalToolResultClearing.ClearOlderResults(payload);
         Assert.True(omitted >= 32);
         Assert.True(omitted < LocalToolResultClearing.ClosedLoopRunawayOmittedResults);
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]
@@ -191,7 +191,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         Assert.False(LocalChatPayloadSignals.RecentToolsAreRepeatMill(
             payload,
             LocalToolResultClearing.ClosedLoopMillLookback));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]
@@ -219,7 +219,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         Assert.False(LocalChatPayloadSignals.RecentToolsAreObserveOnlyMill(
             payload,
             LocalToolResultClearing.ObserveOnlyMillCount));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]
@@ -229,7 +229,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         var omitted = LocalToolResultClearing.ClearOlderResults(payload);
         Assert.True(omitted >= LocalToolResultClearing.RunawayOmittedResults);
         Assert.False(LocalChatPayloadSignals.RecentToolsAreClosedLoop(payload));
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]
@@ -242,7 +242,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         Assert.True(LocalChatPayloadSignals.RecentToolsAreClosedLoop(payload));
         Assert.True(LocalChatPayloadSignals.IsClosedLoopShellFingerprint("python " + CarRacing));
         Assert.False(LocalChatPayloadSignals.IsObserveOnlyFingerprint("python " + CarRacing));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
         Assert.False(LocalChatPayloadSignals.IsFileMutatingFingerprint("python " + CarRacing));
         Assert.False(LocalChatPayloadSignals.IsFileMutatingFingerprint("take_screenshot"));
     }
@@ -253,7 +253,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         var payload = VisionUiLoop(rounds: 40);
         var omitted = LocalToolResultClearing.ClearOlderResults(payload);
         Assert.True(omitted >= LocalToolResultClearing.RunawayOmittedResults);
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
         Assert.True(LocalChatPayloadSignals.RecentToolsAreClosedLoop(payload));
         Assert.True(LocalChatPayloadSignals.IsClosedLoopFingerprint("take_screenshot"));
         Assert.True(LocalChatPayloadSignals.IsClosedLoopFingerprint(
@@ -268,7 +268,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         payload["messages"]!.AsArray().Add(ToolResult("echo_tail", new string('x', 400)));
         var omitted = LocalToolResultClearing.ClearOlderResults(payload);
         Assert.True(omitted >= LocalToolResultClearing.RunawayOmittedResults);
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
         Assert.True(LocalChatPayloadSignals.RecentToolsAreClosedLoop(payload));
     }
 
@@ -284,7 +284,7 @@ public sealed class LocalClosedLoopPortPolicyTests
 
         var omitted = LocalToolResultClearing.ClearOlderResults(payload);
         Assert.True(omitted >= LocalToolResultClearing.RunawayOmittedResults);
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
         Assert.False(LocalChatPayloadSignals.RecentToolsAreClosedLoop(payload));
     }
 
@@ -294,7 +294,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         var payload = VisionUiLoop(rounds: 40);
         var omitted = LocalToolResultClearing.ClearOlderResults(payload);
         Assert.True(omitted >= LocalToolResultClearing.RunawayOmittedResults);
-        var haltBeforeCompact = LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted);
+        var haltBeforeCompact = LocalToolResultClearing.ShouldHaltAsToolMill(payload);
         Assert.False(haltBeforeCompact);
         Assert.True(LocalHistoryCompaction.TryCompactPayload(payload, force: true));
         Assert.False(haltBeforeCompact);
@@ -309,28 +309,8 @@ public sealed class LocalClosedLoopPortPolicyTests
         Assert.True(omitted >= 128);
         Assert.True(omitted < LocalToolResultClearing.ClosedLoopRunawayOmittedResults);
         Assert.True(LocalChatPayloadSignals.RecentToolsAreClosedLoop(payload));
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted, tight));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
-    }
-
-    [Fact]
-    public void Rapid_closed_loop_churn_trips_after_a_few_sub_three_second_turns()
-    {
-        Assert.Equal(0, LocalToolResultClearing.NextRapidChurnStreak(
-            LocalToolResultClearing.RunawayOmittedResults,
-            TimeSpan.FromSeconds(4),
-            3));
-        Assert.Equal(1, LocalToolResultClearing.NextRapidChurnStreak(
-            LocalToolResultClearing.RunawayOmittedResults,
-            TimeSpan.FromSeconds(1.5),
-            0));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsRapidChurn(3));
-        Assert.True(LocalToolResultClearing.ShouldHaltAsRapidChurn(
-            LocalToolResultClearing.RapidChurnConsecutive));
-        Assert.Equal(0, LocalToolResultClearing.NextRapidChurnStreak(
-            LocalToolResultClearing.RunawayOmittedResults - 1,
-            TimeSpan.FromSeconds(1),
-            3));
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload, tight));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]
@@ -349,7 +329,7 @@ public sealed class LocalClosedLoopPortPolicyTests
         var payload = new JsonObject { ["messages"] = messages };
         var omitted = LocalToolResultClearing.ClearOlderResults(payload);
         Assert.True(omitted >= LocalToolResultClearing.RunawayOmittedResults);
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted));
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     private static JsonObject ScreenshotOnlyLoop(int rounds)

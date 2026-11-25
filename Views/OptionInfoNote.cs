@@ -61,11 +61,10 @@ public sealed class OptionInfoNote : UserControl
 
         _linkLabel = new TextBlock
         {
-            FontSize = 11,
             Opacity = 0.82,
             VerticalAlignment = VerticalAlignment.Center,
             IsVisible = false
-        };
+        }.WithSize(FluxTextSize.Caption);
 
         // The label sits on its own line, above the expanded text and the "More info"/"Hide"
         // link, so it stays visible whether the note is open or closed.
@@ -254,9 +253,8 @@ public sealed class OptionInfoNote : UserControl
         var block = new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
-            FontSize = 11,
             Opacity = 0.82
-        };
+        }.WithSize(FluxTextSize.Caption);
         MarkedText.ApplyTo(block, text);
         return block;
     }

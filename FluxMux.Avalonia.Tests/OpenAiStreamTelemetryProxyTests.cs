@@ -168,7 +168,7 @@ public sealed class OpenAiStreamTelemetryProxyTests
     [Fact]
     public async Task Steer_notice_is_assistant_content_not_an_HTTP_400()
     {
-        var finding = PortRulesPostMortem.FormatMill(32, rapidChurn: false, rapidStreak: 0, PortForwardingRules.Defaults);
+        var finding = PortRulesPostMortem.FormatMill(32, PortForwardingRules.Defaults);
         var notice = PortRulesPostMortem.FormatSteerNotice(finding);
         var downstream = new MemoryStream();
 

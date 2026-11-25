@@ -16,7 +16,7 @@
             BorderThickness="1">
         <StackPanel Spacing="10" HorizontalAlignment="Center">
             <TextBlock x:Name="HeadingText"
-                       FontSize="15"
+                       FontSize="{DynamicResource FluxFontSizeTitle}"
                        FontWeight="SemiBold"
                        TextWrapping="Wrap"
                        TextAlignment="Center"
@@ -24,7 +24,7 @@
                        Foreground="{DynamicResource FluxHeadingForeground}" />
             <TextBlock x:Name="MessageText"
                        TextWrapping="Wrap"
-                       FontSize="12"
+                       FontSize="{DynamicResource FluxFontSizeBody}"
                        TextAlignment="Center"
                        HorizontalAlignment="Center"
                        Foreground="{DynamicResource FluxHeadingForeground}" />

@@ -109,6 +109,28 @@
                     <SolidColorBrush x:Key="FluxQuickSelectStandbyBorder" Color="#2D4A3A" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
+            <!-- The app's text sizes, in one place (25 Nov). Every view uses these keys instead of
+                 an inline FontSize, so a change here (or a later text-size setting) applies
+                 everywhere, and no control is tuned to one pixel size. Values are Avalonia's
+                 device-independent units, so they already follow Windows display scaling. -->
+            <x:Double x:Key="FluxFontSizeTiny">9</x:Double>
+            <x:Double x:Key="FluxFontSizeSmall">10</x:Double>
+            <x:Double x:Key="FluxFontSizeCaption">11</x:Double>
+            <x:Double x:Key="FluxFontSizeBody">12</x:Double>
+            <x:Double x:Key="FluxFontSizeEmphasis">13</x:Double>
+            <x:Double x:Key="FluxFontSizeHeading">14</x:Double>
+            <x:Double x:Key="FluxFontSizeTitle">15</x:Double>
+            <x:Double x:Key="FluxFontSizeTab">16</x:Double>
+            <x:Double x:Key="FluxFontSizeStatusIcon">22</x:Double>
+            <!-- Longest comfortable line for help-style notes, and for short side notes. -->
+            <x:Double x:Key="FluxReadableTextMaxWidth">420</x:Double>
+            <x:Double x:Key="FluxSideNoteMaxWidth">180</x:Double>
+            <!-- A folder-path box starts this wide and grows with what is typed. -->
+            <x:Double x:Key="FluxPathBoxMinWidth">220</x:Double>
+            <!-- The model profile editor's priorities column: wrapping text needs a width to wrap
+                 at, and an Auto column would let it run across the whole page. Shared by the cloud
+                 and local editors. -->
+            <x:Double x:Key="FluxProfileWizardWidth">280</x:Double>
         </ResourceDictionary>
     </Application.Resources>
 
@@ -130,13 +152,13 @@
             <Setter Property="Focusable" Value="False" />
         </Style>
         <Style Selector="Button.optionInfo">
-            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontSize" Value="{DynamicResource FluxFontSizeCaption}" />
             <Setter Property="Padding" Value="8,1" />
             <Setter Property="MinHeight" Value="0" />
             <Setter Property="Foreground" Value="{DynamicResource FluxSecondaryForeground}" />
         </Style>
         <Style Selector="Button.helpTopicLink">
-            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontSize" Value="{DynamicResource FluxFontSizeCaption}" />
             <Setter Property="Padding" Value="4,0" />
             <Setter Property="MinHeight" Value="0" />
             <Setter Property="Background" Value="Transparent" />
@@ -149,7 +171,7 @@
             <Setter Property="Background" Value="#7C3AED" />
             <Setter Property="Foreground" Value="White" />
             <Setter Property="BorderBrush" Value="#5B21B6" />
-            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontSize" Value="{DynamicResource FluxFontSizeCaption}" />
             <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="Padding" Value="10,4" />
             <Setter Property="MinWidth" Value="72" />
@@ -186,7 +208,7 @@
             <Setter Property="VerticalOffset" Value="4" />
             <Setter Property="Padding" Value="8,5" />
             <Setter Property="CornerRadius" Value="4" />
-            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontSize" Value="{DynamicResource FluxFontSizeCaption}" />
         </Style>
     </Application.Styles>
 </Application>

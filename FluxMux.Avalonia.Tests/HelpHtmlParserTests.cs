@@ -587,7 +587,7 @@ public sealed class HelpHtmlParserTests
                      "Compact",
                      "Omit",
                      "Max pictures",
-                     "Mill at omitted",
+                     "Mill check",
                      "Closed-loop lookback",
                      "Closed-loop mill ceiling",
                      "Observe-only mill",

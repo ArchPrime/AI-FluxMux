@@ -10,14 +10,11 @@ public sealed class PortRulesPostMortemTests
     public void First_Port_rule_name_is_introduced_as_a_Port_rule()
     {
         AssertFirstPortRuleIsNamed(
-            PortRulesPostMortem.FormatMill(32, rapidChurn: false, rapidStreak: 0, PortForwardingRules.Defaults),
-            PortRulesPostMortem.MillAtOmitted);
+            PortRulesPostMortem.FormatMill(32, PortForwardingRules.Defaults),
+            PortRulesPostMortem.MillCheck);
         AssertFirstPortRuleIsNamed(
-            PortRulesPostMortem.FormatMill(0, rapidChurn: false, rapidStreak: 0, PortForwardingRules.Defaults),
+            PortRulesPostMortem.FormatMill(0, PortForwardingRules.Defaults),
             PortRulesPostMortem.ObserveOnlyMill);
-        AssertFirstPortRuleIsNamed(
-            PortRulesPostMortem.FormatMill(40, rapidChurn: true, rapidStreak: 4, PortForwardingRules.Defaults),
-            PortRulesPostMortem.RapidChurnConsecutive);
         AssertFirstPortRuleIsNamed(
             PortRulesPostMortem.FormatHang(
                 LocalStreamHangPolicy.FirstByteReason,
@@ -54,7 +51,7 @@ public sealed class PortRulesPostMortemTests
     [Fact]
     public void Observe_only_mill_names_Observe_only_mill()
     {
-        var text = PortRulesPostMortem.FormatMill(0, rapidChurn: false, rapidStreak: 0, PortForwardingRules.Defaults);
+        var text = PortRulesPostMortem.FormatMill(0, PortForwardingRules.Defaults);
         Assert.Contains("**Observe-only mill**", text);
         Assert.Contains("the current setting is 8", text);
         Assert.Contains("screenshots or repeating the same commands", text);
@@ -62,20 +59,19 @@ public sealed class PortRulesPostMortemTests
         Assert.Contains(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.ObserveOnlyMill), text);
         Assert.Contains(PortRulesPostMortem.MillBreakAdvice, text);
         Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
-        Assert.DoesNotContain("Mill at omitted", text);
+        Assert.DoesNotContain("Mill check", text);
     }
 
     [Fact]
-    public void Mill_names_Mill_at_omitted_and_says_leave_it()
+    public void Mill_check_names_the_count_since_your_last_message()
     {
-        var text = PortRulesPostMortem.FormatMill(32, rapidChurn: false, rapidStreak: 0, PortForwardingRules.Defaults);
-        Assert.Contains("the Client app has run too many tools", text);
-        Assert.Contains("**Mill at omitted**", text);
-        Assert.Contains("You already passed", text);
+        var text = PortRulesPostMortem.FormatMill(40, PortForwardingRules.Defaults);
+        Assert.Contains("has run 40 tools since your last message", text);
+        Assert.Contains("no longer look like reading, editing, searching or testing", text);
+        Assert.Contains("**Mill check** hit 40 tools since your last message (the current setting is 32)", text);
         Assert.Contains("**Closed-loop lookback**", text);
-        // The ceiling counts tools since the person's last message, so it is not this rule's fix.
         Assert.DoesNotContain("**Closed-loop mill ceiling**", text);
-        Assert.DoesNotContain(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.MillAtOmitted), text);
+        Assert.DoesNotContain("older tool results", text);
         Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
         Assert.Contains(PortRulesPostMortem.NarrowerChatAdvice, text);
         Assert.DoesNotContain(PortRulesPostMortem.SmallerNextStepAdvice, text);
@@ -84,29 +80,13 @@ public sealed class PortRulesPostMortemTests
     [Fact]
     public void Long_closed_loop_names_Closed_loop_mill_ceiling()
     {
-        var text = PortRulesPostMortem.FormatMill(256, rapidChurn: false, rapidStreak: 0, PortForwardingRules.Defaults, toolsThisTurn: 256);
+        var text = PortRulesPostMortem.FormatMill(256, PortForwardingRules.Defaults);
         Assert.Contains("Closed-loop mill ceiling", text);
         Assert.Contains("256 tools since your last message", text);
         Assert.Contains("the current setting is 256", text);
         Assert.Contains(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.ClosedLoopMillCeiling), text);
         Assert.Contains(PortRulesPostMortem.MillBreakAdvice, text);
         Assert.DoesNotContain("That is not a closed read/edit/test loop", text);
-    }
-
-    [Fact]
-    public void Rapid_churn_names_Rapid_churn_consecutive()
-    {
-        var rules = PortForwardingRules.Defaults with { RapidChurnConsecutive = 4, RapidChurnSeconds = 3 };
-        var text = PortRulesPostMortem.FormatMill(40, rapidChurn: true, rapidStreak: 4, rules);
-        Assert.Contains("the Client app sent tools too quickly", text);
-        Assert.Contains("4 turns in a row", text);
-        Assert.Contains("**Rapid-churn consecutive**", text);
-        Assert.Contains(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.RapidChurnConsecutive), text);
-        Assert.Contains(PortRulesPostMortem.PortRulesLocation, text);
-        Assert.Contains(PortRulesPostMortem.NarrowerChatAdvice, text);
-        Assert.Contains("**Rapid-churn seconds**", text);
-        Assert.DoesNotContain(PortRulesPostMortem.MillBreakAdvice, text);
-        Assert.DoesNotContain(PortRulesPostMortem.SmallerNextStepAdvice, text);
     }
 
     [Fact]
@@ -288,26 +268,24 @@ public sealed class PortRulesPostMortemTests
     }
 
     [Fact]
-    public void Mill_at_omitted_client_error_uses_the_shared_stop_shape()
+    public void Mill_check_client_error_uses_the_shared_stop_shape()
     {
         var text = FluxMuxGatewayRouting.FormatToolMillMessage(
             null,
-            omitted: 32,
-            rapidChurn: false,
-            rapidStreak: 0,
+            toolsThisTurn: 32,
             PortForwardingRules.Defaults);
-        Assert.Contains("You already passed", text);
-        Assert.Contains("**Mill at omitted**", text);
+        Assert.Contains("since your last message", text);
+        Assert.Contains("**Mill check**", text);
         Assert.Contains("**Closed-loop lookback**", text);
         Assert.DoesNotContain("**Closed-loop mill ceiling**", text);
         Assert.Contains(PortRulesPostMortem.PortRuleStopAdvice, text);
-        Assert.DoesNotContain(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.MillAtOmitted), text);
+        Assert.DoesNotContain(PortRulesPostMortem.RaiseSettingAdvice(PortRulesPostMortem.MillCheck), text);
     }
 
     [Fact]
     public void Client_errors_name_the_tripped_Port_rule_and_where_to_change_it()
     {
-        var mill = FluxMuxGatewayRouting.FormatToolMillMessage(null, 0, false, 0, PortForwardingRules.Defaults);
+        var mill = FluxMuxGatewayRouting.FormatToolMillMessage(null, 0, PortForwardingRules.Defaults);
         Assert.Contains("Observe-only mill", mill);
         Assert.Contains(PortRulesPostMortem.PortRulesLocation, mill);
 
@@ -358,7 +336,7 @@ public sealed class PortRulesPostMortemTests
     [Fact]
     public void Steer_notice_and_pause_prompt_do_not_end_the_turn_or_say_HTTP_400()
     {
-        var mill = PortRulesPostMortem.FormatMill(32, rapidChurn: false, rapidStreak: 0, PortForwardingRules.Defaults);
+        var mill = PortRulesPostMortem.FormatMill(32, PortForwardingRules.Defaults);
         var dump = PortRulesPostMortem.FormatDiagnosticDump(6);
         var repeated = PortRulesPostMortem.FormatRepeatedCommand();
         foreach (var finding in new[] { mill, dump, repeated })
@@ -411,7 +389,7 @@ public sealed class PortRulesPostMortemTests
     {
         // When Port rules are off (or the profile's compaction mode is "None / endpoint
         // managed"), the overflow was a safety check, not a Port rule. The message must not
-        // blame "Port rule Headroom / Watermark %" or point at "Servers → Advanced: Port rules".
+        // blame "Port rule Headroom / Watermark %" or point at "Servers → Port rules".
         var text = PortRulesPostMortem.FormatContextOverflow(
             compactApplied: false,
             PortForwardingRules.Defaults,

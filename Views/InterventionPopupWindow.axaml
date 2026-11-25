@@ -21,7 +21,7 @@
             BorderThickness="1">
         <StackPanel Spacing="12">
             <TextBlock Text="AI-FluxMux needs a decision"
-                       FontSize="15"
+                       FontSize="{DynamicResource FluxFontSizeTitle}"
                        FontWeight="SemiBold"
                        Foreground="{DynamicResource FluxHeadingForeground}" />
 
@@ -34,11 +34,11 @@
                 <StackPanel Spacing="10">
                     <TextBlock views:MarkedText.Source="{Binding CloudRecommendText}"
                                TextWrapping="Wrap"
-                               FontSize="12"
+                               FontSize="{DynamicResource FluxFontSizeBody}"
                                Foreground="{DynamicResource FluxHeadingForeground}" />
                     <TextBlock Text="{Binding RecoveryHarnessRelaunchHint}"
                                TextWrapping="Wrap"
-                               FontSize="11"
+                               FontSize="{DynamicResource FluxFontSizeCaption}"
                                Opacity="0.88"
                                Foreground="{DynamicResource FluxSecondaryForeground}"
                                IsVisible="{Binding RecoveryHarnessRelaunchVisible}" />
@@ -81,7 +81,7 @@
                 <StackPanel Spacing="10">
                     <TextBlock views:MarkedText.Source="{Binding LocalReloadRecommendText}"
                                TextWrapping="Wrap"
-                               FontSize="12"
+                               FontSize="{DynamicResource FluxFontSizeBody}"
                                Foreground="{DynamicResource FluxHeadingForeground}" />
                     <WrapPanel>
                         <Button Content="Compact"
@@ -104,7 +104,7 @@
 
             <StackPanel Spacing="8" IsVisible="{Binding RecoveryReplacementVisible}">
                 <TextBlock Text="Or choose a different model"
-                           FontSize="12"
+                           FontSize="{DynamicResource FluxFontSizeBody}"
                            FontWeight="SemiBold"
                            Foreground="{DynamicResource FluxHeadingForeground}" />
                 <ComboBox x:Name="RecoveryReplacementChooser"
@@ -119,7 +119,7 @@
                 </ComboBox>
                 <TextBlock Text="{Binding RecoveryReplacementAdvice}"
                            TextWrapping="Wrap"
-                           FontSize="11"
+                           FontSize="{DynamicResource FluxFontSizeCaption}"
                            Opacity="0.88"
                            Foreground="{DynamicResource FluxSecondaryForeground}" />
                 <Button Content="Switch to selected"

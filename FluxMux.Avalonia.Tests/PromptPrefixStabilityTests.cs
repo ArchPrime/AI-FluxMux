@@ -103,7 +103,7 @@ public sealed class PromptPrefixStabilityTests
             var payload = new JsonObject { ["messages"] = history.DeepClone() };
             if (stableCut)
             {
-                LocalToolResultClearing.ClearOlderResultsWhenFilling(payload, rules, context, out _);
+                LocalToolResultClearing.ClearOlderResultsWhenFilling(payload, rules, context);
             }
             else
             {

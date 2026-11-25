@@ -5,19 +5,17 @@ namespace FluxMux.Avalonia.Services;
 
 /// <summary>
 /// After a failed local turn, name the Port rule that tripped using the
-/// same label as Servers → Advanced: Port rules, and one change that might
+/// same label as Servers → Port rules (Advanced settings), and one change that might
 /// help. Does not write Port rules.
 /// </summary>
 public static class PortRulesPostMortem
 {
     public const string WatermarkPercent = "Watermark %";
     public const string Headroom = "Headroom";
-    public const string MillAtOmitted = "Mill at omitted";
+    public const string MillCheck = "Mill check";
     public const string ObserveOnlyMill = "Observe-only mill";
     public const string ClosedLoopMillCeiling = "Closed-loop mill ceiling";
     public const string ClosedLoopLookback = "Closed-loop lookback";
-    public const string RapidChurnSeconds = "Rapid-churn seconds";
-    public const string RapidChurnConsecutive = "Rapid-churn consecutive";
     public const string FirstByteSeconds = "First-byte seconds";
     public const string HangQuietSeconds = "Hang quiet seconds";
     public const string ThinkTokensPerSecond = "Think tokens / sec";
@@ -39,7 +37,7 @@ public static class PortRulesPostMortem
     public const string ClientAppFaultLead =
         "Changing Port rules will not fix this. The problem is in the Client-app chat.";
 
-    public const string PortRulesLocation = "Servers → Advanced: **Port rules**";
+    public const string PortRulesLocation = "Servers → **Port rules** (Advanced settings)";
 
     public const string NextTurnAfterRaise =
         "That change only applies to the next Client-app turn.";
@@ -102,20 +100,25 @@ public static class PortRulesPostMortem
     public const string NoPortRuleForOverflow =
         "Changing Port rules will not fix one over-full Client-app message.";
 
-    /// <param name="toolsThisTurn">Tool results since the person's latest message (the Closed-loop
-    /// mill ceiling's count); -1 when the caller does not know, which never names the ceiling.</param>
-    public static string? FormatMill(int omitted, bool rapidChurn, int rapidStreak, PortForwardingRules? rules, int toolsThisTurn = -1)
+    /// <summary>
+    /// The pause text for a Mill rule. <paramref name="toolsThisTurn"/> is the count both Mill
+    /// check and the Closed-loop mill ceiling use: tool results since the person's latest message
+    /// (<see cref="LocalChatPayloadSignals.CountToolResultsSinceHumanMessage"/>). Below Mill
+    /// check's count only Observe-only mill can have stopped the turn.
+    /// </summary>
+    public static string? FormatMill(int toolsThisTurn, PortForwardingRules? rules)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
+        var tools = toolsThisTurn.ToString(CultureInfo.InvariantCulture);
         if (live.ClosedLoopCeilingEnabled && toolsThisTurn >= live.ClosedLoopRunawayOmittedResults)
         {
             return ChatTurnCannotContinue
                 + "the model in the Client app has run "
-                + toolsThisTurn.ToString(CultureInfo.InvariantCulture)
+                + tools
                 + " tools since your last message without stopping. "
                 + StoppedWhenRuleHit(
                     ClosedLoopMillCeiling,
-                    toolsThisTurn.ToString(CultureInfo.InvariantCulture) + " tools since your last message",
+                    tools + " tools since your last message",
                     live.ClosedLoopRunawayOmittedResults.ToString(CultureInfo.InvariantCulture))
                 + " "
                 + RaiseSettingAdvice(ClosedLoopMillCeiling)
@@ -123,7 +126,7 @@ public static class PortRulesPostMortem
                 + MillBreakAdvice;
         }
 
-        if (omitted < live.RunawayOmittedResults && !rapidChurn)
+        if (toolsThisTurn < live.RunawayOmittedResults)
         {
             var count = live.ObserveOnlyMillCount.ToString(CultureInfo.InvariantCulture);
             return ChatTurnCannotContinue
@@ -135,44 +138,21 @@ public static class PortRulesPostMortem
                 + MillBreakAdvice;
         }
 
-        if (rapidChurn)
-        {
-            var hit = rapidStreak.ToString(CultureInfo.InvariantCulture)
-                + " turns in a row, each less than "
-                + live.RapidChurnSeconds.ToString("0.#", CultureInfo.InvariantCulture)
-                + "s";
-            return ChatTurnCannotContinue
-                + "the Client app sent tools too quickly. "
-                + StoppedWhenRuleHit(
-                    RapidChurnConsecutive,
-                    hit,
-                    live.RapidChurnConsecutive.ToString(CultureInfo.InvariantCulture))
-                + " "
-                + RaiseSettingAdvice(RapidChurnConsecutive)
-                + " You can also raise "
-                + NamePortRule(RapidChurnSeconds)
-                + ". "
-                + NarrowerChatAdvice;
-        }
-
         var lookback = live.ClosedLoopMillLookback.ToString(CultureInfo.InvariantCulture);
-        var floor = live.RunawayOmittedResults.ToString(CultureInfo.InvariantCulture);
         return ChatTurnCannotContinue
-            + "the Client app has run too many tools. You already passed "
-            + NamePortRule(MillAtOmitted)
-            + " ("
-            + floor
-            + ") while recent tools looked like investigation. "
-            + "AI-FluxMux stopped the turn when the last "
-            + NamePortRule(ClosedLoopLookback)
-            + " ("
+            + "the model in the Client app has run "
+            + tools
+            + " tools since your last message, and the last "
             + lookback
-            + ") tools no longer looked like a read/edit/search loop ("
-            + omitted.ToString(CultureInfo.InvariantCulture)
-            + " older tool results). You can raise "
-            + NamePortRule(ClosedLoopLookback)
+            + " no longer look like reading, editing, searching or testing the project. "
+            + StoppedWhenRuleHit(
+                MillCheck,
+                tools + " tools since your last message",
+                live.RunawayOmittedResults.ToString(CultureInfo.InvariantCulture))
+            + " You can raise "
+            + NamePortRule(MillCheck)
             + " or "
-            + NamePortRule(MillAtOmitted)
+            + NamePortRule(ClosedLoopLookback)
             + " in "
             + PortRulesLocation
             + ". "
@@ -406,7 +386,7 @@ public static class PortRulesPostMortem
         // When Port rules are off (or the profile's compaction mode is "None / endpoint
         // managed"), the overflow was NOT caused by a Port rule — it was a safety check that
         // runs regardless of Port rules. Naming "Port rule Headroom / Watermark %" and
-        // "Servers → Advanced: Port rules" here would misattribute the cause to a setting the
+        // "Servers → Port rules" here would misattribute the cause to a setting the
         // user explicitly disabled. In that case, state the cause plainly and point at the
         // levers that actually apply (launch a higher-Context profile, or start a smaller chat).
         if (!portRulesActive)

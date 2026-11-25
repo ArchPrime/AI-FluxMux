@@ -232,7 +232,7 @@ public sealed class LocalToolResultClearingTests
         var payload = new JsonObject { ["messages"] = messages };
         var cleared = LocalToolResultClearing.ClearOlderResults(payload);
         Assert.True(cleared >= LocalToolResultClearing.RunawayOmittedResults);
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload, cleared));
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(payload));
     }
 
     [Fact]

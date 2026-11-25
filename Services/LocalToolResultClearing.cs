@@ -19,25 +19,29 @@ public static class LocalToolResultClearing
     public const int ClosedLoopRunawayOmittedResults = 256;
     public const int ObserveOnlyMillCount = 8;
     public const int ClosedLoopMillLookback = 6;
-    public const double RapidChurnSeconds = 3;
-    public const int RapidChurnConsecutive = 4;
     public const int MinResultCharsToClear = 240;
     public const string OmittedMark = "[tool output omitted";
     public const string AlreadyRanHeader = "Already ran:";
     public const int MaxLedgerLines = 24;
 
     /// <summary>
-    /// Omitting older tool bodies is forwarding hygiene. A closed-loop
-    /// edit plus read/test/observe chat will pass 32. Running or watching
-    /// the project without a fresh edit is still useful work. Halt when
-    /// the look is screenshot-only or an echo mill, or when omitted
-    /// reaches the closed-loop ceiling. Judge this on the pack from
-    /// before Compact so a shorten cannot reclassify.
+    /// The Mill rules. Halt when the recent tools are screenshot-only or an echo mill
+    /// (Observe-only mill), when the model has run the Closed-loop mill ceiling's count of tools
+    /// since the person's latest message, or — past Mill check's count since that message — when
+    /// the last Closed-loop lookback tools no longer look like reading, editing, searching or
+    /// testing. Running or watching the project without a fresh edit is still useful work. Judge
+    /// this on the pack from before Compact so a shorten cannot reclassify.
+    ///
+    /// Mill check and the ceiling both count tools since the person's latest message
+    /// (<see cref="LocalChatPayloadSignals.CountToolResultsSinceHumanMessage"/>). Mill check used
+    /// to count older tool results across the whole chat, so once a chat was long every turn was
+    /// judged by the lookback alone — even the first tools after the person had just said what to
+    /// do next (live test 25 Nov: 304 older results, a fresh message, then 40 shell reads, paused).
     /// </summary>
-    public static bool ShouldHaltAsToolMill(JsonObject payload, int omitted)
-        => ShouldHaltAsToolMill(payload, omitted, PortForwardingRules.Defaults);
+    public static bool ShouldHaltAsToolMill(JsonObject payload)
+        => ShouldHaltAsToolMill(payload, PortForwardingRules.Defaults);
 
-    public static bool ShouldHaltAsToolMill(JsonObject payload, int omitted, PortForwardingRules rules)
+    public static bool ShouldHaltAsToolMill(JsonObject payload, PortForwardingRules rules)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
         if (live.ObserveOnlyMillEnabled
@@ -46,15 +50,14 @@ public static class LocalToolResultClearing
             return true;
         }
 
-        // The ceiling counts tools since the person's latest message, not the whole chat
-        // (see LocalChatPayloadSignals.CountToolResultsSinceHumanMessage).
+        var toolsThisTurn = LocalChatPayloadSignals.CountToolResultsSinceHumanMessage(payload);
         if (live.ClosedLoopCeilingEnabled
-            && LocalChatPayloadSignals.CountToolResultsSinceHumanMessage(payload) >= live.ClosedLoopRunawayOmittedResults)
+            && toolsThisTurn >= live.ClosedLoopRunawayOmittedResults)
         {
             return true;
         }
 
-        if (omitted < live.RunawayOmittedResults)
+        if (toolsThisTurn < live.RunawayOmittedResults)
         {
             return false;
         }
@@ -84,43 +87,6 @@ public static class LocalToolResultClearing
         return true;
     }
 
-    /// <summary>
-    /// A closed-loop lookback can stay true while the Client app sends a
-    /// new tool every second. That is a mill, not edit/read/test.
-    /// </summary>
-    public static int NextRapidChurnStreak(int omitted, TimeSpan sincePrevious, int previousStreak)
-        => NextRapidChurnStreak(omitted, sincePrevious, previousStreak, PortForwardingRules.Defaults);
-
-    public static int NextRapidChurnStreak(
-        int omitted,
-        TimeSpan sincePrevious,
-        int previousStreak,
-        PortForwardingRules rules)
-    {
-        var live = (rules ?? PortForwardingRules.Defaults).Clamp();
-        if (!live.RapidChurnEnabled || omitted < live.RunawayOmittedResults)
-        {
-            return 0;
-        }
-
-        if (sincePrevious <= TimeSpan.Zero
-            || sincePrevious >= TimeSpan.FromSeconds(live.RapidChurnSeconds))
-        {
-            return 0;
-        }
-
-        return previousStreak + 1;
-    }
-
-    public static bool ShouldHaltAsRapidChurn(int streak)
-        => ShouldHaltAsRapidChurn(streak, PortForwardingRules.Defaults);
-
-    public static bool ShouldHaltAsRapidChurn(int streak, PortForwardingRules rules)
-    {
-        var live = (rules ?? PortForwardingRules.Defaults).Clamp();
-        return live.RapidChurnEnabled && streak >= live.RapidChurnConsecutive;
-    }
-
     public static int ClearOlderResults(JsonObject payload, int keepRecent = KeepRecentResults)
         => ClearOlderResults(payload, PortForwardingRules.Defaults with { KeepRecentResults = keepRecent });
 
@@ -140,19 +106,11 @@ public static class LocalToolResultClearing
     /// tokens reread every turn (~8.5 s), with the chat at only 25 % of its Context. Two changes:
     /// nothing is stubbed until the prompt reaches half the loaded Context (full results are
     /// better for the model while there is room), and the stub point moves in steps of
-    /// <see cref="OmitStep"/> results, so it stays put for several turns. <paramref name="eligible"/>
-    /// is how many older results lie beyond the keep count whether or not they were stubbed, so
-    /// the Mill at omitted loop rule keeps working on a chat that is not yet half full.
+    /// <see cref="OmitStep"/> results, so it stays put for several turns. The Mill rules do not
+    /// depend on Omit: they count tools since the person's latest message.
     /// </summary>
-    public static int ClearOlderResultsWhenFilling(JsonObject payload, PortForwardingRules rules, int contextTokens, out int eligible)
+    public static int ClearOlderResultsWhenFilling(JsonObject payload, PortForwardingRules rules, int contextTokens)
     {
-        eligible = 0;
-        var live = (rules ?? PortForwardingRules.Defaults).Clamp();
-        if (payload["messages"] is JsonArray all)
-        {
-            eligible = Math.Max(0, all.OfType<JsonObject>().Count(IsToolResult) - live.KeepRecentResults);
-        }
-
         if (contextTokens > 0
             && LocalRequestOverlayRouting.EstimatePromptTokens(payload) < contextTokens * OmitFromContextShare)
         {

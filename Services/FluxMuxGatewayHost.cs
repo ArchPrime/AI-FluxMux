@@ -797,9 +797,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
         var portRules = CurrentRules();
         int clearedResults = 0;
-        // How deep the pack is for the Mill rules: older results beyond the keep count, counted
-        // even while Omit is still waiting for the Context to fill, so the loop rules keep working.
-        int millDepth = 0;
         // If the client reinflates the context (e.g., Cline), skip tool-result-clearing too.
         // The client resends the full history each turn, so clearing results here would modify
         // the prompt and prevent KV cache reuse — the same reasoning as the session-artifact skip above.
@@ -808,9 +805,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             clearedResults = LocalToolResultClearing.ClearOlderResultsWhenFilling(
                 payload,
                 portRules,
-                ParseInt(Str(state, "local_context"), 0),
-                out var eligibleResults);
-            millDepth = Math.Max(clearedResults, eligibleResults);
+                ParseInt(Str(state, "local_context"), 0));
         }
         if (clearedResults > 0)
         {
@@ -835,35 +830,27 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 + " most recent. The Client app still has the full album.");
         }
 
-        var haltAsToolMill = LocalToolResultClearing.ShouldHaltAsToolMill(payload, millDepth, portRules);
+        // The Mill rules count tools since the person's latest message (see ShouldHaltAsToolMill).
+        // Rapid-churn (a pause when four tool turns came < 3 s apart) was retired on 24 Nov and its
+        // code removed on 25 Nov: with the prompt cache working a turn takes ~1 s, so it paused
+        // ordinary fast work, and what it alone caught (fast, varied, useful-looking calls) is not a
+        // loop. Older settings files may still carry rapidChurn* keys; their values are ignored.
+        var haltAsToolMill = LocalToolResultClearing.ShouldHaltAsToolMill(payload, portRules);
         var toolsThisTurn = LocalChatPayloadSignals.CountToolResultsSinceHumanMessage(payload);
-        // Rapid-churn is retired. It paused a deep pack when four tool turns came < 3 s apart, which
-        // only ever meant a runaway loop while each turn spent ~9 s rereading its prompt. With the
-        // prompt cache working a turn takes ~1 s, so it paused ordinary fast work; and everything it
-        // alone caught (fast, varied, useful-looking calls) is not a loop. Repeats, failure runs and
-        // unproductive deep packs have their own notes and Mill rules. The JSON keys stay so older
-        // settings files load.
-        var rapidChurn = false;
-        var rapidStreak = 0;
-
-        haltAsToolMill = haltAsToolMill || rapidChurn;
         if (haltAsToolMill && ConsumePortRuleSendAnywayGrace())
         {
             Log("port rule pause: sending this mill turn anyway (grace after Send this turn anyway)");
             haltAsToolMill = false;
-            rapidChurn = false;
         }
         var repeatedThisTurn = portRules.RepeatedCommandEnabled
             && LocalChatPayloadSignals.HasRepeatedToolCommand(payload, out _);
         PublishPortRulesTelemetry(new PortRulesTelemetry
         {
             HasLocalTurn = true,
-            Omitted = millDepth,
             ToolsThisTurn = toolsThisTurn,
             ObserveOnly = LocalChatPayloadSignals.CountRecentObserveOnlyTools(
                 payload,
                 portRules.ObserveOnlyMillCount),
-            RapidStreak = rapidStreak,
             PicturesKept = LocalChatPayloadSignals.CountForwardedImages(payload),
             DumpCount = sessionArtifacts.ArtifactCount,
             RepeatedCommandThisTurn = repeatedThisTurn
@@ -1584,12 +1571,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             if (routeKind == "local"
                 && haltAsToolMill)
             {
-                var finding = PortRulesPostMortem.FormatMill(
-                    millDepth,
-                    rapidChurn,
-                    rapidStreak,
-                    portRules,
-                    toolsThisTurn);
+                var finding = PortRulesPostMortem.FormatMill(toolsThisTurn, portRules);
                 var pause = await AskPortRulePauseAsync(finding ?? string.Empty, portRules).ConfigureAwait(false);
                 if (pause == FluxMuxGatewayRouting.Cloud)
                 {
@@ -1619,22 +1601,18 @@ public sealed class FluxMuxGatewayHost : IDisposable
                         context.Response,
                         FluxMuxGatewayRouting.FormatToolMillMessage(
                             state,
-                            millDepth,
-                            rapidChurn,
-                            rapidStreak,
-                            portRules,
-                            toolsThisTurn),
+                            toolsThisTurn,
+                            portRules),
                         400,
                         FluxMuxGatewayRouting.ToolMillType).ConfigureAwait(false);
-                    Log("cline_tool_mill: llama-server was not asked after omitting "
-                        + millDepth.ToString(CultureInfo.InvariantCulture)
-                        + " older tool result(s)"
-                        + (rapidChurn ? " (rapid churn)" : string.Empty));
+                    Log("cline_tool_mill: llama-server was not asked after "
+                        + toolsThisTurn.ToString(CultureInfo.InvariantCulture)
+                        + " tool result(s) since the person's last message");
                     EmitContextEvent(
                         FluxMuxGatewayRouting.ToolMillType,
                         "provider=" + provider
                         + " model=" + model
-                        + " n_omitted=" + millDepth.ToString(CultureInfo.InvariantCulture)
+                        + " n_tools_this_turn=" + toolsThisTurn.ToString(CultureInfo.InvariantCulture)
                         + " status=400");
                     ReportPortRulesFinding(finding);
                     return;

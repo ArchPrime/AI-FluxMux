@@ -24,14 +24,14 @@ public static class HelpHtmlViewBuilder
     private static Cursor? _handCursor;
     private static readonly Dictionary<string, (DateTime Stamp, Bitmap Image)> ImageCache = new(StringComparer.OrdinalIgnoreCase);
 
-    // Reading measures. The window scales these through its own transform, so they stay
-    // font-relative rather than pixel-tuned: prose is capped near 90 characters a line,
+    // Reading measures, all derived from the app's text scale (App.axaml FluxFontSize*), so Help
+    // follows the same sizes as the rest of the window: prose is capped near 90 characters a line,
     // while tables and pictures may use the wider column.
-    private const double BodyFontSize = 13;
-    private const double BodyLineHeight = 19.5;
-    private const double TableFontSize = 12;
-    private const double ProseWidth = BodyFontSize * 46;
-    private const double ColumnWidth = BodyFontSize * 68;
+    private static double BodyFontSize => FluxTextSize.Get(FluxTextSize.Emphasis, 13);
+    private static double BodyLineHeight => BodyFontSize * 1.5;
+    private static double TableFontSize => FluxTextSize.Get(FluxTextSize.Body, 12);
+    private static double ProseWidth => BodyFontSize * 46;
+    private static double ColumnWidth => BodyFontSize * 68;
 
     // Space above a heading, which is what separates it from the topic that ended above.
     // A heading keeps far less space below it so it reads as attached to its own copy.

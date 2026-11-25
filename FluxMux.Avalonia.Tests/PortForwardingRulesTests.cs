@@ -44,7 +44,6 @@ public sealed class PortForwardingRulesTests
         var saved = PortForwardingRules.Defaults with
         {
             CompactWatermarkPercent = 80,
-            RapidChurnConsecutive = 5,
             LoadingRetryCount = 4,
             SkipPrefixCacheAfterCompact = false,
             ClientMaxTokensMode = PortForwardingRules.ClientMaxTokensClient,
@@ -57,7 +56,6 @@ public sealed class PortForwardingRulesTests
         Assert.False(loaded.MillAtOmittedEnabled);
         Assert.True(loaded.MaxPicturesEnabled);
         Assert.Equal(80, loaded.CompactWatermarkPercent);
-        Assert.Equal(5, loaded.RapidChurnConsecutive);
         Assert.Equal(4, loaded.LoadingRetryCount);
         Assert.False(loaded.SkipPrefixCacheAfterCompact);
         Assert.Equal(PortForwardingRules.ClientMaxTokensClient, loaded.ClientMaxTokensMode);
@@ -105,21 +103,6 @@ public sealed class PortForwardingRulesTests
     }
 
     [Fact]
-    public void Rapid_churn_uses_snapshot_thresholds()
-    {
-        var rules = PortForwardingRules.Defaults with
-        {
-            RunawayOmittedResults = 10,
-            RapidChurnSeconds = 5,
-            RapidChurnConsecutive = 2
-        };
-        Assert.Equal(1, LocalToolResultClearing.NextRapidChurnStreak(10, TimeSpan.FromSeconds(2), 0, rules));
-        Assert.Equal(0, LocalToolResultClearing.NextRapidChurnStreak(10, TimeSpan.FromSeconds(6), 1, rules));
-        Assert.True(LocalToolResultClearing.ShouldHaltAsRapidChurn(2, rules));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsRapidChurn(2));
-    }
-
-    [Fact]
     public void Master_off_forwards_as_usual_and_keeps_saved_group_ticks()
     {
         var saved = PortForwardingRules.Defaults with
@@ -155,7 +138,6 @@ public sealed class PortForwardingRulesTests
         Assert.False(rules.MillAtOmittedEnabled);
         Assert.False(rules.ClosedLoopCeilingEnabled);
         Assert.False(rules.ObserveOnlyMillEnabled);
-        Assert.False(rules.RapidChurnEnabled);
         Assert.False(rules.HangEnabled);
         Assert.False(rules.Loading503Enabled);
         Assert.False(rules.RepeatedCommandEnabled);
@@ -166,42 +148,43 @@ public sealed class PortForwardingRulesTests
     }
 
     [Fact]
-    public void Mill_at_omitted_off_stays_open_before_the_ceiling()
+    public void Mill_check_off_stays_open_before_the_ceiling()
     {
-        var off = PortForwardingRules.Defaults with { MillAtOmittedEnabled = false };
-        var payload = new JsonObject
-        {
-            ["messages"] = new JsonArray
-            {
-                new JsonObject { ["role"] = "user", ["content"] = "watch" }
-            }
-        };
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted: 117, off));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(payload, omitted: 128, off));
+        // Observe-only mill off too, so this tests Mill check and the ceiling alone.
+        var off = PortForwardingRules.Defaults with { MillAtOmittedEnabled = false, ObserveOnlyMillEnabled = false };
+        // 128 echo calls since the person's message: Mill check would pause these (an echo
+        // mill), but it is off and the ceiling (256) is not reached.
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(
+            Run(128, "execute_command", i => "{\"command\":\"echo " + i + "\"}"),
+            off with { MillAtOmittedEnabled = true }));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(Run(128, "execute_command", i => "{\"command\":\"echo " + i + "\"}"), off));
+
         // The ceiling counts tools since the person's latest message, not older results in the
-        // whole chat: a deep chat alone stays open, a long run of tools in one go pauses.
-        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(
-            payload,
-            omitted: LocalToolResultClearing.ClosedLoopRunawayOmittedResults,
-            off));
-        var runaway = new JsonArray { new JsonObject { ["role"] = "user", ["content"] = "watch" } };
-        for (var i = 0; i < LocalToolResultClearing.ClosedLoopRunawayOmittedResults; i++)
+        // whole chat: a long run of tools in one go pauses even with Mill check off.
+        var runaway = Run(LocalToolResultClearing.ClosedLoopRunawayOmittedResults, "edit", i => "{\"path\":\"f" + i + "\"}");
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(runaway, off));
+
+        // Closed-loop lookback off: Mill check ends the turn at its count without looking at the
+        // recent tools, even when they are productive edits.
+        var lookbackOff = PortForwardingRules.Defaults with { ClosedLoopLookbackEnabled = false };
+        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(Run(32, "edit", i => "{\"path\":\"f" + i + "\"}"), lookbackOff));
+        Assert.False(LocalToolResultClearing.ShouldHaltAsToolMill(Run(31, "edit", i => "{\"path\":\"f" + i + "\"}"), lookbackOff));
+    }
+
+    private static JsonObject Run(int tools, string name, Func<int, string> args)
+    {
+        var messages = new JsonArray { new JsonObject { ["role"] = "user", ["content"] = "watch" } };
+        for (var i = 0; i < tools; i++)
         {
-            runaway.Add(new JsonObject
+            messages.Add(new JsonObject
             {
                 ["role"] = "assistant",
-                ["tool_calls"] = new JsonArray { new JsonObject { ["id"] = "c" + i, ["type"] = "function", ["function"] = new JsonObject { ["name"] = "edit", ["arguments"] = "{\"path\":\"f" + i + "\"}" } } },
+                ["tool_calls"] = new JsonArray { new JsonObject { ["id"] = "c" + i, ["type"] = "function", ["function"] = new JsonObject { ["name"] = name, ["arguments"] = args(i) } } },
             });
-            runaway.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = "c" + i, ["content"] = "ok " + i });
+            messages.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = "c" + i, ["content"] = "ok " + i });
         }
 
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(new JsonObject { ["messages"] = runaway }, omitted: 0, off));
-        Assert.True(LocalToolResultClearing.ShouldHaltAsToolMill(
-            payload,
-            omitted: 32,
-            PortForwardingRules.Defaults with { ClosedLoopLookbackEnabled = false }));
-        Assert.True(LocalToolResultClearing.ShouldHaltAsRapidChurn(8, PortForwardingRules.Defaults));
-        Assert.False(LocalToolResultClearing.ShouldHaltAsRapidChurn(8, PortForwardingRules.Defaults with { RapidChurnEnabled = false }));
+        return new JsonObject { ["messages"] = messages };
     }
 
     [Fact]

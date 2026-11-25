@@ -364,7 +364,7 @@ public sealed class FluxMuxSupervisor : IDisposable
         if (useRamSpillEstimate)
         {
             int ramEstimate = prefillModel?.RamSpillEstimateSeconds(promptTokens) ?? 0;
-            if (ramEstimate <= 0) ramEstimate = 60;
+            if (ramEstimate <= 0) ramEstimate = promptTokens > 32768 ? 60 : 5;
             // Live telemetry: adjust for RAM pressure. When the system is under memory
             // pressure (>70% RAM used), RAM-spill prefills are slower due to page pressure.
             // +1% per point above 70%, capped at +30%.
@@ -373,7 +373,12 @@ public sealed class FluxMuxSupervisor : IDisposable
                 double ramPressureFactor = 1.0 + Math.Min(0.30, (scenario.RamUsagePercent - 70.0) * 0.01);
                 ramEstimate = (int)Math.Ceiling(ramEstimate * ramPressureFactor);
             }
-            return Math.Clamp(ramEstimate, 60, 1800);
+            // The 60 s floor guards a large prompt against the VRAM-speed fallback inside
+            // RamSpillEstimateSeconds. Applied to every prompt it made an 87-token first turn on a
+            // GPU-only Context 163,840 profile (a "long-load profile" by its Context alone)
+            // announce "may take up to ~1 minute" and answer in 0.6 s (25 Nov). Small prompts keep
+            // the proportional estimate, like the ordinary path's 32K floor below.
+            return Math.Clamp(ramEstimate, promptTokens > 32768 ? 60 : 5, 1800);
         }
 
         // Hybrid VRAM+RAM estimate: when the prompt exceeds the VRAM context, the first

@@ -62,9 +62,6 @@ public partial class PortForwardingRulesViewModel : ObservableObject
     public partial bool ObserveOnlyMillEnabled { get; set; } = true;
 
     [ObservableProperty]
-    public partial bool RapidChurnEnabled { get; set; } = true;
-
-    [ObservableProperty]
     public partial bool HangEnabled { get; set; } = true;
 
     [ObservableProperty]
@@ -111,12 +108,6 @@ public partial class PortForwardingRulesViewModel : ObservableObject
 
     [ObservableProperty]
     public partial decimal ClosedLoopMillLookback { get; set; } = LocalToolResultClearing.ClosedLoopMillLookback;
-
-    [ObservableProperty]
-    public partial decimal RapidChurnSeconds { get; set; } = (decimal)LocalToolResultClearing.RapidChurnSeconds;
-
-    [ObservableProperty]
-    public partial decimal RapidChurnConsecutive { get; set; } = LocalToolResultClearing.RapidChurnConsecutive;
 
     [ObservableProperty]
     public partial decimal MinResultCharsToClear { get; set; } = LocalToolResultClearing.MinResultCharsToClear;
@@ -171,16 +162,13 @@ public partial class PortForwardingRulesViewModel : ObservableObject
     public partial string StatusText { get; set; } = string.Empty;
 
     [ObservableProperty]
-    public partial string MillAtOmittedTally { get; set; } = string.Empty;
+    public partial string MillCheckTally { get; set; } = string.Empty;
 
     [ObservableProperty]
     public partial string ClosedLoopCeilingTally { get; set; } = string.Empty;
 
     [ObservableProperty]
     public partial string ObserveOnlyTally { get; set; } = string.Empty;
-
-    [ObservableProperty]
-    public partial string RapidChurnTally { get; set; } = string.Empty;
 
     [ObservableProperty]
     public partial string MaxPicturesTally { get; set; } = string.Empty;
@@ -209,10 +197,9 @@ public partial class PortForwardingRulesViewModel : ObservableObject
     {
         var live = ToRules();
         var snap = _lastTelemetry;
-        MillAtOmittedTally = snap.MillAtOmittedLine(live);
+        MillCheckTally = snap.MillCheckLine(live);
         ClosedLoopCeilingTally = snap.ClosedLoopCeilingLine(live);
         ObserveOnlyTally = snap.ObserveOnlyLine(live);
-        RapidChurnTally = snap.RapidChurnLine(live);
         MaxPicturesTally = snap.MaxPicturesLine(live);
         HangTally = snap.HangLine(live);
         Loading503Tally = snap.Loading503Line(live);
@@ -231,7 +218,6 @@ public partial class PortForwardingRulesViewModel : ObservableObject
             ClosedLoopLookbackEnabled = ClosedLoopLookbackEnabled,
             ClosedLoopCeilingEnabled = ClosedLoopCeilingEnabled,
             ObserveOnlyMillEnabled = ObserveOnlyMillEnabled,
-            RapidChurnEnabled = RapidChurnEnabled,
             HangEnabled = HangEnabled,
             Loading503Enabled = Loading503Enabled,
             RepeatedCommandEnabled = RepeatedCommandEnabled,
@@ -248,8 +234,6 @@ public partial class PortForwardingRulesViewModel : ObservableObject
             ClosedLoopRunawayOmittedResults = (int)ClosedLoopRunawayOmittedResults,
             ObserveOnlyMillCount = (int)ObserveOnlyMillCount,
             ClosedLoopMillLookback = (int)ClosedLoopMillLookback,
-            RapidChurnSeconds = (double)RapidChurnSeconds,
-            RapidChurnConsecutive = (int)RapidChurnConsecutive,
             MinResultCharsToClear = (int)MinResultCharsToClear,
             MaxForwardedImages = (int)MaxForwardedImages,
             FirstByteSeconds = (int)FirstByteSeconds,
@@ -340,7 +324,6 @@ public partial class PortForwardingRulesViewModel : ObservableObject
         ClosedLoopLookbackEnabled = live.ClosedLoopLookbackEnabled;
         ClosedLoopCeilingEnabled = live.ClosedLoopCeilingEnabled;
         ObserveOnlyMillEnabled = live.ObserveOnlyMillEnabled;
-        RapidChurnEnabled = live.RapidChurnEnabled;
         HangEnabled = live.HangEnabled;
         Loading503Enabled = live.Loading503Enabled;
         RepeatedCommandEnabled = live.RepeatedCommandEnabled;
@@ -357,8 +340,6 @@ public partial class PortForwardingRulesViewModel : ObservableObject
         ClosedLoopRunawayOmittedResults = live.ClosedLoopRunawayOmittedResults;
         ObserveOnlyMillCount = live.ObserveOnlyMillCount;
         ClosedLoopMillLookback = live.ClosedLoopMillLookback;
-        RapidChurnSeconds = (decimal)live.RapidChurnSeconds;
-        RapidChurnConsecutive = live.RapidChurnConsecutive;
         MinResultCharsToClear = live.MinResultCharsToClear;
         MaxForwardedImages = live.MaxForwardedImages;
         FirstByteSeconds = live.FirstByteSeconds;

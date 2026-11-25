@@ -10,12 +10,10 @@ public sealed record PortRulesTelemetry
 {
     public static PortRulesTelemetry Empty { get; } = new();
 
-    public int Omitted { get; init; }
-
-    /// <summary>Tool results since the person's latest message (the Closed-loop mill ceiling's count).</summary>
+    /// <summary>Tool results since the person's latest message: the count Mill check and the
+    /// Closed-loop mill ceiling both use.</summary>
     public int ToolsThisTurn { get; init; }
     public int ObserveOnly { get; init; }
-    public int RapidStreak { get; init; }
     public int PicturesKept { get; init; }
     public int QuietSeconds { get; init; }
     public int HangQuietSeconds { get; init; }
@@ -29,7 +27,7 @@ public sealed record PortRulesTelemetry
            + " / "
            + limit.ToString(CultureInfo.InvariantCulture);
 
-    public string MillAtOmittedLine(PortForwardingRules rules)
+    public string MillCheckLine(PortForwardingRules rules)
     {
         var live = (rules ?? PortForwardingRules.Defaults).Clamp();
         if (!live.Enabled || !live.MillAtOmittedEnabled || !HasLocalTurn)
@@ -37,7 +35,7 @@ public sealed record PortRulesTelemetry
             return string.Empty;
         }
 
-        return Fraction(Omitted, live.RunawayOmittedResults) + " this turn";
+        return Fraction(ToolsThisTurn, live.RunawayOmittedResults) + " since your last message";
     }
 
     public string ClosedLoopCeilingLine(PortForwardingRules rules)
@@ -60,13 +58,6 @@ public sealed record PortRulesTelemetry
         }
 
         return Fraction(ObserveOnly, live.ObserveOnlyMillCount);
-    }
-
-    /// <summary>Rapid-churn is retired (see the gateway); kept so callers compile, always empty.</summary>
-    public string RapidChurnLine(PortForwardingRules rules)
-    {
-        _ = rules;
-        return string.Empty;
     }
 
     public string MaxPicturesLine(PortForwardingRules rules)
@@ -143,7 +134,7 @@ public sealed record PortRulesTelemetry
         }
 
         return "mill "
-               + (live.MillAtOmittedEnabled ? Fraction(Omitted, live.RunawayOmittedResults) : "off")
+               + (live.MillAtOmittedEnabled ? Fraction(ToolsThisTurn, live.RunawayOmittedResults) : "off")
                + " observe "
                + (live.ObserveOnlyMillEnabled ? Fraction(ObserveOnly, live.ObserveOnlyMillCount) : "off")
                + " pictures "

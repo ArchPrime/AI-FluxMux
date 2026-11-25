@@ -3963,11 +3963,12 @@ Cloud models do not use Port rules. When a rule is off, FluxMux does not apply
 that check. <strong>Compact</strong>, <strong>Omit</strong>, and
 <strong>Max pictures</strong> only change the pack forwarded to llama-server.
 The Client app still has the full chat.</p>
-<p><strong>Mill at omitted</strong> is how deep that forwarded pack is (older
-tool bodies stubbed) before FluxMux inspects the latest tools. If those latest
-tools still look like useful project work, that rule does not pause. Useful
-project work means the latest tools still touch the job: edit, read, search,
-test, build, or run, including looking at the project afterward.</p>
+<p><strong>Mill check</strong> is how many tools the model can run after your
+last message before FluxMux inspects the latest ones. If those latest tools
+still look like useful project work, that rule does not pause. Useful project
+work means the latest tools still touch the job: edit, read, search, test,
+build, or run, including looking at the project afterward. Reading files through
+the shell, such as cat, type, dir, ls or git status, counts as reading.</p>
 <p>A pause holds this Client-app turn and asks:
 <strong>Send this turn anyway</strong>, <strong>End this turn</strong>, or
 <strong>Let me steer</strong>. A ready cloud may also be offered.</p>
@@ -3997,9 +3998,9 @@ test, build, or run, including looking at the project afterward.</p>
 <td>Drops the oldest pictures from the pack. Does not end the turn. The Client app still has the album.</td>
 </tr>
 <tr>
-<td><strong>Mill at omitted</strong></td>
-<td>Count of stubbed older tool bodies</td>
-<td>That count is high and the latest tools are not useful project work</td>
+<td><strong>Mill check</strong></td>
+<td>Tools since your last message</td>
+<td>That count is reached and the latest tools are not useful project work</td>
 <td>Pauses this Client-app turn.</td>
 </tr>
 <tr>

@@ -920,7 +920,9 @@ public static class LocalChatPayloadSignals
         }
 
         var useful = fingerprints
-            .Where(item => IsClosedLoopFingerprint(item) || IsFileReadOrSearchFingerprint(item))
+            .Where(item => IsClosedLoopFingerprint(item)
+                           || IsFileReadOrSearchFingerprint(item)
+                           || IsShellReadFingerprint(item))
             .ToList();
         return useful.Count * 2 >= fingerprints.Count
                && useful.Distinct(StringComparer.Ordinal).Count() >= 3;
@@ -1069,6 +1071,71 @@ public static class LocalChatPayloadSignals
            || name.Equals("search_files", StringComparison.OrdinalIgnoreCase)
            || name.Equals("grep", StringComparison.OrdinalIgnoreCase)
            || name.Equals("codebase_search", StringComparison.OrdinalIgnoreCase);
+
+    private static readonly HashSet<string> ShellReadCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "cat", "type", "head", "tail", "less", "more", "ls", "dir", "tree", "find", "grep", "rg", "findstr",
+        "wc", "stat", "file", "sort", "uniq", "cut", "nl", "pwd", "cd",
+        "get-content", "gc", "get-childitem", "gci", "select-string", "sls", "get-item", "gi",
+        "select-object", "where-object", "measure-object", "format-table", "format-list", "test-path",
+    };
+
+    private static readonly HashSet<string> GitReadVerbs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "status", "log", "diff", "show", "blame", "grep", "ls-files", "branch", "rev-parse",
+    };
+
+    /// <summary>
+    /// A shell command that only reads the project: <c>cat</c>/<c>type</c>, <c>ls</c>/<c>dir</c>,
+    /// <c>grep</c>/<c>rg</c>, <c>git status</c>/<c>log</c>/<c>diff</c> and their PowerShell
+    /// equivalents, alone or joined with <c>&amp;&amp;</c>, <c>;</c> or pipes. Harness and Cline
+    /// often read files through their shell tool rather than a read tool; without this, a
+    /// varied look round the project counted as "not a read/edit/search loop" and Mill check
+    /// paused it (live test 25 Nov). Any redirection (<c>&gt;</c>) or other command makes it not a
+    /// read. Used only to recognise varied investigation — the same read coming back is still an
+    /// echo mill, so <see cref="RecentToolsAreRepeatMill"/> does not use it.
+    /// </summary>
+    public static bool IsShellReadFingerprint(string? fingerprint)
+    {
+        var text = (fingerprint ?? string.Empty).Trim();
+        if (text.Length == 0
+            || text.Contains('>')
+            || text.Contains('`')
+            || text.Contains(" -exec", StringComparison.OrdinalIgnoreCase)
+            || text.Contains(" -delete", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var segments = Regex.Split(text, @"\s*(?:&&|\|\||;|\|)\s*");
+        var sawRead = false;
+        foreach (var segment in segments)
+        {
+            var words = segment.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (words.Length == 0)
+            {
+                continue;
+            }
+
+            var verb = words[0].Trim('&', '(', ')');
+            if (verb.Equals("git", StringComparison.OrdinalIgnoreCase))
+            {
+                if (words.Length < 2 || !GitReadVerbs.Contains(words[1]))
+                {
+                    return false;
+                }
+            }
+            else if (!ShellReadCommands.Contains(verb))
+            {
+                return false;
+            }
+
+            sawRead |= !verb.Equals("cd", StringComparison.OrdinalIgnoreCase)
+                       && !verb.Equals("pwd", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return sawRead;
+    }
 
     private static bool LooksLikeClosedLoopShell(string command)
         => command.Contains("test", StringComparison.OrdinalIgnoreCase)

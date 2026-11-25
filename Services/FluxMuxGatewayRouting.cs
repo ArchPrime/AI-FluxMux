@@ -628,19 +628,16 @@ public static class FluxMuxGatewayRouting
     }
 
     public static string FormatToolMillMessage(JsonObject? state)
-        => FormatToolMillMessage(state, omitted: 0, rapidChurn: false, rapidStreak: 0, rules: null);
+        => FormatToolMillMessage(state, toolsThisTurn: 0, rules: null);
 
     public static string FormatToolMillMessage(
         JsonObject? state,
-        int omitted,
-        bool rapidChurn,
-        int rapidStreak,
-        PortForwardingRules? rules,
-        int toolsThisTurn = -1)
+        int toolsThisTurn,
+        PortForwardingRules? rules)
     {
         _ = state;
         return PortRulesPostMortem.WithStopAdvice(
-            PortRulesPostMortem.FormatMill(omitted, rapidChurn, rapidStreak, rules, toolsThisTurn));
+            PortRulesPostMortem.FormatMill(toolsThisTurn, rules));
     }
 
     public static string FormatRepeatedToolConsentReason(string? command)

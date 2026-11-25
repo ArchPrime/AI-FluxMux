@@ -71,7 +71,6 @@ public sealed class PortForwardingRulesStore
             ClosedLoopLookbackEnabled = ReadBool(root, "closedLoopLookbackEnabled", defaults.ClosedLoopLookbackEnabled),
             ClosedLoopCeilingEnabled = ReadBool(root, "closedLoopCeilingEnabled", defaults.ClosedLoopCeilingEnabled),
             ObserveOnlyMillEnabled = ReadBool(root, "observeOnlyMillEnabled", defaults.ObserveOnlyMillEnabled),
-            RapidChurnEnabled = ReadBool(root, "rapidChurnEnabled", defaults.RapidChurnEnabled),
             HangEnabled = ReadBool(root, "hangEnabled", defaults.HangEnabled),
             Loading503Enabled = ReadBool(root, "loading503Enabled", defaults.Loading503Enabled),
             RepeatedCommandEnabled = ReadBool(root, "repeatedCommandEnabled", defaults.RepeatedCommandEnabled),
@@ -87,8 +86,6 @@ public sealed class PortForwardingRulesStore
             ClosedLoopRunawayOmittedResults = ReadInt(root, "closedLoopRunawayOmittedResults", defaults.ClosedLoopRunawayOmittedResults),
             ObserveOnlyMillCount = ReadInt(root, "observeOnlyMillCount", defaults.ObserveOnlyMillCount),
             ClosedLoopMillLookback = ReadInt(root, "closedLoopMillLookback", defaults.ClosedLoopMillLookback),
-            RapidChurnSeconds = ReadDouble(root, "rapidChurnSeconds", defaults.RapidChurnSeconds),
-            RapidChurnConsecutive = ReadInt(root, "rapidChurnConsecutive", defaults.RapidChurnConsecutive),
             MinResultCharsToClear = ReadInt(root, "minResultCharsToClear", defaults.MinResultCharsToClear),
             MaxForwardedImages = ReadInt(root, "maxForwardedImages", defaults.MaxForwardedImages),
             FirstByteSeconds = ReadInt(root, "firstByteSeconds", defaults.FirstByteSeconds),
@@ -121,6 +118,7 @@ public sealed class PortForwardingRulesStore
            || root.ContainsKey("closedLoopLookbackEnabled")
            || root.ContainsKey("closedLoopCeilingEnabled")
            || root.ContainsKey("observeOnlyMillEnabled")
+           // Rapid-churn was removed on 25 Nov; its key still marks a file written with per-rule toggles.
            || root.ContainsKey("rapidChurnEnabled")
            || root.ContainsKey("hangEnabled")
            || root.ContainsKey("loading503Enabled")
@@ -139,7 +137,6 @@ public sealed class PortForwardingRulesStore
             MillAtOmittedEnabled = false,
             ClosedLoopCeilingEnabled = false,
             ObserveOnlyMillEnabled = false,
-            RapidChurnEnabled = false,
             HangEnabled = false,
             Loading503Enabled = false,
             RepeatedCommandEnabled = false,
@@ -160,7 +157,6 @@ public sealed class PortForwardingRulesStore
             ["closedLoopLookbackEnabled"] = clamped.ClosedLoopLookbackEnabled,
             ["closedLoopCeilingEnabled"] = clamped.ClosedLoopCeilingEnabled,
             ["observeOnlyMillEnabled"] = clamped.ObserveOnlyMillEnabled,
-            ["rapidChurnEnabled"] = clamped.RapidChurnEnabled,
             ["hangEnabled"] = clamped.HangEnabled,
             ["loading503Enabled"] = clamped.Loading503Enabled,
             ["repeatedCommandEnabled"] = clamped.RepeatedCommandEnabled,
@@ -176,8 +172,6 @@ public sealed class PortForwardingRulesStore
             ["closedLoopRunawayOmittedResults"] = clamped.ClosedLoopRunawayOmittedResults,
             ["observeOnlyMillCount"] = clamped.ObserveOnlyMillCount,
             ["closedLoopMillLookback"] = clamped.ClosedLoopMillLookback,
-            ["rapidChurnSeconds"] = clamped.RapidChurnSeconds,
-            ["rapidChurnConsecutive"] = clamped.RapidChurnConsecutive,
             ["minResultCharsToClear"] = clamped.MinResultCharsToClear,
             ["maxForwardedImages"] = clamped.MaxForwardedImages,
             ["firstByteSeconds"] = clamped.FirstByteSeconds,
