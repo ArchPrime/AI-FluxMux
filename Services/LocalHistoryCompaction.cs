@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace FluxMux.Avalonia.Services;
 
@@ -294,6 +295,17 @@ public static class LocalHistoryCompaction
             preservedUser = PreserveUserTask(messages[lastRealUserIndex] as JsonObject, live.CompactPreservedUserChars);
         }
 
+        // The opening request is pinned too. It usually states the task and its fixed facts (names,
+        // targets, constraints), and it never changes, so pinning it costs no prompt-cache reuse.
+        // Only the newest user task used to be kept: the Live-Switch test (26 Nov) lost the codename
+        // given in the opening request every time a chat was compacted.
+        var firstRealUserIndex = IndexOfFirstRealUser(messages);
+        JsonObject? preservedOpening = null;
+        if (firstRealUserIndex >= 0 && firstRealUserIndex < keepStart && firstRealUserIndex != lastRealUserIndex)
+        {
+            preservedOpening = PreserveUserTask(messages[firstRealUserIndex] as JsonObject, live.CompactPreservedUserChars);
+        }
+
         var summaryText = BuildForwardSummary(messages, keepStart);
         if (string.IsNullOrWhiteSpace(summaryText) && force)
         {
@@ -318,6 +330,12 @@ public static class LocalHistoryCompaction
             {
                 compacted.Add(node.DeepClone());
             }
+        }
+
+        if (preservedOpening is not null)
+        {
+            compacted.Add(preservedOpening);
+            compacted.Add(new JsonObject { ["role"] = "assistant", ["content"] = "Noted the original request." });
         }
 
         compacted.Add(new JsonObject
@@ -383,6 +401,19 @@ public static class LocalHistoryCompaction
         return keepStart;
     }
 
+    private static int IndexOfFirstRealUser(JsonArray messages)
+    {
+        for (var i = 0; i < messages.Count; i++)
+        {
+            if (messages[i] is JsonObject message && IsRealUserTask(message))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
     private static int IndexOfLastRealUser(JsonArray messages)
     {
         for (var i = messages.Count - 1; i >= 0; i--)
@@ -409,17 +440,25 @@ public static class LocalHistoryCompaction
             lines.AddRange(alreadyRan);
         }
 
-        // A tool ledger already names dropped commands. Do not also paste
-        // truncated file bodies — that is how Compact taught the model to
-        // re-run the same read/shell call.
-        if (alreadyRan.Count == 0)
+        // A tool ledger already names dropped commands. Do not also paste truncated file bodies —
+        // that is how Compact taught the model to re-run the same read/shell call. Single lines that
+        // state a value (a setting, a commit, a test result) are different: they are what the work
+        // found, and without them the model has to re-run the call to know it.
+        var facts = CollectToolResultFacts(messages, keepStart);
+        if (facts.Count > 0)
         {
-            var notes = CollectDroppedNotes(messages, keepStart);
-            if (notes.Count > 0)
-            {
-                lines.Add("Notes:");
-                lines.AddRange(notes);
-            }
+            lines.Add("Values found in older tool output:");
+            lines.AddRange(facts);
+        }
+
+        // The person's earlier messages are kept in every chat. They used to be summarised only
+        // when there was no tool ledger, so in any agent chat a requirement or a ruled-out option
+        // the person gave disappeared with the turn it was in (Live-Switch test, 26 Nov).
+        var notes = CollectDroppedNotes(messages, keepStart);
+        if (notes.Count > 0)
+        {
+            lines.Add("Earlier messages from the person:");
+            lines.AddRange(notes);
         }
 
         // Industry best practice: preserve conclusions and decisions, not
@@ -440,7 +479,7 @@ public static class LocalHistoryCompaction
         }
 
         var summaryText = string.Join("\n", lines);
-        return summaryText.Length > 5000 ? summaryText[..5000] : summaryText;
+        return summaryText.Length > MaxSummaryChars ? summaryText[..MaxSummaryChars] : summaryText;
     }
 
     /// <summary>
@@ -545,37 +584,139 @@ public static class LocalHistoryCompaction
         return text.Trim();
     }
 
+    /// <summary>The summary's length cap: small next to the room the fill-based cut leaves.</summary>
+    public const int MaxSummaryChars = 8000;
+
+    private const int MaxDroppedNotes = 20;
+
+    /// <summary>
+    /// The person's dropped messages: the most informative are chosen (names, numbers, paths and
+    /// codes count) and then listed in chat order. "Carry on" style messages carry nothing to keep;
+    /// the first eight messages of any kind used to be all that was kept.
+    /// </summary>
     private static List<string> CollectDroppedNotes(JsonArray messages, int keepStart)
     {
-        var notes = new List<string>();
-        for (var i = 0; i < keepStart && notes.Count < 8; i++)
+        var candidates = new List<(int Index, int Score, string Text)>();
+        for (var i = 0; i < keepStart; i++)
         {
-            if (messages[i] is not JsonObject message)
+            if (messages[i] is not JsonObject message || !IsRealUserTask(message))
             {
                 continue;
             }
 
-            if (!IsRealUserTask(message))
-            {
-                continue;
-            }
-
-            var raw = ExtractText(message["content"]);
-            var text = CollapseWhitespace(raw);
+            var text = CollapseWhitespace(ExtractText(message["content"]));
             if (string.IsNullOrWhiteSpace(text))
             {
                 continue;
             }
 
-            if (text.Length > 120)
+            if (text.Length > 200)
             {
-                text = text[..120];
+                text = text[..200] + "…";
             }
 
-            notes.Add("- user: " + text);
+            candidates.Add((i, InformationScore(text), text));
         }
 
-        return notes;
+        return candidates
+            .OrderByDescending(c => c.Score)
+            .ThenByDescending(c => c.Index)
+            .Take(MaxDroppedNotes)
+            .OrderBy(c => c.Index)
+            .Select(c => "- user: " + c.Text)
+            .ToList();
+    }
+
+    /// <summary>Words that carry a specific value: with digits, inner capitals, or - _ . / in them.</summary>
+    private static int InformationScore(string text)
+        => text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .Count(w => w.Any(char.IsDigit)
+                        || w.Skip(1).Any(char.IsUpper)
+                        || w.Trim('.', ',', ';', ':', '(', ')').IndexOfAny(['-', '_', '/', '.']) > 0);
+
+    // A setting with a literal value (metrics_port = 47193), not code (total = sum(...)).
+    private static readonly Regex SettingLine = new(
+        "^\\s*[A-Za-z][\\w.\\-]*\\s*[=:]\\s*(\"[^\"]{1,80}\"|'[^']{1,80}'|-?\\d[\\d.,_]*\\s*\\w{0,4}|true|false|[\\w.\\-/:]{1,60})\\s*$",
+        RegexOptions.Compiled);
+
+    // A line of git log output: a hash, then the subject.
+    private static readonly Regex CommitLine = new("^\\s*[0-9a-f]{7,40}\\s+\\S", RegexOptions.Compiled);
+
+    // A test, build or error outcome.
+    private static readonly Regex OutcomeLine = new(
+        "\\b(flaky|failed|failure|error|passed|warning|exception|traceback)\\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex CallTarget = new(
+        "\"(?:path|file_path|command|target)\"\\s*:\\s*\"([^\"]{1,80})\"", RegexOptions.Compiled);
+
+    private const int MaxToolFacts = 40;
+
+    /// <summary>
+    /// Lines from dropped tool results that state a value — a setting, a commit line, a test or
+    /// error outcome — up to three per result, the newest results' values kept when there are too
+    /// many. Each is labelled with the call that produced it.
+    /// </summary>
+    private static List<string> CollectToolResultFacts(JsonArray messages, int keepStart)
+    {
+        var callNames = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var message in messages.OfType<JsonObject>())
+        {
+            if (message["tool_calls"] is not JsonArray calls)
+            {
+                continue;
+            }
+
+            foreach (var call in calls.OfType<JsonObject>())
+            {
+                var id = call["id"]?.ToString();
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    continue;
+                }
+
+                var name = call["function"]?["name"]?.ToString() ?? "tool";
+                var target = CallTarget.Match(call["function"]?["arguments"]?.ToString() ?? string.Empty).Groups[1].Value;
+                callNames[id] = string.IsNullOrWhiteSpace(target) ? name : name + " " + target;
+            }
+        }
+
+        var perResult = new List<List<string>>();
+        for (var i = 0; i < keepStart; i++)
+        {
+            if (messages[i] is not JsonObject message || !IsToolFollowUp(message))
+            {
+                continue;
+            }
+
+            var text = ExtractText(message["content"]);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                continue;
+            }
+
+            var source = callNames.TryGetValue(message["tool_call_id"]?.ToString() ?? string.Empty, out var named) ? named : "tool";
+            var found = text.Split('\n')
+                .Select(l => l.TrimEnd())
+                .Where(l => l.Length is > 0 and <= 160)
+                .Where(l => SettingLine.IsMatch(l) || CommitLine.IsMatch(l) || OutcomeLine.IsMatch(l))
+                .Distinct()
+                .Take(3)
+                .Select(l => "- " + source + ": " + l.Trim())
+                .ToList();
+            if (found.Count > 0)
+            {
+                perResult.Add(found);
+            }
+        }
+
+        var facts = new List<string>();
+        for (var r = perResult.Count - 1; r >= 0 && facts.Count < MaxToolFacts; r--)
+        {
+            facts.InsertRange(0, perResult[r].Take(MaxToolFacts - facts.Count));
+        }
+
+        return facts;
     }
 
     private static string CollapseWhitespace(string text)
