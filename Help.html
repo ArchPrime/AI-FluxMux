@@ -4354,7 +4354,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>Who compacts a chat that grows too long for this profile's Context. <b>AI-FluxMux, Port rules settings</b>: AI-FluxMux summarises older turns using <b>Compact</b> in Port rules. <b>AI-FluxMux, this profile's settings</b>: the same, using this profile's Trigger, Keep turns, Tool results and Pin user. <b>The Client app</b>: AI-FluxMux sends the chat on as the Client app sent it, and the Client app shortens it itself (Cline Auto compact, or Harness's own shortening).<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>Who compacts a chat that grows too long for this profile's Context. <b>AI-FluxMux, Port rules settings</b>: AI-FluxMux summarises older turns using <b>Compact</b> in Port rules. <b>AI-FluxMux, this profile's settings</b>: the same, using this profile's Trigger, Keep turns, Tool results and Pin user. Either way, AI-FluxMux keeps as many recent turns as fit in about 20 points below the trigger (60 % of the Context for an 80 % trigger); Keep turns is the fewest it keeps. <b>The Client app</b>: AI-FluxMux sends the chat on as the Client app sent it, and the Client app shortens it itself (Cline Auto compact, or Harness's own shortening).<o:p></o:p></span></p>
   </td>
   <td valign=top style='border-top:none;border-left:none;border-bottom:solid #CBD5E1 1.0pt;
   border-right:solid #CBD5E1 1.0pt;mso-border-top-alt:solid #CBD5E1 .75pt;
@@ -5445,10 +5445,22 @@ testing<o:p></o:p></span></h2>
 
 <p><span lang=EN style='font-size:11.0pt;font-family:"Calibri",sans-serif;
 color:#111111;mso-ansi-language:EN'>On Live-Switch Testing, nominate any two
-validated cloud or local profiles as Profile A and Profile B. The test launches
-A with a set task, hands the chat to B, returns to A, and scores how much of
-that task survived the trip. It unloads and reloads, so it is a controlled test
-rather than everyday routing.<o:p></o:p></span></p>
+validated cloud or local profiles as Profile A and Profile B. The test plants
+ten made-up facts through a long agent chat, such as a codename in the opening
+request, a port in a tool result, a decision and a rejected library. It sends
+that whole chat through Port to A, then to B, then back to A, the way a Client
+app resends a chat, so AI-FluxMux shortens it for each profile exactly as in
+real use. Each profile is asked questions only those facts answer.<o:p></o:p></span></p>
+
+<p><span lang=EN style='font-size:11.0pt;font-family:"Calibri",sans-serif;
+color:#111111;mso-ansi-language:EN'>It runs two chat sizes: one that fits both
+profiles, so a lost fact shows the model's own recall, and one larger than the
+smaller profile's Context, so that profile has to shorten the chat. The result
+lists each fact a profile lost, what AI-FluxMux shortened on that turn, and
+which setting to change, such as Keep recent results, Keep turns, a larger
+Context or a more precise KV cache. It reloads llama-server three times and can
+take several minutes, so it is a controlled test rather than everyday routing.
+Every reply is kept in Logs\Switch_Context_Fidelity_Benchmarks.jsonl.<o:p></o:p></span></p>
 
 <h2><span lang=EN style='font-family:"Calibri",sans-serif;mso-fareast-font-family:
 "Times New Roman";color:#111111;mso-ansi-language:EN'>Stopping and recovering<o:p></o:p></span></h2>

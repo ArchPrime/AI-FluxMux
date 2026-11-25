@@ -450,7 +450,7 @@
                                                                                             VerticalAlignment="Center" />
                                                                                  <NumericUpDown Grid.Column="1" Minimum="4" Maximum="12"
                                                                                                Value="{Binding LocalAutoCompactKeepTurns}"
-                                                                                               ToolTip.Tip="Recent turns kept full. Older turns get summarized." />
+                                                                                               ToolTip.Tip="The fewest recent messages kept in full. Compaction keeps as many more as fit in about 60 % of the Context; older ones are summarized." />
                                                                              </Grid>
                                                                              <Grid ColumnSpacing="6" IsVisible="{Binding LocalAutoCompactMode, Converter={x:Static vm:StringEqualsConverter.Instance}, ConverterParameter=per-profile}">
                                                                                  <Grid.ColumnDefinitions>
@@ -1567,8 +1567,8 @@
                                                                     <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleLabel" />
                                                                     <ColumnDefinition Width="Auto" SharedSizeGroup="PortRuleField" />
                                                                 </Grid.ColumnDefinitions>
-                                                                <TextBlock VerticalAlignment="Center" Text="Keep turns" ToolTip.Tip="Recent conversational turns left intact when Compact shortens older history." TextWrapping="Wrap" />
-                                                                <NumericUpDown Grid.Column="1" Minimum="4" Maximum="24" Value="{Binding PortRules.CompactKeepTurns}" ToolTip.Tip="Recent conversational turns left intact when Compact shortens older history." />
+                                                                <TextBlock VerticalAlignment="Center" Text="Keep turns" ToolTip.Tip="The fewest recent messages left intact when Compact shortens older history. It keeps as many more as fit, leaving the Context about 20 points below the Watermark." TextWrapping="Wrap" />
+                                                                <NumericUpDown Grid.Column="1" Minimum="4" Maximum="24" Value="{Binding PortRules.CompactKeepTurns}" ToolTip.Tip="The fewest recent messages left intact when Compact shortens older history. It keeps as many more as fit, leaving the Context about 20 points below the Watermark." />
                                                             </Grid>
                                                             <Grid ColumnSpacing="8" Margin="0,0,20,6">
                                                                 <Grid.ColumnDefinitions>
@@ -2361,7 +2361,7 @@
 
                         <GroupBox Header="Model switch performance testing">
                             <StackPanel Margin="8" Spacing="8">
-                                <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                                <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
                                     <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Profile A" />
                                     <ComboBox Grid.Row="0"
                                               Grid.Column="1"
@@ -2378,16 +2378,8 @@
                                               ItemTemplate="{StaticResource SwitchBenchmarkProfileOptionTemplate}"
                                               ToolTip.Tip="Second tested model in the switch. Local or cloud. ⚠ means this profile is not trusted right now: last connection failed, settings were saved after Validate, or a local model is missing." />
 
-                                    <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Top" Text="Focus" />
-                                    <TextBox Grid.Row="2"
-                                             Grid.Column="1"
-                                             Text="{Binding SwitchBenchmarkFocusText}"
-                                             AcceptsReturn="True"
-                                             TextWrapping="Wrap"
-                                             PlaceholderText="Describe the continuity or context-retention scenario to test." />
-
-                                    <TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Text="Order" />
-                                    <Grid Grid.Row="3" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                                    <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Text="Order" />
+                                    <Grid Grid.Row="2" Grid.Column="1" ColumnDefinitions="*,Auto" ColumnSpacing="8">
                                         <ComboBox Grid.Column="0"
                                                   ItemsSource="{Binding SwitchBenchmarkOrderOptions}"
                                                   SelectedItem="{Binding SelectedSwitchBenchmarkOrder}" />
@@ -2399,7 +2391,7 @@
                                 <TextBlock TextWrapping="Wrap"
                                            FontSize="{DynamicResource FluxFontSizeCaption}"
                                            Opacity="0.75"
-                                           Text="Nominate any two cloud or local model profiles; one as Profile A and one as Profile B. (Only profiles that have been validated to endpoint in their respective settings panels are offered.) The benchmark will launch Profile A with a nominal task, hand the chat to Profile B, then return it to Profile A and then score how well the task anchors survived the round trip." />
+                                           Text="Pick any two validated model profiles, local or cloud. The test plants ten made-up facts through a long agent chat, sends that whole chat through Port to Profile A, then to Profile B, then back to Profile A, the way a Client app resends it, so AI-FluxMux shortens it for each profile exactly as in real use. Each profile is asked questions only those facts answer. It runs two chat sizes: one that fits both profiles, and one larger than the smaller profile's Context. The result lists the facts each profile lost, what AI-FluxMux shortened, and which settings to change. It reloads llama-server three times and can take several minutes." />
                                 <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10" RowSpacing="8">
                                     <TextBlock Grid.Column="0" VerticalAlignment="Top" Text="Result" />
                                     <TextBox Grid.Column="1"

@@ -85,37 +85,6 @@ public sealed class FluxMuxRuntimeService
 
 	private readonly record struct RouteSlotDescriptor(string SlotId, string Label, string RouteType, string CloudProvider, string CloudModel, string LocalModel, string LocalVariant, string DisplayLabel, string ProbeModelLabel, bool IsValid);
 
-	private readonly record struct ContextFidelityScore(int EssentialHits, int EssentialTotal, int NoiseHits, int NoiseTotal);
-
-	private readonly record struct ContextFidelityTierDefinition(int Level, string Name, int MinEssentialHits, int MaxNoiseHits);
-
-	private sealed record ContextFidelityTierResult(int Level, string TierName, string Status, bool Passed, bool IsSuccess, int EssentialHits, int EssentialTotal, int NoiseHits, int NoiseTotal, string LocalLaunchDetails, string CloudLaunchDetails, string LocalReturnDetails, string LocalFirstContent, string LocalReturnContent, long AverageLatencyMs, int TotalPromptTokens, string Details)
-	{
-		public JsonObject ToJsonNode()
-		{
-			return new JsonObject
-			{
-				["level"] = Level,
-				["tierName"] = TierName,
-				["status"] = Status,
-				["passed"] = Passed,
-				["isSuccess"] = IsSuccess,
-				["essentialHits"] = EssentialHits,
-				["essentialTotal"] = EssentialTotal,
-				["noiseHits"] = NoiseHits,
-				["noiseTotal"] = NoiseTotal,
-				["averageLatencyMs"] = AverageLatencyMs,
-				["totalPromptTokens"] = TotalPromptTokens,
-				["details"] = Details,
-				["localLaunchDetails"] = LocalLaunchDetails,
-				["cloudLaunchDetails"] = CloudLaunchDetails,
-				["localReturnDetails"] = LocalReturnDetails,
-				["localFirstContent"] = LocalFirstContent,
-				["localReturnContent"] = LocalReturnContent
-			};
-		}
-	}
-
 	public readonly record struct LocalVisionRecommendation(bool Enabled, string ProjectorPath, string Hint);
 
 	public sealed class LocalHardwareLaunchAdvice
@@ -4813,307 +4782,250 @@ public sealed class FluxMuxRuntimeService
 		};
 	}
 
-	public async Task<RuntimeActionResult> RunSwitchBenchmarkAsync(string cloudProvider, string cloudModel, string selectedLocalModel, string selectedVariant, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, string benchmarkFocus, Action<string>? progressReporter = null, CancellationToken cancellationToken = default(CancellationToken), SwitchBenchmarkRouteSelection? profileA = null, SwitchBenchmarkRouteSelection? profileB = null)
+	/// <summary>
+	/// The Live-Switch fidelity test: the same planted-fact chat is sent through Port to Profile A,
+	/// then Profile B, then Profile A again (B's answers in the chat by then), each time as a Client
+	/// app sends it, and the facts each profile recalls are scored. See <see cref="SwitchFidelityTest"/>
+	/// for why the old anchor-word benchmark was replaced.
+	/// </summary>
+	public async Task<RuntimeActionResult> RunSwitchBenchmarkAsync(string cloudProvider, string cloudModel, string selectedLocalModel, string selectedVariant, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, Action<string>? progressReporter = null, CancellationToken cancellationToken = default(CancellationToken), SwitchBenchmarkRouteSelection? profileA = null, SwitchBenchmarkRouteSelection? profileB = null)
 	{
-		string focusText = (string.IsNullOrWhiteSpace(benchmarkFocus) ? "Preserve relevant task context across local and cloud switches, filter iterative background chatter from both sides, and compress expanded context back into local chat without meaningful loss or disconnections." : benchmarkFocus.Trim());
 		JsonObject configRoot = LoadJsonCached(_configPath);
-		(RouteSlotDescriptor Selection1, RouteSlotDescriptor Selection2)? slotPair = (((object)profileA != null && (object)profileB != null) ? new(RouteSlotDescriptor, RouteSlotDescriptor)?((BuildBenchmarkProfileDescriptor(profileA, "Profile A"), BuildBenchmarkProfileDescriptor(profileB, "Profile B"))) : ResolveBenchmarkRoutePair(configRoot, cloudProvider, cloudModel, selectedLocalModel, selectedVariant));
-		if (!slotPair.HasValue)
+		(RouteSlotDescriptor Selection1, RouteSlotDescriptor Selection2)? slotPair = (profileA is not null && profileB is not null)
+			? (BuildBenchmarkProfileDescriptor(profileA, "Profile A"), BuildBenchmarkProfileDescriptor(profileB, "Profile B"))
+			: ResolveBenchmarkRoutePair(configRoot, cloudProvider, cloudModel, selectedLocalModel, selectedVariant);
+		if (!slotPair.HasValue || !slotPair.Value.Selection1.IsValid || !slotPair.Value.Selection2.IsValid)
 		{
 			return new RuntimeActionResult
 			{
 				IsSuccess = false,
-				Status = "Switch benchmark failed",
-				Details = "Could not resolve two model profiles for switch testing."
+				Status = "Switch test could not start",
+				Details = "Pick two model profiles with valid route details as Profile A and Profile B."
 			};
 		}
-		RouteSlotDescriptor slot1 = slotPair.Value.Selection1;
-		RouteSlotDescriptor slot2 = slotPair.Value.Selection2;
-		if (!slot1.IsValid || !slot2.IsValid)
-		{
-			return new RuntimeActionResult
-			{
-				IsSuccess = false,
-				Status = "Switch benchmark failed",
-				Details = "Both Profile A and Profile B must have valid route details before running switch benchmark."
-			};
-		}
-		RouteSlotDescriptor benchmarkCloud = new RouteSlotDescriptor[2] { slot1, slot2 }.FirstOrDefault((RouteSlotDescriptor routeSlotDescriptor) => routeSlotDescriptor.RouteType.Equals("cloud", StringComparison.OrdinalIgnoreCase));
-		RouteSlotDescriptor benchmarkLocal = new RouteSlotDescriptor[2] { slot1, slot2 }.FirstOrDefault((RouteSlotDescriptor routeSlotDescriptor) => routeSlotDescriptor.RouteType.Equals("local", StringComparison.OrdinalIgnoreCase));
-		string benchmarkCloudProvider = benchmarkCloud.CloudProvider ?? cloudProvider;
-		string benchmarkCloudModel = benchmarkCloud.CloudModel ?? cloudModel;
-		string activeCloudVariant = FirstNonEmpty((profileA?.RouteType.Equals("Cloud", StringComparison.OrdinalIgnoreCase) ?? false) ? profileA.Variant : (profileB?.Variant ?? string.Empty), GetString(configRoot, "ActiveCloudVariant"), "Variant 1");
-		string benchmarkLocalModel = benchmarkLocal.LocalModel ?? selectedLocalModel;
-		string benchmarkLocalVariant = benchmarkLocal.LocalVariant ?? selectedVariant;
-		JsonObject localVariantSettings = ResolveLocalProfile(configRoot, benchmarkLocalModel, benchmarkLocalVariant);
-		JsonObject cloudVariantSettings = ResolveCloudProfile(configRoot, benchmarkCloudProvider, benchmarkCloudModel, activeCloudVariant);
-		ContextFidelityTierDefinition[] tierDefinitions = GetContextFidelityTierDefinitions();
-		List<ContextFidelityTierResult> tierResults = new List<ContextFidelityTierResult>();
-		bool restoreSelection1Needed = true;
-		RuntimeActionResult result;
+
+		RouteSlotDescriptor slotA = slotPair.Value.Selection1;
+		RouteSlotDescriptor slotB = slotPair.Value.Selection2;
+		SwitchFidelityTest.ProfileSummary summaryA = DescribeFidelityProfile(configRoot, slotA);
+		SwitchFidelityTest.ProfileSummary summaryB = DescribeFidelityProfile(configRoot, slotB);
+		IReadOnlyList<SwitchFidelityTest.Tier> tiers = SwitchFidelityTest.PlanTiers(summaryA.Context, summaryB.Context);
+		Dictionary<string, JsonArray> chats = tiers.ToDictionary(t => t.Name, t => SwitchFidelityTest.BuildChat(t.TargetTokens));
+		// Tier sizes are real tokens, but the chat is built by the chars / 4 estimate, which this
+		// code-heavy chat undercounts by about 1.5x (26 Nov: the "Pressure" chat came out larger than
+		// both profiles). After Profile A reads the first chat, the measured ratio rebuilds the rest.
+		double tokenRatio = 1.0;
+		List<SwitchFidelityTest.PhaseResult> phases = new List<SwitchFidelityTest.PhaseResult>();
+		bool endedOnProfileA = false;
 		try
 		{
-			tierResults.AddRange(await RunBatchedContextFidelityTiersAsync(tierDefinitions, slot1, slot2, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, focusText, progressReporter, cancellationToken));
-			ContextFidelityTierResult blockedTier = tierResults.FirstOrDefault((ContextFidelityTierResult contextFidelityTierResult) => !contextFidelityTierResult.IsSuccess);
-			if ((object)blockedTier != null)
+			// Three loads (A, B, A again), every chat size per load.
+			foreach ((string phase, RouteSlotDescriptor slot, SwitchFidelityTest.ProfileSummary summary) in new[] { ("A", slotA, summaryA), ("B", slotB, summaryB), ("A again", slotA, summaryA) })
 			{
-				string blockerSummary = BuildSwitchBenchmarkBlockerSummary(blockedTier, slot1, slot2);
-				bool probeFailure = blockedTier.Status.Equals("Probe failed", StringComparison.OrdinalIgnoreCase);
-				string blockedStatus = ((!blockerSummary.Contains("Profile B", StringComparison.OrdinalIgnoreCase)) ? (probeFailure ? "Switch benchmark blocked: Profile A chat probe failed" : "Switch benchmark blocked: Profile A route did not become ready") : (probeFailure ? "Switch benchmark blocked: Profile B chat probe failed" : "Switch benchmark blocked: Profile B route did not become ready"));
-				RuntimeActionResult failure = new RuntimeActionResult
+				string who = (phase == "B" ? "Profile B" : "Profile A") + " (" + summary.Label + ")";
+				progressReporter?.Invoke("Switch test: loading " + who + "...");
+				await StopCloudAsync();
+				await StopLocalAsync();
+				await WaitForPortToCloseAsync(port + 1, cancellationToken);
+				RuntimeActionResult launch = await LaunchRouteSlotAsync(slot, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, cancellationToken);
+				if (!launch.IsSuccess)
 				{
-					IsSuccess = false,
-					Status = blockedStatus,
-					Details = blockerSummary + Environment.NewLine + "Technical detail: " + blockedTier.Details
-				};
-				AppendSwitchBenchmarkLog(benchmarkCloudProvider, benchmarkCloudModel, activeCloudVariant, benchmarkLocalModel, benchmarkLocalVariant, localVariantSettings, cloudVariantSettings, port, focusText, tierResults);
-				result = failure;
-			}
-			else
-			{
-				bool overallPassed = tierResults.All((ContextFidelityTierResult x) => x.IsSuccess && x.Passed);
-				StringBuilder overallSummary = new StringBuilder();
-				overallSummary.AppendLine("Context fidelity tiers completed.");
-				foreach (ContextFidelityTierResult tierResult in tierResults)
-				{
-					overallSummary.AppendLine(BuildTierResultSummary(tierResult));
+					foreach (SwitchFidelityTest.Tier tier in tiers)
+					{
+						phases.Add(FailedFidelityPhase(tier, phase, summary.Label, 0, "could not load the profile: " + launch.Status + ". " + launch.Details));
+					}
+
+					break;
 				}
-				StringBuilder stringBuilder = overallSummary;
-				StringBuilder stringBuilder2 = stringBuilder;
-				StringBuilder.AppendInterpolatedStringHandler handler = new StringBuilder.AppendInterpolatedStringHandler(7, 1, stringBuilder);
-				handler.AppendLiteral("Focus: ");
-				handler.AppendFormatted(focusText);
-				stringBuilder2.AppendLine(ref handler);
-				StringBuilder advancedSummary = new StringBuilder();
-				advancedSummary.AppendLine("Benchmark diagnostics");
-				stringBuilder = advancedSummary;
-				StringBuilder stringBuilder3 = stringBuilder;
-				handler = new StringBuilder.AppendInterpolatedStringHandler(24, 3, stringBuilder);
-				handler.AppendLiteral("Route sequence: ");
-				handler.AppendFormatted(slot1.DisplayLabel);
-				handler.AppendLiteral(" -> ");
-				handler.AppendFormatted(slot2.DisplayLabel);
-				handler.AppendLiteral(" -> ");
-				handler.AppendFormatted(slot1.DisplayLabel);
-				stringBuilder3.AppendLine(ref handler);
-				stringBuilder = advancedSummary;
-				StringBuilder stringBuilder4 = stringBuilder;
-				handler = new StringBuilder.AppendInterpolatedStringHandler(34, 1, stringBuilder);
-				handler.AppendLiteral("Public endpoint: http://127.0.0.1:");
-				handler.AppendFormatted(port);
-				stringBuilder4.AppendLine(ref handler);
-				ContextFidelityTierResult firstCompletedTier = tierResults.FirstOrDefault();
-				if ((object)firstCompletedTier != null)
+
+				foreach (SwitchFidelityTest.Tier tier in tiers)
 				{
-					advancedSummary.AppendLine("Profile A initial launch: " + firstCompletedTier.LocalLaunchDetails);
-					advancedSummary.AppendLine("Profile B launch: " + firstCompletedTier.CloudLaunchDetails);
-					advancedSummary.AppendLine("Profile A return launch: " + firstCompletedTier.LocalReturnDetails);
+					string profileBReply = phases.FirstOrDefault(p => p.Tier == tier.Name && p.Phase == "B")?.Reply ?? string.Empty;
+					JsonArray messages = phase == "A again"
+						? SwitchFidelityTest.ReturnChat(chats[tier.Name], profileBReply)
+						: SwitchFidelityTest.WithRecallQuestion(chats[tier.Name]);
+					progressReporter?.Invoke("Switch test: " + who + " checking recall on the " + tier.Name + " chat (~" + tier.TargetTokens.ToString("N0", CultureInfo.InvariantCulture) + " tokens)...");
+					SwitchFidelityTest.PhaseResult result = await RunFidelityPhaseAsync(port, slot, summary.Label, tier, phase, messages, tokenRatio, cancellationToken);
+					phases.Add(result);
+					if (phase == "A" && tokenRatio == 1.0 && result.PromptTokens is int measured && measured > 0 && result.EstimatedTokens > 0)
+					{
+						tokenRatio = Math.Clamp(measured / (double)result.EstimatedTokens, 0.5, 3.0);
+						foreach (SwitchFidelityTest.Tier later in tiers.SkipWhile(t => t.Name != tier.Name).Skip(1))
+						{
+							chats[later.Name] = SwitchFidelityTest.BuildChat((int)(later.TargetTokens / tokenRatio));
+						}
+					}
 				}
-				foreach (ContextFidelityTierResult tierResult2 in tierResults)
-				{
-					advancedSummary.AppendLine(BuildTierSummary(tierResult2, focusText));
-				}
-				AppendSwitchBenchmarkLog(benchmarkCloudProvider, benchmarkCloudModel, activeCloudVariant, benchmarkLocalModel, benchmarkLocalVariant, localVariantSettings, cloudVariantSettings, port, focusText, tierResults);
-				restoreSelection1Needed = false;
-				result = new RuntimeActionResult
-				{
-					IsSuccess = overallPassed,
-					Status = (overallPassed ? "Switch benchmark complete" : "Switch benchmark completed with fidelity warnings"),
-					Details = overallSummary.ToString().Trim(),
-					AdvancedDetails = advancedSummary.ToString().Trim()
-				};
+
+				endedOnProfileA = phase == "A again";
 			}
 		}
 		finally
 		{
-			if (restoreSelection1Needed)
+			if (!endedOnProfileA)
 			{
 				try
 				{
 					await StopCloudAsync();
 					await StopLocalAsync();
 					await WaitForPortToCloseAsync(port + 1, CancellationToken.None);
-					await LaunchRouteSlotAsync(slot1, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, CancellationToken.None);
+					await LaunchRouteSlotAsync(slotA, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, CancellationToken.None);
 				}
 				catch
 				{
 				}
 			}
 		}
-		return result;
+
+		(string summaryText, string details, string recommendations) = SwitchFidelityTest.BuildReport(summaryA, summaryB, tiers, phases);
+		AppendSwitchFidelityLog(summaryA, summaryB, tiers, phases);
+		bool completed = phases.Count == tiers.Count * 3 && phases.All(p => !p.Failed);
+		bool lossless = completed && phases.All(p => p.RecalledCount == SwitchFidelityTest.Facts.Count);
+		return new RuntimeActionResult
+		{
+			IsSuccess = completed,
+			Status = !completed ? "Switch test did not complete" : (lossless ? "Switch test complete: no facts lost" : "Switch test complete: some facts were lost"),
+			Details = summaryText + Environment.NewLine + Environment.NewLine + details,
+			AdvancedDetails = details,
+			Recommendation = recommendations
+		};
 	}
 
-	private async Task<IReadOnlyList<ContextFidelityTierResult>> RunBatchedContextFidelityTiersAsync(IReadOnlyList<ContextFidelityTierDefinition> tiers, RouteSlotDescriptor slot1, RouteSlotDescriptor slot2, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, string focusText, Action<string>? progressReporter, CancellationToken cancellationToken)
+	private static SwitchFidelityTest.PhaseResult FailedFidelityPhase(SwitchFidelityTest.Tier tier, string phase, string profile, int estimatedTokens, string error)
+		=> new SwitchFidelityTest.PhaseResult(tier.Name, phase, profile, estimatedTokens, null, SwitchFidelityTest.Facts.Select(_ => false).ToList(), SwitchFidelityTest.Facts.Select(_ => string.Empty).ToList(), Array.Empty<string>(), string.Empty, error, string.Empty);
+
+	/// <summary>The Context, YaRN, KV and compaction settings of a test profile, which decide how much
+	/// of a resent chat it keeps.</summary>
+	private static SwitchFidelityTest.ProfileSummary DescribeFidelityProfile(JsonObject configRoot, RouteSlotDescriptor slot)
 	{
-		List<ContextFidelityTierResult> results = new List<ContextFidelityTierResult>();
-		Dictionary<int, ChatProbeResult> profileAProbes = new Dictionary<int, ChatProbeResult>();
-		Dictionary<int, ChatProbeResult> profileBProbes = new Dictionary<int, ChatProbeResult>();
-		string portLabel = $"http://127.0.0.1:{port}";
-		int slot1WarmupBudgetMs = GetRouteWarmupBudgetMs(slot1);
-		int slot2WarmupBudgetMs = GetRouteWarmupBudgetMs(slot2);
-		await StopCloudAsync();
-		await StopLocalAsync();
-		await WaitForPortToCloseAsync(port + 1, cancellationToken);
-		progressReporter?.Invoke("Switch benchmark running: launching Profile A for all fidelity tiers...");
-		RuntimeActionResult profileALaunch = await LaunchRouteSlotAsync(slot1, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, cancellationToken);
-		if (!profileALaunch.IsSuccess)
+		if (!slot.RouteType.Equals("local", StringComparison.OrdinalIgnoreCase))
 		{
-			return new ContextFidelityTierResult[] { BuildTierFailure(tiers[0], portLabel, "profile-a-first", string.Empty, profileALaunch) };
+			JsonObject cloud = ResolveCloudProfile(configRoot, slot.CloudProvider, slot.CloudModel, string.Empty);
+			int cloudContext = int.TryParse(GetString(cloud, "CloudContextWindow"), NumberStyles.Integer, CultureInfo.InvariantCulture, out int c) && c > 0 ? c : 128000;
+			return new SwitchFidelityTest.ProfileSummary(slot.DisplayLabel, cloudContext, "cloud, Context ~" + cloudContext.ToString("N0", CultureInfo.InvariantCulture) + " (provider setting or assumed)");
 		}
-		foreach (ContextFidelityTierDefinition tier in tiers)
+
+		JsonObject local = ResolveLocalProfile(configRoot, slot.LocalModel, slot.LocalVariant);
+		int context = int.TryParse(GetString(local, "OverrideContext"), NumberStyles.Integer, CultureInfo.InvariantCulture, out int n) && n > 0 ? n : 131072;
+		bool yarn = GetString(local, "LocalRopeScaling").Equals("yarn", StringComparison.OrdinalIgnoreCase);
+		string mode = FirstNonEmpty(GetString(local, "LocalAutoCompactMode"), "port-rules");
+		string compaction = mode switch
 		{
-			progressReporter?.Invoke("Switch benchmark running: " + tier.Name + " checking Profile A route...");
-			ChatProbeResult probe = await SendChatProbeWithWarmupRetryAsync(port, slot1.ProbeModelLabel, BuildSwitchBenchmarkMessages(focusText, tier.Level, "profile-a-first"), "profile-a-first", slot1WarmupBudgetMs, progressReporter, cancellationToken, slot1.RouteType);
-			if (!probe.IsSuccess)
-			{
-				List<ContextFidelityTierResult> list = results;
-				int writeOffset = 0;
-				ContextFidelityTierResult[] array = new ContextFidelityTierResult[1 + list.Count];
-				Span<ContextFidelityTierResult> span = CollectionsMarshal.AsSpan(list);
-				span.CopyTo(new Span<ContextFidelityTierResult>(array).Slice(writeOffset, span.Length));
-				writeOffset += span.Length;
-				array[writeOffset] = BuildTierFailure(tier, portLabel, "profile-a-first", profileALaunch.Details, probe);
-				return array;
-			}
-			profileAProbes[tier.Level] = probe;
-		}
-		await StopRouteSlotAsync(slot1);
-		if (slot1.RouteType.Equals("local", StringComparison.OrdinalIgnoreCase))
-		{
-			await WaitForPortToCloseAsync(port + 1, cancellationToken);
-		}
-		progressReporter?.Invoke("Switch benchmark running: launching Profile B for all fidelity tiers...");
-		RuntimeActionResult profileBLaunch = await LaunchRouteSlotAsync(slot2, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, cancellationToken);
-		if (!profileBLaunch.IsSuccess)
-		{
-			return new ContextFidelityTierResult[] { BuildTierFailure(tiers[0], portLabel, "profile-b-switch", profileALaunch.Details, profileBLaunch) };
-		}
-		foreach (ContextFidelityTierDefinition tier2 in tiers)
-		{
-			progressReporter?.Invoke("Switch benchmark running: " + tier2.Name + " checking Profile B route...");
-			ChatProbeResult probe2 = await SendChatProbeWithWarmupRetryAsync(port, slot2.ProbeModelLabel, BuildSwitchBenchmarkMessages(focusText, tier2.Level, "profile-b-switch", profileAProbes[tier2.Level].Content), "profile-b-switch", slot2WarmupBudgetMs, progressReporter, cancellationToken, slot2.RouteType);
-			if (!probe2.IsSuccess)
-			{
-				return new ContextFidelityTierResult[] { BuildTierFailure(tier2, portLabel, "profile-b-switch", profileBLaunch.Details, probe2) };
-			}
-			profileBProbes[tier2.Level] = probe2;
-		}
-		await StopRouteSlotAsync(slot2);
-		if (slot2.RouteType.Equals("local", StringComparison.OrdinalIgnoreCase))
-		{
-			await WaitForPortToCloseAsync(port + 1, cancellationToken);
-		}
-		progressReporter?.Invoke("Switch benchmark running: returning to Profile A for all fidelity tiers...");
-		RuntimeActionResult profileAReturnLaunch = await LaunchRouteSlotAsync(slot1, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, cancellationToken);
-		if (!profileAReturnLaunch.IsSuccess)
-		{
-			return new ContextFidelityTierResult[] { BuildTierFailure(tiers[0], portLabel, "profile-a-return", profileBLaunch.Details, profileAReturnLaunch) };
-		}
-		foreach (ContextFidelityTierDefinition tier3 in tiers)
-		{
-			progressReporter?.Invoke("Switch benchmark running: " + tier3.Name + " checking Profile A return route...");
-			ChatProbeResult returnProbe = await SendChatProbeWithWarmupRetryAsync(port, slot1.ProbeModelLabel, BuildSwitchBenchmarkMessages(focusText, tier3.Level, "profile-a-return", profileBProbes[tier3.Level].Content), "profile-a-return", slot1WarmupBudgetMs, progressReporter, cancellationToken, slot1.RouteType);
-			if (!returnProbe.IsSuccess)
-			{
-				List<ContextFidelityTierResult> list = results;
-				int writeOffset = 0;
-				ContextFidelityTierResult[] array = new ContextFidelityTierResult[1 + list.Count];
-				Span<ContextFidelityTierResult> span = CollectionsMarshal.AsSpan(list);
-				span.CopyTo(new Span<ContextFidelityTierResult>(array).Slice(writeOffset, span.Length));
-				writeOffset += span.Length;
-				array[writeOffset] = BuildTierFailure(tier3, portLabel, "profile-a-return", profileAReturnLaunch.Details, returnProbe);
-				return array;
-			}
-			ChatProbeResult profileAProbe = profileAProbes[tier3.Level];
-			ChatProbeResult profileBProbe = profileBProbes[tier3.Level];
-			ContextFidelityScore score = ComputeAnchorScore(focusText, returnProbe.Content);
-			int requiredEssentialHits = Math.Max(1, (int)Math.Ceiling((double)score.EssentialTotal * ((tier3.Level == 1) ? 0.7 : 0.8)));
-			bool passed = score.EssentialHits >= requiredEssentialHits && score.NoiseHits <= tier3.MaxNoiseHits;
-			long averageLatency = Convert.ToInt64(Math.Round((double)(profileAProbe.LatencyMs + profileBProbe.LatencyMs + returnProbe.LatencyMs) / 3.0, 0));
-			string profileADelay = FormatDurationMs((int)Math.Min(2147483647L, Math.Max(0L, profileAProbe.ProbeWindowMs)));
-			string profileBDelay = FormatDurationMs((int)Math.Min(2147483647L, Math.Max(0L, profileBProbe.ProbeWindowMs)));
-			string profileAReturnDelay = FormatDurationMs((int)Math.Min(2147483647L, Math.Max(0L, returnProbe.ProbeWindowMs)));
-			results.Add(new ContextFidelityTierResult(tier3.Level, tier3.Name, passed ? "Pass" : "Needs attention", passed, IsSuccess: true, score.EssentialHits, score.EssentialTotal, score.NoiseHits, score.NoiseTotal, profileALaunch.Details, profileBLaunch.Details, profileAReturnLaunch.Details, profileAProbe.Content, profileBProbe.Content, averageLatency, profileAProbe.PromptTokens.GetValueOrDefault() + profileBProbe.PromptTokens.GetValueOrDefault() + returnProbe.PromptTokens.GetValueOrDefault(), $"{portLabel}; Profile A {profileAProbe.LatencyMs}ms, Profile B {profileBProbe.LatencyMs}ms, Profile A return {returnProbe.LatencyMs}ms. Probe durations: Profile A {profileADelay}, Profile B {profileBDelay}, Profile A return {profileAReturnDelay}. Batched lifecycle: both fidelity tiers ran per loaded route, requiring three route loads instead of five. Chat handoff: Profile A response was transferred to Profile B, then Profile B response was transferred to returning Profile A." + (passed ? string.Empty : $" Thresholds unmet for {tier3.Name}: final-return essential {score.EssentialHits}/{requiredEssentialHits}, distractors {score.NoiseHits}/{tier3.MaxNoiseHits}.")));
-		}
-		return results;
+			"none" => "compaction by the Client app (AI-FluxMux only at 95 %)",
+			"per-profile" => "compaction by AI-FluxMux, keep " + FirstNonEmpty(GetString(local, "LocalAutoCompactKeepTurns"), "?") + " turns, pin " + FirstNonEmpty(GetString(local, "LocalAutoCompactPinUserChars"), "?") + " chars",
+			_ => "compaction by AI-FluxMux Port rules"
+		};
+		string detail = "Context " + context.ToString("N0", CultureInfo.InvariantCulture) + (yarn ? " (YaRN)" : string.Empty)
+			+ ", " + FirstNonEmpty(GetString(local, "LocalGpuOffloadMode"), "GPU offload Auto")
+			+ ", KV " + FirstNonEmpty(GetString(local, "LocalKvCacheTypeK"), "f16") + "/" + FirstNonEmpty(GetString(local, "LocalKvCacheTypeV"), "f16")
+			+ ", " + compaction;
+		return new SwitchFidelityTest.ProfileSummary(slot.DisplayLabel, context, detail);
 	}
 
-	private async Task<ContextFidelityTierResult> RunRouteAgnosticContextFidelityTierAsync(ContextFidelityTierDefinition tier, RouteSlotDescriptor slot1, RouteSlotDescriptor slot2, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, string focusText, Action<string>? progressReporter, CancellationToken cancellationToken, bool profileAAlreadyReady)
+	private async Task<SwitchFidelityTest.PhaseResult> RunFidelityPhaseAsync(int port, RouteSlotDescriptor slot, string profileLabel, SwitchFidelityTest.Tier tier, string phase, JsonArray messages, double tokenRatio, CancellationToken cancellationToken)
 	{
-		string portLabel = $"http://127.0.0.1:{port}";
-		int slot1WarmupBudgetMs = GetRouteWarmupBudgetMs(slot1);
-		int slot2WarmupBudgetMs = GetRouteWarmupBudgetMs(slot2);
-		_ = string.Empty;
-		_ = string.Empty;
-		string selection1LaunchDetails;
-		if (!profileAAlreadyReady)
+		// The whole chat's expected size in the model's own tokens (estimate x measured ratio), so
+		// "llama-server read fewer tokens than this" really means AI-FluxMux shortened it.
+		int estimated = (int)(LocalRequestOverlayRouting.EstimatePromptTokens(new JsonObject { ["messages"] = messages.DeepClone() }) * tokenRatio);
+		// A YaRN profile that extends into RAM can read as slowly as a few hundred tokens a second,
+		// so the wait scales with the chat (about 250 tokens a second, 20 minutes at most).
+		int timeoutMs = (int)Math.Clamp(120000L + estimated * 4L, 120000L, 1200000L);
+		int warmupBudgetMs = Math.Max(30000, GetRouteWarmupBudgetMs(slot));
+		Stopwatch elapsed = Stopwatch.StartNew();
+		long logOffset = ProxyLogLength();
+		FidelityTurn turn = await SendClientTurnAsync(port, slot.ProbeModelLabel, messages, 700, timeoutMs, cancellationToken);
+		while (!turn.IsSuccess && IsTransientWarmupProbeFailure(turn.Details) && elapsed.ElapsedMilliseconds < warmupBudgetMs)
 		{
-			await StopCloudAsync();
-			await StopLocalAsync();
-			await WaitForPortToCloseAsync(port + 1, cancellationToken);
-			progressReporter?.Invoke("Switch benchmark running: " + tier.Name + " launching Profile A route...");
-			RuntimeActionResult selection1Launch = await LaunchRouteSlotAsync(slot1, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, cancellationToken);
-			if (!selection1Launch.IsSuccess)
+			await Task.Delay(3000, cancellationToken);
+			logOffset = ProxyLogLength();
+			turn = await SendClientTurnAsync(port, slot.ProbeModelLabel, messages, 700, timeoutMs, cancellationToken);
+		}
+
+		// The gateway log is written off the request thread, so give it a moment before reading.
+		await Task.Delay(800, cancellationToken);
+		IReadOnlyList<string> notes = SwitchFidelityTest.ShorteningNotes(ReadProxyLogSince(logOffset));
+		if (!turn.IsSuccess)
+		{
+			return FailedFidelityPhase(tier, phase, profileLabel, estimated, turn.Details) with { GatewayNotes = notes };
+		}
+
+		(IReadOnlyList<bool> recalled, IReadOnlyList<string> answers) = SwitchFidelityTest.Score(turn.Content);
+		return new SwitchFidelityTest.PhaseResult(tier.Name, phase, profileLabel, estimated, turn.PromptTokens, recalled, answers, notes, turn.FinishReason, string.Empty, turn.Content);
+	}
+
+	private sealed record FidelityTurn(bool IsSuccess, string Content, int? PromptTokens, string FinishReason, string Details);
+
+	/// <summary>
+	/// Sends a chat to Port as a Client app does: no probe header, so the gateway applies Compact,
+	/// Omit, the 95 % last resort and the session note exactly as for a real chat (it skips them for
+	/// probes), and the reply is kept whole.
+	/// </summary>
+	private async Task<FidelityTurn> SendClientTurnAsync(int port, string model, JsonArray messages, int maxTokens, int timeoutMs, CancellationToken cancellationToken)
+	{
+		JsonObject payload = new JsonObject
+		{
+			["model"] = string.IsNullOrWhiteSpace(model) ? "local" : model,
+			["stream"] = false,
+			["max_tokens"] = maxTokens,
+			["messages"] = messages.DeepClone()
+		};
+		using HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{port}/v1/chat/completions")
+		{
+			Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json")
+		};
+		request.Headers.ConnectionClose = true;
+		try
+		{
+			using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+			timeout.CancelAfter(timeoutMs);
+			using HttpResponseMessage response = await ProbeHttpClient.SendAsync(request, timeout.Token);
+			string raw = await response.Content.ReadAsStringAsync(timeout.Token);
+			if (!response.IsSuccessStatusCode)
 			{
-				return new ContextFidelityTierResult(tier.Level, tier.Name, selection1Launch.Status, Passed: false, IsSuccess: false, 0, 0, 0, 0, selection1Launch.Details, string.Empty, string.Empty, string.Empty, string.Empty, 0L, 0, selection1Launch.Details);
+				return new FidelityTurn(false, string.Empty, null, string.Empty, HttpErrorResponseFormatter.FormatHttpErrorDetail((int)response.StatusCode, response.ReasonPhrase, raw));
 			}
-			selection1LaunchDetails = selection1Launch.Details;
+
+			JsonObject? parsed = JsonNode.Parse(raw) as JsonObject;
+			JsonObject? choice = parsed?["choices"]?[0] as JsonObject;
+			JsonObject? message = choice?["message"] as JsonObject;
+			string content = FirstNonEmpty(message?["content"]?.ToString() ?? string.Empty, message?["reasoning_content"]?.ToString() ?? string.Empty);
+			return new FidelityTurn(true, content, ParseNullableInt(parsed?["usage"]?["prompt_tokens"]?.ToString()), choice?["finish_reason"]?.ToString() ?? string.Empty, string.Empty);
 		}
-		else
+		catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
 		{
-			selection1LaunchDetails = "Reused Profile A already ready from the preceding fidelity tier.";
-			progressReporter?.Invoke("Switch benchmark running: " + tier.Name + " reusing ready Profile A route...");
+			return new FidelityTurn(false, string.Empty, null, string.Empty, "timed out after " + FormatDurationMs(timeoutMs) + " waiting for the reply");
 		}
-		progressReporter?.Invoke("Switch benchmark running: " + tier.Name + " checking Profile A route...");
-		ChatProbeResult selection1Probe = await SendChatProbeWithWarmupRetryAsync(port, slot1.ProbeModelLabel, BuildSwitchBenchmarkMessages(focusText, tier.Level, "profile-a-first"), "profile-a-first", slot1WarmupBudgetMs, progressReporter, cancellationToken, slot1.RouteType);
-		if (!selection1Probe.IsSuccess)
+		catch (Exception ex)
 		{
-			return BuildTierFailure(tier, portLabel, "profile-a-first", selection1LaunchDetails, selection1Probe);
+			return new FidelityTurn(false, string.Empty, null, string.Empty, ex.GetType().Name + ": " + ex.GetBaseException().Message);
 		}
-		await StopRouteSlotAsync(slot1);
-		if (slot1.RouteType.Equals("local", StringComparison.OrdinalIgnoreCase))
+	}
+
+	private long ProxyLogLength()
+	{
+		try
 		{
-			await WaitForPortToCloseAsync(port + 1, cancellationToken);
+			return new FileInfo(_proxyCloudHandshakeLogPath).Length;
 		}
-		progressReporter?.Invoke("Switch benchmark running: " + tier.Name + " launching Profile B route...");
-		RuntimeActionResult selection2Launch = await LaunchRouteSlotAsync(slot2, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, cancellationToken);
-		if (!selection2Launch.IsSuccess)
+		catch
 		{
-			return BuildTierFailure(tier, portLabel, "profile-b-switch", selection1LaunchDetails, selection2Launch);
+			return 0L;
 		}
-		string selection2LaunchDetails = selection2Launch.Details;
-		progressReporter?.Invoke("Switch benchmark running: " + tier.Name + " checking Profile B route...");
-		ChatProbeResult selection2Probe = await SendChatProbeWithWarmupRetryAsync(port, slot2.ProbeModelLabel, BuildSwitchBenchmarkMessages(focusText, tier.Level, "profile-b-switch", selection1Probe.Content), "profile-b-switch", slot2WarmupBudgetMs, progressReporter, cancellationToken, slot2.RouteType);
-		if (!selection2Probe.IsSuccess)
+	}
+
+	private IReadOnlyList<string> ReadProxyLogSince(long offset)
+	{
+		try
 		{
-			return BuildTierFailure(tier, portLabel, "profile-b-switch", selection2LaunchDetails, selection2Probe);
+			using FileStream stream = new FileStream(_proxyCloudHandshakeLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+			// The log rotates at 20 MB; a shorter file means it started again.
+			stream.Seek(offset <= stream.Length ? offset : 0L, SeekOrigin.Begin);
+			using StreamReader reader = new StreamReader(stream);
+			return reader.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 		}
-		await StopRouteSlotAsync(slot2);
-		if (slot2.RouteType.Equals("local", StringComparison.OrdinalIgnoreCase))
+		catch
 		{
-			await WaitForPortToCloseAsync(port + 1, cancellationToken);
+			return Array.Empty<string>();
 		}
-		progressReporter?.Invoke("Switch benchmark running: " + tier.Name + " relaunching Profile A route...");
-		RuntimeActionResult selection1Relaunch = await LaunchRouteSlotAsync(slot1, modelDirectory, port, localVisionEnabled, localVisionProjectorPath, localVisionMaxImageEdge, cancellationToken);
-		if (!selection1Relaunch.IsSuccess)
-		{
-			return BuildTierFailure(tier, portLabel, "profile-a-return", selection2LaunchDetails, selection1Relaunch);
-		}
-		string selection1ReturnDetails = selection1Relaunch.Details;
-		progressReporter?.Invoke("Switch benchmark running: " + tier.Name + " checking Profile A return route...");
-		ChatProbeResult selection1ReturnProbe = await SendChatProbeWithWarmupRetryAsync(port, slot1.ProbeModelLabel, BuildSwitchBenchmarkMessages(focusText, tier.Level, "profile-a-return", selection2Probe.Content), "profile-a-return", slot1WarmupBudgetMs, progressReporter, cancellationToken, slot1.RouteType);
-		if (!selection1ReturnProbe.IsSuccess)
-		{
-			return BuildTierFailure(tier, portLabel, "profile-a-return", selection1ReturnDetails, selection1ReturnProbe);
-		}
-		ContextFidelityScore score = ComputeAnchorScore(focusText, selection1ReturnProbe.Content);
-		double averageLatency = Math.Round((double)(selection1Probe.LatencyMs + selection2Probe.LatencyMs + selection1ReturnProbe.LatencyMs) / 3.0, 0);
-		int requiredEssentialHits = Math.Max(1, (int)Math.Ceiling((double)score.EssentialTotal * ((tier.Level == 1) ? 0.7 : 0.8)));
-		bool passed = score.EssentialHits >= requiredEssentialHits && score.NoiseHits <= tier.MaxNoiseHits;
-		string selection1Delay = FormatDurationMs((int)Math.Min(2147483647L, Math.Max(0L, selection1Probe.ProbeWindowMs)));
-		string selection2Delay = FormatDurationMs((int)Math.Min(2147483647L, Math.Max(0L, selection2Probe.ProbeWindowMs)));
-		string selection1ReturnDelay = FormatDurationMs((int)Math.Min(2147483647L, Math.Max(0L, selection1ReturnProbe.ProbeWindowMs)));
-		return new ContextFidelityTierResult(tier.Level, tier.Name, passed ? "Pass" : "Needs attention", passed, IsSuccess: true, score.EssentialHits, score.EssentialTotal, score.NoiseHits, score.NoiseTotal, selection1LaunchDetails, selection2LaunchDetails, selection1ReturnDetails, selection1Probe.Content, selection2Probe.Content, Convert.ToInt64(averageLatency), selection1Probe.PromptTokens.GetValueOrDefault() + selection2Probe.PromptTokens.GetValueOrDefault() + selection1ReturnProbe.PromptTokens.GetValueOrDefault(), $"{portLabel}; selection1 {selection1Probe.LatencyMs}ms, selection2 {selection2Probe.LatencyMs}ms, selection1-return {selection1ReturnProbe.LatencyMs}ms. Readiness delays: selection1-first {selection1Delay} ({Math.Max(1, selection1Probe.AttemptsUsed)} attempts), selection2-switch {selection2Delay} ({Math.Max(1, selection2Probe.AttemptsUsed)} attempts), selection1-return {selection1ReturnDelay} ({Math.Max(1, selection1ReturnProbe.AttemptsUsed)} attempts)." + " Chat handoff: Profile A response was transferred to Profile B, then Profile B response was transferred to returning Profile A." + (passed ? string.Empty : $". Thresholds unmet for {tier.Name}: final-return essential {score.EssentialHits}/{requiredEssentialHits}, chatter {score.NoiseHits}/{tier.MaxNoiseHits}."));
 	}
 
 	private async Task<RuntimeActionResult> LaunchRouteSlotAsync(RouteSlotDescriptor slot, string modelDirectory, int port, bool localVisionEnabled, string localVisionProjectorPath, int localVisionMaxImageEdge, CancellationToken cancellationToken)
@@ -5773,227 +5685,6 @@ public sealed class FluxMuxRuntimeService
 		}
 	}
 
-	private static ContextFidelityTierDefinition[] GetContextFidelityTierDefinitions()
-	{
-		return new ContextFidelityTierDefinition[2]
-		{
-			new ContextFidelityTierDefinition(1, "Level 1 context fidelity", 9, 2),
-			new ContextFidelityTierDefinition(2, "Level 2 context fidelity", 11, 3)
-		};
-	}
-
-	private static JsonArray BuildSwitchBenchmarkMessages(string focusText, int level, string phase, string carriedHandoff = "")
-	{
-		string focus = (string.IsNullOrWhiteSpace(focusText) ? "Preserve relevant context while switching between two model profiles and returning to the first without meaningful loss or disconnection." : focusText.Trim());
-		string systemPrompt = ((level == 1) ? "You are benchmarking level 1 context fidelity. Ignore unrelated chatter, keep task-essential content, and compress it into a clean memory capsule." : "You are benchmarking level 2 context fidelity. Preserve task-essential content through a noisier multi-step history, filter background chatter from both sides, and avoid inventing new facts.");
-		JsonArray jsonArray;
-		switch (phase)
-		{
-		case "profile-a-first":
-		{
-			JsonArray jsonArray2 = new JsonArray();
-			jsonArray2.Add(new JsonObject
-			{
-				["role"] = "system",
-				["content"] = systemPrompt
-			});
-			JsonArray jsonArray5 = jsonArray2;
-			JsonObject jsonObject = new JsonObject { ["role"] = "user" };
-			JsonObject jsonObject4 = jsonObject;
-			IReadOnlyList<string> chatterLines3;
-			if (level != 1)
-			{
-				IReadOnlyList<string> readOnlyList = new string[] { "Aside: there were repeated confirmations, minor rewrites, and a few off-topic comments between checkpoints.", "Task essential: preserve the continuity cue, profile switching goal, and loss-minimization requirement intact.", "Task essential: keep Profile A from losing context when the benchmark returns after the Profile B pass." };
-				chatterLines3 = readOnlyList;
-			}
-			else
-			{
-				IReadOnlyList<string> readOnlyList = new string[] { "Aside: lunch and unrelated setup chatter happened between checkpoints.", "Task essential: keep the continuity cue, profile switching goal, and loss-minimization requirement intact." };
-				chatterLines3 = readOnlyList;
-			}
-			jsonObject4["content"] = BuildMessyContextTranscript(focus, level, "We need to compare two model profiles while preserving the original task thread.", chatterLines3, (level == 1) ? "First pass: produce a short memory capsule that filters noise and keeps the task essentials only." : "First pass: produce a compact memory capsule, then restate it with one extra sentence explaining what should survive the next switch.");
-			jsonArray5.Add(jsonObject);
-			jsonArray2.Add(new JsonObject
-			{
-				["role"] = "assistant",
-				["content"] = "Understood. I will keep task essentials and discard background chatter."
-			});
-			jsonArray2.Add(new JsonObject
-			{
-				["role"] = "user",
-				["content"] = ((level == 1) ? "Now restate the memory capsule as a compact checklist with no more than five bullets. Keep profile, switch, context, preserve, and loss if relevant." : "Now restate the memory capsule as a compact checklist with the task essential thread preserved and background chatter stripped out. Include the model-switch purpose, the continuity requirement, and the need to rehydrate context on return to Profile A.")
-			});
-			jsonArray = jsonArray2;
-			break;
-		}
-		case "profile-b-switch":
-		{
-			JsonArray jsonArray2 = new JsonArray();
-			jsonArray2.Add(new JsonObject
-			{
-				["role"] = "system",
-				["content"] = ((level == 1) ? "You are carrying a context capsule across a route switch. Remove chatter, keep the task essential, and do not invent new facts." : "You are carrying a noisier context capsule across a route switch. Filter iterative chatter from both sides, preserve the task thread, and do not invent new facts.")
-			});
-			JsonArray jsonArray4 = jsonArray2;
-			JsonObject jsonObject = new JsonObject { ["role"] = "user" };
-			JsonObject jsonObject3 = jsonObject;
-			IReadOnlyList<string> chatterLines2;
-			if (level != 1)
-			{
-				IReadOnlyList<string> readOnlyList = new string[] { "Ignore the background chatter about retries, unrelated diagnostics, and off-topic commentary.", "Task essential: preserve the continuity thread and note the different saved settings or model capabilities under comparison.", "Task essential: keep the user's original request intact so it can return to Profile A later." };
-				chatterLines2 = readOnlyList;
-			}
-			else
-			{
-				IReadOnlyList<string> readOnlyList = new string[] { "Ignore the background chatter about retries, unrelated diagnostics, and off-topic commentary.", "Task essential: preserve the continuity thread and the reason for comparing the two profiles." };
-				chatterLines2 = readOnlyList;
-			}
-			jsonObject3["content"] = BuildMessyContextTranscript(focus, level, "The session is switching from Profile A to Profile B to test context continuity across saved model settings.", chatterLines2, (level == 1) ? "Compress the capsule again for Profile B, using a short paragraph and a one-line memory note." : "Compress the capsule again for Profile B, using a short paragraph, a one-line memory note, and a brief note about what should survive the return to Profile A.");
-			jsonArray4.Add(jsonObject);
-			jsonArray2.Add(new JsonObject
-			{
-				["role"] = "assistant",
-				["content"] = "Acknowledged. I will preserve the task thread while filtering noise."
-			});
-			jsonArray2.Add(new JsonObject
-			{
-				["role"] = "user",
-				["content"] = ((level == 1) ? "Restate the retained essentials in a way that would survive the switch back to Profile A." : "Restate the retained essentials in a way that would survive the switch back to Profile A. Keep the noise-filtering rule explicit and avoid drifting into background chatter.")
-			});
-			jsonArray = jsonArray2;
-			break;
-		}
-		case "profile-a-return":
-		{
-			JsonArray jsonArray2 = new JsonArray();
-			jsonArray2.Add(new JsonObject
-			{
-				["role"] = "system",
-				["content"] = ((level == 1) ? "You are returning to Profile A after a Profile B pass. Reconstruct the essential task context, filter iterative chatter, and keep the chain of intent clear." : "You are returning to Profile A after a Profile B pass with a longer background history. Reconstruct the essential task context, strip chatter from both sides, and keep the chain of intent clear.")
-			});
-			JsonArray jsonArray3 = jsonArray2;
-			JsonObject jsonObject = new JsonObject { ["role"] = "user" };
-			JsonObject jsonObject2 = jsonObject;
-			IReadOnlyList<string> chatterLines;
-			if (level != 1)
-			{
-				IReadOnlyList<string> readOnlyList = new string[] { "Background chatter included small corrections, repeated confirmations, unrelated build noise, and a few off-topic clarifications.", "Task essential: the user wants to preserve relevant context across both profiles and avoid disconnections.", "Task essential: the rehydrated Profile A recap must keep the original motivation for switching visible." };
-				chatterLines = readOnlyList;
-			}
-			else
-			{
-				IReadOnlyList<string> readOnlyList = new string[] { "Background chatter included small corrections, repeated confirmations, and unrelated build noise.", "Task essential: the user wants to preserve relevant context across both profiles and avoid disconnections." };
-				chatterLines = readOnlyList;
-			}
-			jsonObject2["content"] = BuildMessyContextTranscript(focus, level, "We returned to Profile A and need to rehydrate the task without losing the reason for switching.", chatterLines, (level == 1) ? "Restore the original intent from the carried capsule and keep the result concise and task-clean." : "Restore the original intent from the carried capsule, keep the result concise and task-clean, and explicitly preserve the reason for the route switch.");
-			jsonArray3.Add(jsonObject);
-			jsonArray2.Add(new JsonObject
-			{
-				["role"] = "assistant",
-				["content"] = "Understood. I will restore task essentials and omit iterative chatter."
-			});
-			jsonArray2.Add(new JsonObject
-			{
-				["role"] = "user",
-				["content"] = ((level == 1) ? "Now produce the final Profile A recap as a paragraph plus a brief checklist of the essential anchors." : "Now produce the final Profile A recap as a paragraph plus a brief checklist of the essential anchors. Keep the task thread, the profile-switch reason, and the chatter-filtering rule explicit.")
-			});
-			jsonArray = jsonArray2;
-			break;
-		}
-		default:
-			jsonArray = new JsonArray
-			{
-				new JsonObject
-				{
-					["role"] = "system",
-					["content"] = "You are benchmarking context continuity across route switches. Keep the response concise, faithful, and compression-friendly."
-				},
-				new JsonObject
-				{
-					["role"] = "user",
-					["content"] = focus
-				}
-			};
-			break;
-		}
-		JsonArray jsonArray6 = jsonArray;
-		if (!string.IsNullOrWhiteSpace(carriedHandoff))
-		{
-			jsonArray6.Add(new JsonObject
-			{
-				["role"] = "user",
-				["content"] = "Continue from the exact response produced by the previous profile. Treat it as the authoritative chat handoff capsule and preserve its task intent.\n\n--- BEGIN HANDOFF CAPSULE ---\n" + TruncateTail(carriedHandoff, 1200) + "\n--- END HANDOFF CAPSULE ---"
-			});
-		}
-		return jsonArray6;
-	}
-
-	private static ContextFidelityScore ComputeAnchorScore(string focusText, params string[] responses)
-	{
-		string[] source = new string[14]
-		{
-			"context", "local", "cloud", "switch", "preserve", "loss", "expanded", "disconnection", "compressed", "attributes",
-			"task", "memory", "continuity", "essential"
-		};
-		string[] universalAnchors = new string[6] { "context", "switch", "preserve", "task", "continuity", "essential" };
-		string[] array = source.Where((string anchor) => focusText.Contains(anchor, StringComparison.OrdinalIgnoreCase) || universalAnchors.Contains<string>(anchor, StringComparer.OrdinalIgnoreCase)).Distinct<string>(StringComparer.OrdinalIgnoreCase).ToArray();
-		string[] array2 = new string[6] { "cobalt", "teapot", "maple", "invoice", "violet", "umbrella" };
-		string combinedResponses = string.Join("\n", responses.Where((string x) => !string.IsNullOrWhiteSpace(x)));
-		int essentialHits = array.Count((string anchor) => combinedResponses.Contains(anchor, StringComparison.OrdinalIgnoreCase));
-		int noiseHits = array2.Count((string anchor) => combinedResponses.Contains(anchor, StringComparison.OrdinalIgnoreCase));
-		return new ContextFidelityScore(essentialHits, array.Length, noiseHits, array2.Length);
-	}
-
-	private static string BuildMessyContextTranscript(string focusText, int level, string leadIn, IReadOnlyList<string> chatterLines, string taskDirective)
-	{
-		StringBuilder stringBuilder = new StringBuilder();
-		stringBuilder.AppendLine(leadIn);
-		stringBuilder.AppendLine((level == 1) ? "Level 1 fidelity: keep the task capsule compact and remove chatter directly." : "Level 2 fidelity: keep the task capsule compact, but be robust to a longer noisy history and preserve the route-switch rationale.");
-		stringBuilder.AppendLine("Task focus: " + focusText);
-		stringBuilder.AppendLine("Task directive: " + taskDirective);
-		stringBuilder.AppendLine((level == 1) ? "Background-only distractors: cobalt teapot and maple invoice." : "Background-only distractors: cobalt teapot, maple invoice, and violet umbrella.");
-		foreach (string chatterLine in chatterLines)
-		{
-			if (!string.IsNullOrWhiteSpace(chatterLine))
-			{
-				stringBuilder.AppendLine("Background chatter: " + chatterLine.Trim());
-			}
-		}
-		stringBuilder.AppendLine("Return only task-essential content. Do not quote, list, or repeat any background-only distractor words or chatter lines.");
-		return stringBuilder.ToString().Trim();
-	}
-
-	private static ContextFidelityTierResult BuildTierFailure(ContextFidelityTierDefinition tier, string portLabel, string phase, string launchDetails, ChatProbeResult probe)
-	{
-		List<string> list = new List<string>();
-		if (!string.IsNullOrWhiteSpace(launchDetails))
-		{
-			list.Add(launchDetails);
-		}
-		if (!string.IsNullOrWhiteSpace(probe.Details))
-		{
-			list.Add(probe.Details);
-		}
-		int milliseconds = (int)Math.Min(2147483647L, Math.Max(0L, probe.ProbeWindowMs));
-		string value = ((probe.Details.Contains("timed out", StringComparison.OrdinalIgnoreCase) || probe.Details.Contains("timeout", StringComparison.OrdinalIgnoreCase) || probe.Details.Contains("window expired", StringComparison.OrdinalIgnoreCase)) ? ("timed out after " + FormatDurationMs(milliseconds)) : ("failed after " + FormatDurationMs(milliseconds)));
-		string value2 = "Action: check the failed profile's launch details, runtime readiness, credentials, model availability, and resource requirements, then rerun.";
-		return new ContextFidelityTierResult(tier.Level, tier.Name, "Probe failed", Passed: false, IsSuccess: false, 0, 0, 0, 0, launchDetails, string.Empty, string.Empty, string.Empty, string.Empty, 0L, 0, $"{tier.Name} {phase} probe failed on {portLabel}. Chat completion {value} after launch/check start ({Math.Max(1, probe.AttemptsUsed)} attempts). {value2} {string.Join(" ", list)}".Trim());
-	}
-
-	private static ContextFidelityTierResult BuildTierFailure(ContextFidelityTierDefinition tier, string portLabel, string phase, string launchDetails, RuntimeActionResult launch)
-	{
-		return new ContextFidelityTierResult(tier.Level, tier.Name, launch.Status, Passed: false, IsSuccess: false, 0, 0, 0, 0, launchDetails, string.Empty, string.Empty, string.Empty, string.Empty, 0L, 0, $"{tier.Name} {phase} launch failed on {portLabel}. {launch.Details}".Trim());
-	}
-
-	private static string BuildSwitchBenchmarkBlockerSummary(ContextFidelityTierResult tierResult, RouteSlotDescriptor profileA, RouteSlotDescriptor profileB)
-	{
-		string details = tierResult.Details ?? string.Empty;
-		RouteSlotDescriptor routeSlotDescriptor = (details.Contains("profile-b-switch", StringComparison.OrdinalIgnoreCase) ? profileB : profileA);
-		string value = (routeSlotDescriptor.RouteType.Equals("local", StringComparison.OrdinalIgnoreCase) ? " Check the local model path, saved model profile settings, available VRAM, and local runtime readiness." : (IsCloudModelNotSupportedError(details) ? " Check that the provider currently offers this model and supports it through the configured route." : " Check provider credentials, capacity, model availability, and cloud route health."));
-		string value2 = (tierResult.Status.Equals("Probe failed", StringComparison.OrdinalIgnoreCase) ? "did not complete the benchmark chat probe in time" : "did not launch or become ready in time");
-		return $"Switch benchmark could not proceed because {routeSlotDescriptor.DisplayLabel} {value2}.{value}";
-	}
-
 	private async Task<ChatProbeResult> SendChatProbeWithWarmupRetryAsync(int port, string model, JsonArray messages, string phase, int warmupBudgetMs, Action<string>? progressReporter, CancellationToken cancellationToken, string? routeTypeHint = null)
 	{
 		int budgetMs = Math.Clamp((warmupBudgetMs <= 0) ? 90000 : warmupBudgetMs, 30000, 180000);
@@ -6138,43 +5829,41 @@ public sealed class FluxMuxRuntimeService
 		return looksLikeNotFound & mentionsModel;
 	}
 
-	private static string BuildTierSummary(ContextFidelityTierResult result, string focusText)
-	{
-		string value = (result.Passed ? "pass" : "fidelity warning");
-		return $"{result.TierName}: {value}; essential recall {result.EssentialHits}/{result.EssentialTotal}; chatter leakage {result.NoiseHits}/{result.NoiseTotal}; average latency {result.AverageLatencyMs} ms. {result.Details}".Trim();
-	}
-
-	private static string BuildTierResultSummary(ContextFidelityTierResult result)
-	{
-		string value = (result.Passed ? "pass" : "fidelity warning");
-		return $"{result.TierName}: {value}; essential recall {result.EssentialHits}/{result.EssentialTotal}; distractor leakage {result.NoiseHits}/{result.NoiseTotal}; average response {FormatDurationMs((int)Math.Min(2147483647L, result.AverageLatencyMs))}.";
-	}
-
-	private void AppendSwitchBenchmarkLog(string cloudProvider, string cloudModel, string cloudVariant, string localModel, string localVariant, JsonObject localVariantSettings, JsonObject cloudVariantSettings, int port, string focusText, IReadOnlyList<ContextFidelityTierResult> tierResults)
+	/// <summary>One JSON line per switch test in Logs\Switch_Context_Fidelity_Benchmarks.jsonl, with
+	/// every phase's full reply, so a result can be checked by hand.</summary>
+	private void AppendSwitchFidelityLog(SwitchFidelityTest.ProfileSummary profileA, SwitchFidelityTest.ProfileSummary profileB, IReadOnlyList<SwitchFidelityTest.Tier> tiers, IReadOnlyList<SwitchFidelityTest.PhaseResult> phases)
 	{
 		try
 		{
-			JsonObject jsonObject = new JsonObject();
-			jsonObject["timestampUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
-			jsonObject["cloudProvider"] = cloudProvider;
-			jsonObject["cloudModel"] = cloudModel;
-			jsonObject["cloudVariant"] = cloudVariant;
-			jsonObject["localModel"] = localModel;
-			jsonObject["localVariant"] = localVariant;
-			jsonObject["localVariantSettings"] = localVariantSettings.DeepClone();
-			jsonObject["cloudVariantSettings"] = cloudVariantSettings.DeepClone();
-			jsonObject["localVariantSettingsSummary"] = BuildSettingsSnapshot(localVariantSettings, "OverrideContext", "LocalTemperature", "LocalGpuOffloadMode", "LocalFlashAttention", "LocalKvCacheTypeK", "LocalKvCacheTypeV", "LocalThreadsBatch");
-			jsonObject["cloudVariantSettingsSummary"] = BuildSettingsSnapshot(cloudVariantSettings, "CloudContextWindow", "CloudTemperature", "CloudMaxTokens", "CloudReasoningMode", "OpenAiReasoningEffort", "CopilotReasoningEffort");
-			jsonObject["port"] = port;
-			jsonObject["focus"] = focusText;
-			jsonObject["overallPass"] = tierResults.All((ContextFidelityTierResult x) => x.Passed);
-			JsonNode[] array = tierResults.Select((ContextFidelityTierResult x) => x.ToJsonNode()).ToArray();
-			jsonObject["tiers"] = new JsonArray((ReadOnlySpan<JsonNode?>)array);
-			JsonObject jsonObject2 = jsonObject;
-			File.AppendAllText(_switchBenchmarkLogPath, jsonObject2.ToJsonString(new JsonSerializerOptions
+			JsonArray phaseNodes = new JsonArray();
+			foreach (SwitchFidelityTest.PhaseResult p in phases)
 			{
-				WriteIndented = false
-			}) + Environment.NewLine);
+				phaseNodes.Add(new JsonObject
+				{
+					["tier"] = p.Tier,
+					["phase"] = p.Phase,
+					["profile"] = p.Profile,
+					["estimatedTokens"] = p.EstimatedTokens,
+					["promptTokens"] = p.PromptTokens,
+					["recalled"] = p.RecalledCount,
+					["lostFacts"] = new JsonArray(SwitchFidelityTest.Facts.Where((f, i) => !p.Recalled[i]).Select(f => (JsonNode)JsonValue.Create(f.Id)!).ToArray()),
+					["gatewayNotes"] = new JsonArray(p.GatewayNotes.Select(n => (JsonNode)JsonValue.Create(n)!).ToArray()),
+					["finishReason"] = p.FinishReason,
+					["error"] = p.Error,
+					["reply"] = p.Reply
+				});
+			}
+
+			JsonObject entry = new JsonObject
+			{
+				["timestampUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+				["test"] = "planted-fact switch recall",
+				["profileA"] = profileA.Label + " — " + profileA.Detail,
+				["profileB"] = profileB.Label + " — " + profileB.Detail,
+				["tiers"] = new JsonArray(tiers.Select(t => (JsonNode)new JsonObject { ["name"] = t.Name, ["targetTokens"] = t.TargetTokens }).ToArray()),
+				["phases"] = phaseNodes
+			};
+			File.AppendAllText(_switchBenchmarkLogPath, entry.ToJsonString() + Environment.NewLine);
 		}
 		catch
 		{
@@ -7785,7 +7474,23 @@ public sealed class FluxMuxRuntimeService
 	{
 		if (string.IsNullOrWhiteSpace(variant) || variant.Trim().Equals("Base (read-only)", StringComparison.OrdinalIgnoreCase) || variant.Trim().Equals("(defaults)", StringComparison.OrdinalIgnoreCase))
 		{
-			return BuildDefaultLocalProfile(root);
+			// A saved "<model>::(defaults)" entry is what Quick Select and Model Profiles show for the
+			// default profile, so it is what must load. This used to return only the config's top-level
+			// keys, so the saved entry was ignored: on 26 Nov "(defaults)" showed Context 213,056 and
+			// loaded 163,840 from hardware advice (and its earlier YaRN 393K values never loaded at all).
+			// The saved entry is laid over the top-level keys; a model with no saved entry keeps the
+			// pure auto defaults.
+			JsonObject defaults = BuildDefaultLocalProfile(root);
+			JsonObject? saved = FindSavedLocalProfile(root, model, "(defaults)");
+			if (saved is not null)
+			{
+				foreach (KeyValuePair<string, JsonNode?> setting in saved)
+				{
+					defaults[setting.Key] = setting.Value?.DeepClone();
+				}
+			}
+
+			return defaults;
 		}
 		if (!(root["LocalProfiles"] is JsonObject jsonObject))
 		{
@@ -7826,6 +7531,29 @@ public sealed class FluxMuxRuntimeService
 		return jsonObject3 ?? jsonObject2 ?? new JsonObject();
 	}
 
+	private static JsonObject? FindSavedLocalProfile(JsonObject root, string model, string variant)
+	{
+		if (root["LocalProfiles"] is not JsonObject profiles)
+		{
+			return null;
+		}
+
+		string fileName = Path.GetFileName((model ?? string.Empty).Trim());
+		foreach (KeyValuePair<string, JsonNode?> item in profiles)
+		{
+			string[] parts = (item.Key ?? string.Empty).Split("::", 2, StringSplitOptions.TrimEntries);
+			if (parts.Length == 2
+				&& Path.GetFileName(parts[0]).Equals(fileName, StringComparison.OrdinalIgnoreCase)
+				&& parts[1].Equals(variant, StringComparison.OrdinalIgnoreCase)
+				&& item.Value is JsonObject saved)
+			{
+				return saved;
+			}
+		}
+
+		return null;
+	}
+
 	private static JsonObject BuildDefaultLocalProfile(JsonObject root)
 	{
 		JsonObject jsonObject = new JsonObject();
@@ -7862,7 +7590,10 @@ public sealed class FluxMuxRuntimeService
 
 	private void ApplyRecommendedAutoLaunchSettings(JsonObject profile, string modelPath, string selectedVariant)
 	{
-		bool isDefaultVariant = IsDefaultLocalVariant(selectedVariant);
+		// Hardware advice overrides offload, speculative type, Fit and reasoning only for a default
+		// profile that has never been saved. A saved default (it carries IsModelDefault) is the
+		// operator's settings: like any variant, only its missing or Auto values are filled in.
+		bool isDefaultVariant = IsDefaultLocalVariant(selectedVariant) && !profile.ContainsKey("IsModelDefault");
 		LocalVisionRecommendation localVisionRecommendation = RecommendVisionForModel(modelPath);
 		int recommendedEdge = GetProfileInt(profile, "LocalVisionMaxImageEdge", LocalVramFootprintEstimate.ReferenceImageEdge);
 		LocalHardwareLaunchAdvice localHardwareLaunchAdvice = BuildLocalHardwareLaunchAdvice(
@@ -8439,20 +8170,6 @@ public sealed class FluxMuxRuntimeService
 			}
 		}
 		return jsonObject3 ?? jsonObject2 ?? new JsonObject();
-	}
-
-	private static string BuildSettingsSnapshot(JsonObject profile, params string[] keys)
-	{
-		List<string> list = new List<string>();
-		foreach (string key in keys)
-		{
-			string value = GetString(profile, key);
-			if (!string.IsNullOrWhiteSpace(value))
-			{
-				list.Add(key + "=" + value);
-			}
-		}
-		return (list.Count > 0) ? string.Join(", ", list) : "defaults/unspecified";
 	}
 
 	private static int GetProfileInt(JsonObject profile, string key, int fallback)

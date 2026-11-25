@@ -161,6 +161,9 @@ public sealed class RuntimeActionResult
 
     public string AdvancedDetails { get; init; } = string.Empty;
 
+    /// <summary>What to change, when the action produces advice (the Live-Switch fidelity test).</summary>
+    public string Recommendation { get; init; } = string.Empty;
+
     public IReadOnlyList<VramProcessListItem> VramProcessItems { get; init; } = [];
 
     public IReadOnlyList<DisplayAdapterListItem> DisplayAdapterItems { get; init; } = [];

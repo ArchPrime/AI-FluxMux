@@ -151,7 +151,95 @@ public static class LocalHistoryCompaction
     public static JsonArray? CompactMessages(JsonArray messages, PortForwardingRules rules, bool force = false)
         => CompactMessages(messages, rules, force, steppedCut: false);
 
-    private static JsonArray? CompactMessages(JsonArray messages, PortForwardingRules rules, bool force, bool steppedCut)
+    /// <summary>Messages a fill-based cut moves by at a time (see <see cref="TryCompactPayloadToFill"/>).</summary>
+    public const int FillCutStep = 32;
+
+    /// <summary>
+    /// Compacts so the kept recent messages fill about <paramref name="targetShare"/> of the
+    /// Context, instead of keeping a fixed number of messages. The keep count was the whole rule:
+    /// the Live-Switch fidelity test (26 Nov) showed a ~197K-token agent chat cut to 9,282 tokens on
+    /// a 163,840 Context (6 %), losing 7 of 10 planted facts, because "keep 6 turns" (16-24
+    /// messages with tools) is a tiny slice of an agent chat where every tool call is a message.
+    /// The keep count stays as a minimum. The cut start is rounded up to a multiple of
+    /// <see cref="FillCutStep"/> messages, so it stays at the same message while that many new
+    /// ones arrive and llama-server's prompt cache keeps the start of the prompt — the reason the
+    /// stepped cut exists. <paramref name="tokenRatio"/> scales the chars / 4 estimate to the
+    /// loaded model's real count (measured tokens / estimate for this request), which on a
+    /// code-heavy chat was about 1.5. Falls back to <see cref="TryCompactPayloadStable"/>.
+    /// </summary>
+    public static bool TryCompactPayloadToFill(
+        JsonObject payload,
+        PortForwardingRules rules,
+        int contextTokens,
+        double targetShare,
+        double tokenRatio,
+        Func<JsonObject, bool> fits)
+    {
+        if (payload["messages"] is JsonArray messages && contextTokens > 0)
+        {
+            var start = FillCutStart(messages, rules, (int)(contextTokens * Math.Clamp(targetShare, 0.2, 0.9)), tokenRatio);
+            if (start is int keepFrom)
+            {
+                var filled = CompactMessages(messages, rules, force: true, steppedCut: false, explicitStart: keepFrom);
+                if (filled is not null)
+                {
+                    var trial = new JsonObject { ["messages"] = filled };
+                    foreach (var (key, value) in payload)
+                    {
+                        if (key != "messages")
+                        {
+                            trial[key] = value?.DeepClone();
+                        }
+                    }
+
+                    if (fits(trial))
+                    {
+                        payload["messages"] = trial["messages"]!.DeepClone();
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return TryCompactPayloadStable(payload, rules, fits);
+    }
+
+    /// <summary>The first message to keep so the kept tail fits <paramref name="budgetTokens"/>,
+    /// rounded up to a <see cref="FillCutStep"/> boundary; null when nothing useful can be cut.</summary>
+    internal static int? FillCutStart(JsonArray messages, PortForwardingRules rules, int budgetTokens, double tokenRatio)
+    {
+        if (messages.Count < 4 || budgetTokens <= 0)
+        {
+            return null;
+        }
+
+        var ratio = Math.Clamp(tokenRatio <= 0 ? 1.0 : tokenRatio, 0.5, 3.0);
+        double Tokens(JsonNode? node) => (node?.ToJsonString().Length ?? 0) / 4.0 * ratio;
+
+        // The system prompt, the summary of the dropped part and the pinned user task are kept too.
+        var used = messages.OfType<JsonObject>().Where(m => RoleOf(m) == "system").Sum(Tokens) + 2500;
+        var start = messages.Count;
+        for (var i = messages.Count - 1; i >= 1; i--)
+        {
+            var cost = Tokens(messages[i]);
+            if (used + cost > budgetTokens)
+            {
+                break;
+            }
+
+            used += cost;
+            start = i;
+        }
+
+        var live = (rules ?? PortForwardingRules.Defaults).Clamp();
+        var minimumKept = Math.Max(1, Math.Min(live.CompactKeepTurns, messages.Count - 2));
+        start = Math.Min(start, messages.Count - minimumKept);
+        start = (int)Math.Ceiling(start / (double)FillCutStep) * FillCutStep;
+        start = Math.Min(start, messages.Count - minimumKept);
+        return start <= 1 ? null : start;
+    }
+
+    private static JsonArray? CompactMessages(JsonArray messages, PortForwardingRules rules, bool force, bool steppedCut, int? explicitStart = null)
     {
         if (messages.Count < 4)
         {
@@ -186,6 +274,11 @@ public static class LocalHistoryCompaction
             // message while the next `split` messages arrive, and the kept tail runs from
             // `split` up to just under twice that.
             rawStart = Math.Max(1, rawStart / split * split);
+        }
+
+        if (explicitStart is int requested)
+        {
+            rawStart = requested;
         }
 
         var keepStart = AlignKeepStart(messages, rawStart);

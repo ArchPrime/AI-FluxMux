@@ -1092,6 +1092,23 @@ public sealed class FluxMuxGatewayHost : IDisposable
             if (!compactApplied && !isProbeRequest)
             {
                 compactApplied = TryApplyForwardCompact(payload, state, compactOn, measuredPromptTokens);
+                // The count measured above is the chat before shortening. Without measuring again,
+                // the block check below refused a turn the last resort had just shortened
+                // ("blocked llama-server on a filling turn n_prompt=196864", 26 Nov).
+                var compactedPort = ParseInt(Str(state, "local_port"), 0);
+                if (compactApplied && measuredPromptTokens is not null && compactedPort > 0)
+                {
+                    var remeasured = await LocalPromptTokenCounter.CountAsync(
+                        compactedPort,
+                        payload,
+                        Str(state, "local_preferred_model")).ConfigureAwait(false);
+                    if (remeasured is not null)
+                    {
+                        Log("local prompt tokens after shortening (measured): " + remeasured.Value.ToString(CultureInfo.InvariantCulture)
+                            + " (was " + measuredPromptTokens.Value.ToString(CultureInfo.InvariantCulture) + ")");
+                        measuredPromptTokens = remeasured;
+                    }
+                }
             }
 
             // Offer the YaRN spill-compact dialog using the measured token count (not the
@@ -3029,6 +3046,27 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// still gets a mostly reusable prompt cache. Returns false (prompt untouched) below the
     /// threshold or when nothing older can be shortened.
     /// </summary>
+    /// <summary>
+    /// The loaded model's real tokens per chars / 4 estimate for this request (1 when it was not
+    /// measured). The estimate is off in both directions — Qwen prose counts fewer tokens, a
+    /// code-heavy agent chat about 1.5x more (Live-Switch test, 26 Nov: 196,864 measured for a
+    /// 131,665 estimate) — and every compaction fit check used it raw, so a cut that "fitted" could
+    /// still be over the Context.
+    /// </summary>
+    private static double PromptTokenRatio(JsonObject payload, int? measuredPromptTokens)
+        => measuredPromptTokens is int measured && measured > 0
+            ? Math.Clamp(measured / (double)Math.Max(1, LocalRequestOverlayRouting.EstimatePromptTokens(payload)), 0.5, 3.0)
+            : 1.0;
+
+    private static bool FitsContext(JsonObject trial, int context, int headroom, double ratio)
+        => (int)(LocalRequestOverlayRouting.EstimatePromptTokens(trial) * ratio) + 1 + Math.Max(0, headroom) <= context;
+
+    /// <summary>How full a compaction leaves the Context: 20 points below the share that started it
+    /// (60 % for an 80 % trigger, 75 % for the 95 % last resort), so the chat can grow for a while
+    /// before the next cut. See <see cref="LocalHistoryCompaction.TryCompactPayloadToFill"/>.</summary>
+    private static double FillTargetShare(double triggerShare)
+        => Math.Clamp(triggerShare - 0.2, 0.4, 0.75);
+
     private bool TryLastResortCompact(JsonObject payload, JsonObject state, PortForwardingRules rules, int? measuredPromptTokens)
     {
         var context = ParseInt(Str(state, "local_context"), 0);
@@ -3044,10 +3082,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return false;
         }
 
-        if (!LocalHistoryCompaction.TryCompactPayloadStable(
+        var ratio = PromptTokenRatio(payload, measuredPromptTokens);
+        if (!LocalHistoryCompaction.TryCompactPayloadToFill(
                 payload,
                 rules,
-                trial => !LocalRequestOverlayRouting.PromptExceedsContext(trial, context, rules.CompactHeadroom)))
+                context,
+                FillTargetShare(LastResortCompactShare),
+                ratio,
+                trial => FitsContext(trial, context, rules.CompactHeadroom, ratio)))
         {
             return false;
         }
@@ -3317,10 +3359,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
                             CompactToolKeepTurns = keepToolResults,
                             CompactPreservedUserChars = pinUserChars
                         };
-                        if (LocalHistoryCompaction.TryCompactPayloadStable(
+                        var autoRatio = PromptTokenRatio(payload, measuredPromptTokens);
+                        if (LocalHistoryCompaction.TryCompactPayloadToFill(
                                 payload,
                                 autoRules,
-                                trial => !LocalRequestOverlayRouting.PromptExceedsContext(trial, autoContext, rules.CompactHeadroom)))
+                                autoContext,
+                                FillTargetShare(triggerPercent),
+                                autoRatio,
+                                trial => FitsContext(trial, autoContext, rules.CompactHeadroom, autoRatio)))
                         {
                             Log("auto-compact: prompt " + autoPromptTokens.ToString(CultureInfo.InvariantCulture)
                                 + " tokens exceeded trigger " + triggerThreshold.ToString(CultureInfo.InvariantCulture)
@@ -3365,10 +3411,14 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return false;
         }
 
-        if (!LocalHistoryCompaction.TryCompactPayloadStable(
+        var portRatio = PromptTokenRatio(payload, measuredPromptTokens);
+        if (!LocalHistoryCompaction.TryCompactPayloadToFill(
                 payload,
                 rules,
-                trial => !LocalRequestOverlayRouting.PromptExceedsContext(trial, hotContext, rules.CompactHeadroom)))
+                hotContext,
+                FillTargetShare(rules.CompactWatermarkPercent / 100.0),
+                portRatio,
+                trial => FitsContext(trial, hotContext, rules.CompactHeadroom, portRatio)))
         {
             // Forward-compaction bailed out: "too few turns, or one over-full turn".
             // The over-full-turn case is exactly what Hail Mary's non-destructive prune

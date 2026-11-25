@@ -5760,8 +5760,6 @@ public partial class MainViewModel : ViewModelBase
         RefreshRecoveryReplacementChoices();
     }
 
-    [ObservableProperty]
-    public partial string SwitchBenchmarkFocusText { get; set; } = "Preserve relevant task context while switching between two model profiles. Retain task anchors, filter background chatter, and return to the first profile without meaningful drift or disconnection.";
 
     [ObservableProperty]
     public partial SwitchBenchmarkProfileOption? SelectedSwitchBenchmarkProfileA { get; set; }
@@ -11020,9 +11018,9 @@ public partial class MainViewModel : ViewModelBase
         _benchmarkStatusActive = true;
         _benchmarkProgressText = StatusMessage;
         SwitchBenchmarkResultText = "Switch benchmark running...";
-        SwitchBenchmarkSummaryText = "Test underway. Waiting for benchmark tiers to complete.";
+        SwitchBenchmarkSummaryText = "Test underway. Each profile reads the chat and answers the recall questions.";
         SwitchBenchmarkRecommendationText = "Test underway. Final recommendation will appear when the benchmark finishes.";
-        SwitchBenchmarkAdvancedDetailsText = "Benchmark in progress. Detailed tier results will replace this text after completion.";
+        SwitchBenchmarkAdvancedDetailsText = "Test in progress. The facts each profile lost, and what AI-FluxMux shortened, will appear here.";
 
         try
         {
@@ -11104,7 +11102,6 @@ public partial class MainViewModel : ViewModelBase
                 localVision.Enabled,
                 localVision.ProjectorPath,
                 localVision.MaxImageEdge,
-                SwitchBenchmarkFocusText,
                 progressReporter: UpdateBenchmarkProgress,
                 profileA: new SwitchBenchmarkRouteSelection(profileA.RouteType, profileA.Provider, profileA.Model, profileA.Variant, profileA.DisplayName),
                 profileB: new SwitchBenchmarkRouteSelection(profileB.RouteType, profileB.Provider, profileB.Model, profileB.Variant, profileB.DisplayName));
@@ -26124,35 +26121,15 @@ public partial class MainViewModel : ViewModelBase
 
     private void UpdateSwitchBenchmarkDisplay(RuntimeActionResult result)
     {
-        var lines = result.Details
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .ToArray();
-
-        var headline = lines.FirstOrDefault() ?? result.Status;
-        var hasTierDetails = lines.Length > 1;
+        // The switch test's first Details line is its headline (facts recalled per phase); the
+        // recommendations come from the facts that were lost and what AI-FluxMux shortened.
         var details = result.Details ?? string.Empty;
-        var handoffCompleted = result.Status.Equals("Switch benchmark completed with fidelity warnings", StringComparison.OrdinalIgnoreCase)
-                               || details.Contains("Chat handoff: Profile A response was transferred", StringComparison.OrdinalIgnoreCase);
-        var localPressurePattern = details.Contains("local route", StringComparison.OrdinalIgnoreCase)
-                                  && (details.Contains("Warm-up retry window expired", StringComparison.OrdinalIgnoreCase)
-                                      || details.Contains("did not return a successful chat completion", StringComparison.OrdinalIgnoreCase));
-
-        SwitchBenchmarkSummaryText = handoffCompleted && !result.IsSuccess
-            ? "Chat handoff completed across all selected profiles; context fidelity needs attention."
-            : headline;
-        SwitchBenchmarkRecommendationText = result.IsSuccess
-            ? (hasTierDetails
-                ? "Recommended: this profile is usable for switch-heavy work. Review the advanced details if you want the tier-by-tier fidelity breakdown."
-                : "Recommended: the benchmark completed successfully and the profile appears usable for switch-heavy work.")
-            : (handoffCompleted
-                ? "Handoff completed: all profile launches and chat completions succeeded. Review the fidelity details for anchors that drifted or distractor facts that leaked; this is a quality warning, not a transport failure."
-                : localPressurePattern
-                ? "Needs attention: this local model/variant appears practically unusable for switch-heavy work under current settings, likely due to VRAM pressure or startup overhead. Recommendation: choose a much lighter local model/variant, then rerun benchmark and compare readiness-delay stats."
-                : "Needs attention: the benchmark did not complete cleanly, so this profile may still lose context or leak chatter under switch pressure.");
-        SwitchBenchmarkAdvancedDetailsText = string.IsNullOrWhiteSpace(result.AdvancedDetails)
-            ? result.Details ?? string.Empty
-            : result.AdvancedDetails;
+        var headline = details.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+        SwitchBenchmarkSummaryText = result.Status + (string.IsNullOrWhiteSpace(headline) ? string.Empty : ". " + headline);
+        SwitchBenchmarkRecommendationText = string.IsNullOrWhiteSpace(result.Recommendation)
+            ? (result.IsSuccess ? "No changes suggested." : "The test did not complete; see the result above for which profile failed to load or answer.")
+            : result.Recommendation;
+        SwitchBenchmarkAdvancedDetailsText = string.IsNullOrWhiteSpace(result.AdvancedDetails) ? details : result.AdvancedDetails;
     }
 
     private static string NormalizeCacheRamOption(string value)
