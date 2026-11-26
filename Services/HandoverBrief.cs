@@ -536,6 +536,22 @@ public static class HandoverBrief
             ? "(" + n + (n == 1 ? " image was" : " images were") + " attached here; " + (n == 1 ? "it is" : "they are") + " not in this brief, so attach " + (n == 1 ? "it" : "them") + " again if needed)\n"
             : string.Empty;
 
+    /// <summary>
+    /// Up to 80 characters of the first line the person wrote in the opening request, as it stands in
+    /// the chat (for a chat begun from a brief, the brief's own first line), for finding the Client
+    /// app's chat file that holds this chat. Taken from the messages, not read back out of a summary:
+    /// reading it from under the summary's "## Original request" heading broke silently when that
+    /// section was renamed (26 Nov), and Hail Mary then matched no Cline task at all.
+    /// </summary>
+    public static string OpeningProbe(JsonArray? messages)
+    {
+        var first = messages is null ? -1 : LocalHistoryCompaction.IndexOfFirstRealUser(messages);
+        var line = first < 0
+            ? string.Empty
+            : HumanText(messages![first] as JsonObject).Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? string.Empty;
+        return line.Length > 80 ? line[..80] : line;
+    }
+
     private static string HumanText(JsonObject? message)
         => message is null
             ? string.Empty

@@ -5550,7 +5550,7 @@ public partial class MainViewModel : ViewModelBase
             string? clineSession = null;
             if (adapter.IsBuiltInCline)
             {
-                clineSession = global::FluxMux.Avalonia.Services.ClineCompactionWriter.FindRecentSessionContaining(OpeningProbe(plan));
+                clineSession = global::FluxMux.Avalonia.Services.ClineCompactionWriter.FindRecentSessionContaining(HandoverBrief.OpeningProbe(chat.Messages));
                 if (clineSession is null)
                 {
                     _runtimeService.Supervisor?.LogLaunchMonitor("[HailMary] no recent Cline task holds the saved chat; nothing written");
@@ -5649,13 +5649,6 @@ public partial class MainViewModel : ViewModelBase
         var estimate = global::FluxMux.Avalonia.Services.LocalRequestOverlayRouting.EstimatePromptTokens(new System.Text.Json.Nodes.JsonObject { ["messages"] = chat.Messages.DeepClone() });
         var ratio = measuredPromptTokens > 0 && estimate > 0 ? (double)measuredPromptTokens / estimate : 0;
         return global::FluxMux.Avalonia.Services.HailMary.RescuePlanner.FromChat(chat.Messages, contextLimit, ratio);
-    }
-
-    /// <summary>The first line of the chat's opening request, up to 80 characters, to find its Cline task by.</summary>
-    private static string OpeningProbe(global::FluxMux.Avalonia.Services.HailMary.RescuePlan plan)
-    {
-        var opening = plan.Summary.Split("## Original request\n", 2) is [_, var rest] ? rest.Split('\n', 2)[0].Trim() : string.Empty;
-        return opening.Length > 80 ? opening[..80] : opening;
     }
 
     /// <summary>

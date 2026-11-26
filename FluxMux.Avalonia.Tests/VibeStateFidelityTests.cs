@@ -27,6 +27,8 @@ public sealed class VibeStateFidelityTests
     [InlineData("Compressed prior conversation context (older turns):\n- read Settings.cs", "")]
     [InlineData("Context summary:\n\n## Goal\nmake me a 3d rpg game", "")]
     [InlineData("Note from AI-FluxMux: you just ran exactly the same command as your previous step.", "")]
+    [InlineData("<user_input mode=\"act\">can you make me a 3d rpg game</user_input>", "can you make me a 3d rpg game")]
+    [InlineData("<user_input mode=\"plan\">Plan it first.</user_input>\n<environment_details>x</environment_details>", "Plan it first.")]
     public void Human_part_drops_client_control_text(string input, string expected)
     {
         Assert.Equal(expected, ConversationText.HumanPart(input));

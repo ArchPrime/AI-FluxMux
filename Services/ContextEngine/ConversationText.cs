@@ -20,8 +20,10 @@ public static class ConversationText
     private static readonly Regex EnvironmentDetails = new(
         @"<environment_details>.*?</environment_details>", RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    // Cline 4.x wraps typed input as <user_input mode="act"> (or "plan"), with an attribute, so the
+    // tag may carry one; missing it put "user input mode act" into brief file names and summaries.
     private static readonly Regex WrappedHumanText = new(
-        @"<(task|feedback|answer|user_message)>(.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+        @"<(task|feedback|answer|user_message|user_input)(?:\s[^>]*)?>(.*?)</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     // "[read_file for 'Services/x.cs'] Result:" / "[execute_command for 'dotnet build'] Result:"
     private static readonly Regex ToolResultHeader = new(

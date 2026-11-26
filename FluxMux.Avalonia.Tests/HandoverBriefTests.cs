@@ -259,4 +259,28 @@ public sealed class HandoverBriefTests
         Assert.DoesNotContain("private note text", brief, StringComparison.Ordinal);
         Assert.Contains("error CS1002", brief, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void The_opening_probe_comes_from_the_chat_and_is_found_in_a_Cline_task_file()
+    {
+        // Hail Mary finds the Cline task to rewrite by this probe. It was read back out of the rescue
+        // summary under "## Original request"; renaming that section left it empty, so no task matched.
+        const string opening = "Build the CSV exporter named invoices-month.csv with \"semicolons\". Codename HERON-4417, then more words to pass eighty.";
+        var messages = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "You are Cline" },
+            new JsonObject { ["role"] = "user", ["content"] = "<user_input mode=\"act\">" + opening + "</user_input>" },
+            new JsonObject { ["role"] = "assistant", ["content"] = "Starting." },
+        };
+
+        var probe = HandoverBrief.OpeningProbe(messages);
+        Assert.Equal(80, probe.Length);
+        Assert.StartsWith("Build the CSV exporter", probe, StringComparison.Ordinal);
+
+        // Cline stores the text JSON-escaped; the search escapes the probe the same way.
+        var clineFile = new JsonObject { ["messages"] = new JsonArray { new JsonObject { ["content"] = new JsonArray { new JsonObject { ["type"] = "text", ["text"] = "<user_input mode=\"act\">" + opening + "</user_input>" } } } } }
+            .ToJsonString(new System.Text.Json.JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+        Assert.Contains(probe.Replace("\\", "\\\\").Replace("\"", "\\\""), clineFile, StringComparison.Ordinal);
+        Assert.Equal(string.Empty, HandoverBrief.OpeningProbe(new JsonArray()));
+    }
 }
