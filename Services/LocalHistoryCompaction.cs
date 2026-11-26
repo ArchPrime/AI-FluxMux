@@ -758,6 +758,21 @@ public static class LocalHistoryCompaction
     /// (<c>metrics_port = 47193</c>) was dropped from every summary (26 Nov, Hail Mary fidelity
     /// test). The list's result and error texts are read instead; anything else is used as is.
     /// </summary>
+    /// <summary>
+    /// Up to <paramref name="max"/> lines of a tool result that state a value — a setting with a
+    /// literal value, a git log line, a test or error outcome — with any line number a tool printed
+    /// removed. Shared by compaction's summary and Omit's stubs, so a value survives either.
+    /// </summary>
+    internal static List<string> ValueLines(string toolResultText, int max = 3)
+        => ToolResultBody(toolResultText).Split('\n')
+            .Select(l => LineNumberPrefix.Replace(l, string.Empty).TrimEnd())
+            .Where(l => l.Length is > 0 and <= 160)
+            .Where(l => SettingLine.IsMatch(l) || CommitLine.IsMatch(l) || OutcomeLine.IsMatch(l))
+            .Select(l => l.Trim())
+            .Distinct()
+            .Take(max)
+            .ToList();
+
     internal static string ToolResultBody(string text)
     {
         var trimmed = text.TrimStart();
@@ -829,14 +844,7 @@ public static class LocalHistoryCompaction
             }
 
             var source = callNames.TryGetValue(message["tool_call_id"]?.ToString() ?? string.Empty, out var named) ? named : "tool";
-            var found = text.Split('\n')
-                .Select(l => LineNumberPrefix.Replace(l, string.Empty).TrimEnd())
-                .Where(l => l.Length is > 0 and <= 160)
-                .Where(l => SettingLine.IsMatch(l) || CommitLine.IsMatch(l) || OutcomeLine.IsMatch(l))
-                .Distinct()
-                .Take(3)
-                .Select(l => "- " + source + ": " + l.Trim())
-                .ToList();
+            var found = ValueLines(text).Select(l => "- " + source + ": " + l).ToList();
             if (found.Count > 0)
             {
                 perResult.Add(found);

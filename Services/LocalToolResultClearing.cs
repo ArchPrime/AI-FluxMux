@@ -564,6 +564,17 @@ public static class LocalToolResultClearing
             body = OmittedMark + "; already ran " + describe + "]";
         }
         var original = ExtractText(result["content"]).TrimStart();
+
+        // Keep the values the result reported (a setting, a commit line, a test outcome), one per
+        // line so a later compaction still finds them. A stub with none of them lost facts: Harness
+        // wraps every read in <path>/<content> with a long path, which takes even a five-line config
+        // over the size Omit leaves alone, and its port, flaky test and commit hash were stubbed away
+        // before compaction could see them (7 of 10, 27 Nov lab). Deterministic, so cache-stable.
+        if (!hadPicture && LocalHistoryCompaction.ValueLines(original) is { Count: > 0 } values)
+        {
+            body += "\nValues it reported:\n" + string.Join("\n", values);
+        }
+
         if (original.StartsWith("<tool_response>", StringComparison.OrdinalIgnoreCase))
         {
             return "<tool_response>" + body + "</tool_response>";

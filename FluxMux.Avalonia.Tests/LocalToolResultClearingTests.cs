@@ -27,6 +27,22 @@ public sealed class LocalToolResultClearingTests
     }
 
     [Fact]
+    public void ClearOlderResults_keeps_the_values_a_stubbed_result_reported()
+    {
+        // Harness wraps a read in <path>/<content> with numbered lines; the wrapper took a five-line
+        // config over the clearing size, and its value was stubbed away (27 Nov lab).
+        var payload = ToolLoopPayload(rounds: 20, resultChars: 400);
+        var first = payload["messages"]!.AsArray().OfType<JsonObject>().First(LocalToolResultClearing.IsToolResult);
+        first["content"] = "<path>C:/Users/someone/AppData/Local/Temp/lab/harness-lab/work/config/service.toml</path>\n<type>file</type>\n<content>\n"
+                           + "1: [service]\n2: name = \"billing\"\n4: metrics_port = 47193\n" + new string('#', 300) + "\n</content>";
+        LocalToolResultClearing.ClearOlderResults(payload);
+        var stub = first["content"]!.ToString();
+        Assert.StartsWith(LocalToolResultClearing.OmittedMark, stub);
+        Assert.Contains("\nmetrics_port = 47193", stub);
+        Assert.DoesNotContain("<path>", stub);
+    }
+
+    [Fact]
     public void ClearOlderResults_leaves_short_results_alone()
     {
         var payload = ToolLoopPayload(rounds: 8, resultChars: 40);
