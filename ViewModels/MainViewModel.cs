@@ -8840,9 +8840,9 @@ public partial class MainViewModel : ViewModelBase
         new LocalAutoCompactModeOption { Value = "port-rules", Display = "AI-FluxMux, Port rules settings" },
         new LocalAutoCompactModeOption { Value = "per-profile", Display = "AI-FluxMux, this profile's settings" },
         // Kept as a choice for a Client app AI-FluxMux cannot usefully shorten for, but not the default
-        // and labelled as the exception: in the 27 Nov comparison it was the slowest setting and left
+        // and labelled as the exception (short, so the dropdown fits its column): in the 27 Nov comparison it was the slowest setting and left
         // the least room whenever the Client app's own shortening was off (AGENTS.md).
-        new LocalAutoCompactModeOption { Value = "none", Display = "The Client app (special cases only, see note)" }
+        new LocalAutoCompactModeOption { Value = "none", Display = "The Client app (special cases)" }
     ];
 
     [ObservableProperty]
@@ -25554,11 +25554,10 @@ public partial class MainViewModel : ViewModelBase
 
     private JsonObject ResolveLocalVariantObjectFromConfig(string? modelName, string variantName)
     {
-        if (string.IsNullOrWhiteSpace(variantName))
-        {
-            return new JsonObject();
-        }
-
+        // An empty name is the "(defaults)" profile: NormalizeVariantName turns "(defaults)" into "",
+        // and returning an empty object here made the (defaults) editor show built-in defaults instead
+        // of the saved profile (Port rules, Context 112,640…), which a Save then wrote back — the
+        // operator's compaction choice "kept reverting to Port rules" (27 Nov).
         if (_config.Root["LocalProfiles"] is not JsonObject profiles)
         {
             return new JsonObject();
