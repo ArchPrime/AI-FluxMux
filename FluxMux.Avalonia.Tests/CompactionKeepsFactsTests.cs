@@ -112,4 +112,31 @@ public sealed class CompactionKeepsFactsTests
         Assert.Contains("total_v2", summary, StringComparison.Ordinal);
         Assert.DoesNotContain("VSCode Visible Files", summary, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void The_pinned_opening_is_labelled_and_the_newest_dropped_messages_are_kept()
+    {
+        var messages = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "agent" },
+            new JsonObject { ["role"] = "user", ["content"] = "Audit the app for DPI scaling in MainWindow.axaml and Help_files/." },
+        };
+        for (var i = 0; i < 40; i++)
+        {
+            // Wordy, value-heavy early messages would outscore a short late reversal.
+            var said = i == 25 ? "No, revert that." : i < 30 ? "Check src/View" + i + ".axaml and Styles/Theme" + i + ".xaml at 150% and 200%." : "Next " + i;
+            messages.Add(new JsonObject { ["role"] = "user", ["content"] = said });
+            messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = "Done " + i + "." });
+        }
+
+        var payload = new JsonObject { ["messages"] = messages };
+        Assert.True(LocalHistoryCompaction.TryCompactPayload(payload, PortForwardingRules.Defaults, force: true));
+        var kept = payload["messages"]!.AsArray().OfType<JsonObject>().ToList();
+        Assert.StartsWith(LocalHistoryCompaction.OpeningLabel, kept[1]["content"]!.ToString(), StringComparison.Ordinal);
+        var summary = kept.First(m => m["content"]?.ToString().StartsWith("Compressed prior conversation context", StringComparison.Ordinal) == true)["content"]!.ToString();
+        Assert.Contains(HandoverBrief.LatestWinsRule, summary, StringComparison.Ordinal);
+        // A short late reversal among wordy, value-heavy messages: picked by informativeness alone it
+        // was dropped from the notes; as one of the newest dropped messages it is kept.
+        Assert.Contains("- user: No, revert that.", summary, StringComparison.Ordinal);
+    }
 }

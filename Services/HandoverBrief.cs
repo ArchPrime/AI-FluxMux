@@ -63,10 +63,21 @@ public static class HandoverBrief
     /// <summary>
     /// The brief, or null when the chat holds nothing the person wrote. <paramref name="clientApp"/>
     /// names where it came from (null = not recognised); <paramref name="capturedUtc"/> is when the
-    /// Client app sent it. The person's final message has a section of its own and is either in
-    /// full or left out (<paramref name="includeLastMessage"/>), never cut: a cut copy helps
-    /// neither the new chat nor the person, who may want to edit and resend it (26 Nov). Whether to
-    /// leave it out is the caller's (see <see cref="FinalMessageImpact"/>).
+    /// Client app sent it.
+    ///
+    /// Laid out for how tasks really go (26 Nov): the direction changes as the work goes, and
+    /// decisions get reversed, so the brief leads with where things stand now (the latest turns word
+    /// for word and the person's final message), then how we got here (the person's messages, oldest
+    /// first, condensed), then the facts gathered, and only last where it started — labelled as a
+    /// starting point later messages may have replaced. It says outright that later messages
+    /// override earlier ones. Leading with the opening request anchored a new chat to a goal that
+    /// could be long gone. A chat that itself began from a brief carries that brief forward: its
+    /// starting point stays the starting point, and its history and facts join this one's, so a task
+    /// handed over several times keeps its whole trajectory.
+    ///
+    /// The person's final message is either in full or left out (<paramref name="includeLastMessage"/>),
+    /// never cut: a cut copy helps neither the new chat nor the person, who may want to edit and
+    /// resend it. Whether to leave it out is the caller's (see <see cref="FinalMessageImpact"/>).
     /// </summary>
     public static string? Build(
         JsonArray? messages,
@@ -92,54 +103,27 @@ public static class HandoverBrief
             return null;
         }
 
-        // Everything after the opening and before the quoted tail is summarised. A short chat is
-        // quoted whole.
+        var earlier = EarlierBrief.Parse(opening);
+
+        // The quoted tail; everything between the opening and it is condensed. A short chat is quoted whole.
         var keepStart = messages.Count - RecentMessages <= first + 1
             ? first + 1
             : LocalHistoryCompaction.AlignKeepStart(messages, messages.Count - RecentMessages);
+        var lastIndex = last > first ? last : -1;
 
         var text = new StringBuilder();
         text.Append(Title).Append(" — ")
             .Append(capturedUtc.ToLocalTime().ToString("d MMM yyyy HH:mm", CultureInfo.InvariantCulture))
             .Append(", from a ").Append(string.IsNullOrWhiteSpace(clientApp) ? "Client app" : clientApp).Append(" chat\n\n")
-            .Append("This brief continues an earlier chat. AI-FluxMux wrote it from that chat: the opening request "
-                    + "and the latest turns word for word, the older part summarised. File contents are not in it; "
-                    + "the files are on disk, so reread any you need before changing them.\n");
+            .Append("This brief continues an earlier chat. AI-FluxMux wrote it from that chat. ")
+            .Append(LatestWinsRule)
+            .Append(" File contents are not in it; the files are on disk, so reread any you need before changing them.\n");
 
-        text.Append("\n## Original request\n").Append(Cap(opening, OpeningChars)).Append('\n');
-
-        if (keepStart > first + 1)
-        {
-            var summary = LocalHistoryCompaction.BuildForwardSummary(messages, keepStart, MaxPersonMessages, MaxSummaryChars);
-            var body = summary?.Split('\n', 2) is [_, var rest] ? rest.Trim() : string.Empty;
-            if (body.Length > 0)
-            {
-                text.Append("\n## Earlier in the chat (summarised)\n").Append(body).Append('\n');
-            }
-
-            var earlierImages = messages.Take(keepStart).OfType<JsonObject>().Sum(ImageCount);
-            if (earlierImages > 0)
-            {
-                text.Append("(" + earlierImages + (earlierImages == 1 ? " image was" : " images were")
-                            + " attached earlier in the chat; a text brief cannot carry them, so attach any that still matter.)\n");
-            }
-        }
-
-        var files = FilesChanged(messages);
-        if (files.Count > 0)
-        {
-            text.Append("\n## Files changed\n");
-            foreach (var file in files)
-            {
-                text.Append("- ").Append(file).Append('\n');
-            }
-        }
-
-        var lastIndex = last > first ? last : -1;
+        text.Append("\n## Where things stand now\n");
         var recent = RecentLines(messages, keepStart, lastIndex);
         if (recent.Count > 0)
         {
-            text.Append("\n## Latest turns (word for word)\n");
+            text.Append("### Latest turns (word for word)\n");
             foreach (var line in recent)
             {
                 text.Append(line).Append('\n');
@@ -150,9 +134,7 @@ public static class HandoverBrief
         if (!string.IsNullOrWhiteSpace(current))
         {
             var answered = messages.Skip(lastIndex + 1).OfType<JsonObject>().Any(m => LocalHistoryCompaction.RoleOf(m) == "assistant");
-            text.Append(answered
-                ? "\n## Your final message\n"
-                : "\n## Your final message (not answered yet)\n");
+            text.Append(answered ? "### Your final message\n" : "### Your final message (not answered yet)\n");
             if (!includeLastMessage)
             {
                 text.Append("Left out of this brief on purpose (" + current.Length.ToString("N0", CultureInfo.InvariantCulture)
@@ -164,19 +146,49 @@ public static class HandoverBrief
             }
         }
 
+        var timeline = Timeline(messages, first + 1, keepStart, earlier?.History);
+        if (timeline.Count > 0)
+        {
+            text.Append("\n## How we got here (your messages, oldest first; later ones override earlier ones)\n");
+            foreach (var line in timeline)
+            {
+                text.Append(line).Append('\n');
+            }
+        }
+
+        var facts = Facts(messages, keepStart, earlier?.Facts, MaxSummaryChars);
+        if (facts.Length > 0)
+        {
+            text.Append("\n## Facts gathered along the way\n").Append(facts);
+        }
+
+        var earlierImages = messages.Take(keepStart).OfType<JsonObject>().Sum(ImageCount);
+        if (earlierImages > 0)
+        {
+            text.Append("(" + earlierImages + (earlierImages == 1 ? " image was" : " images were")
+                        + " attached earlier in the chat; a text brief cannot carry them, so attach any that still matter.)\n");
+        }
+
+        text.Append("\n## Where it started\n")
+            .Append("The chat began with this request. Later messages may have changed the task; where they do, follow them.\n")
+            .Append(Cap(earlier?.Started ?? opening, OpeningChars)).Append('\n');
+
         text.Append("\n## Continue\n")
-            .Append("Carry on from where the latest turns stop. Treat the values and decisions above as settled "
-                    + "unless the files on disk say otherwise, and do not redo work already listed as done.\n");
+            .Append("Carry on from where the latest turns stop, in the most recent direction. Treat the facts above as settled "
+                    + "unless a later message or the files on disk say otherwise, and do not redo work already done.\n");
         return text.ToString();
     }
 
+    /// <summary>Stated in every brief and compaction summary: in a task that changes direction, the latest word wins.</summary>
+    public const string LatestWinsRule = "Later messages override earlier ones: where anything below conflicts, follow the latest.";
+
     /// <summary>
     /// The summary Hail Mary writes in place of messages [0, <paramref name="keepStart"/>) when it
-    /// rebuilds a stuck chat in the Client app's own files (26 Nov). Same pieces as the brief, but
-    /// no quoted tail and no "latest message" section: the messages from <paramref name="keepStart"/>
-    /// on stay in the chat word for word. Capped at <paramref name="maxChars"/>; the older-part
-    /// summary gives way first, the opening request last. Null when the chat holds nothing the
-    /// person wrote.
+    /// rebuilds a stuck chat in the Client app's own files (26 Nov). The same shape as the brief,
+    /// without "where things stand now": the messages from <paramref name="keepStart"/> on stay in
+    /// the chat word for word and are that. Capped at <paramref name="maxChars"/>; the facts give
+    /// way first, then the history's middle, the starting point last. Null when the chat holds
+    /// nothing the person wrote.
     /// </summary>
     public static string? BuildRescueSummary(JsonArray? messages, int keepStart, int maxChars)
     {
@@ -192,44 +204,195 @@ public static class HandoverBrief
             return null;
         }
 
-        var head = new StringBuilder();
-        head.Append("Summary of the earlier part of this chat, written by AI-FluxMux (Hail Mary) to make room. "
-                    + "The most recent messages follow word for word. File contents are not in it; reread a file before changing it.\n");
-        head.Append("\n## Original request\n").Append(Cap(opening, Math.Min(OpeningChars, Math.Max(200, maxChars / 3)))).Append('\n');
+        var earlier = EarlierBrief.Parse(opening);
+        var head = "Summary of the earlier part of this chat, written by AI-FluxMux (Hail Mary) to make room. "
+                   + "The most recent messages follow word for word. " + LatestWinsRule
+                   + " File contents are not in it; reread a file before changing it.\n";
+        var started = "\n## Where it started\nThe chat began with this request. Later messages may have changed the task; where they do, follow them.\n"
+                      + Cap(earlier?.Started ?? opening, Math.Min(OpeningChars, Math.Max(200, maxChars / 4))) + "\n";
 
-        var files = FilesChanged(messages);
-        var tail = new StringBuilder();
-        if (files.Count > 0)
+        var room = maxChars - head.Length - started.Length;
+        var history = new StringBuilder();
+        var timeline = Timeline(messages, first + 1, keepStart, earlier?.History, Math.Max(0, room / 2));
+        if (timeline.Count > 0)
         {
-            tail.Append("\n## Files changed\n");
-            foreach (var file in files)
+            history.Append("\n## How we got here (your messages, oldest first; later ones override earlier ones)\n");
+            foreach (var line in timeline)
             {
-                tail.Append("- ").Append(file).Append('\n');
+                history.Append(line).Append('\n');
             }
         }
 
-        var room = maxChars - head.Length - tail.Length;
-        var middle = string.Empty;
-        if (keepStart > first + 1 && room > 200)
-        {
-            var summary = LocalHistoryCompaction.BuildForwardSummary(messages, keepStart, MaxPersonMessages, Math.Min(MaxSummaryChars, room - 40));
-            var body = summary?.Split('\n', 2) is [_, var rest] ? rest.Trim() : string.Empty;
-            if (body.Length > 0)
-            {
-                middle = "\n## Earlier in the chat (summarised)\n" + body + "\n";
-            }
-        }
+        var factsRoom = room - history.Length - 40;
+        var facts = factsRoom > 200 ? Facts(messages, keepStart, earlier?.Facts, factsRoom) : string.Empty;
+        var middle = facts.Length > 0 ? "\n## Facts gathered along the way\n" + facts : string.Empty;
 
-        var text = head + middle + tail.ToString();
+        var text = head + history + middle + started;
         return text.Length <= maxChars ? text : text[..maxChars];
     }
 
-    /// <summary>"2026-11-26 1025 tidy the billing service and get.md": the date sorts, the words say which task.</summary>
+    private const int TimelineEntryChars = 240;
+    private const int TimelineChars = 8000;
+    private static readonly Regex Digits = new(@"\d+", RegexOptions.Compiled);
+
+    /// <summary>
+    /// The person's messages in [<paramref name="from"/>, <paramref name="to"/>), oldest first, each
+    /// condensed to one line, after any carried from an earlier brief. A message repeated with only
+    /// its numbers changed ("Carry on with module 12") is shown once with a count. Over the cap, the
+    /// oldest few and the newest are kept, the middle marked as left out: the start and the latest
+    /// direction both matter.
+    /// </summary>
+    private static List<string> Timeline(JsonArray messages, int from, int to, IReadOnlyList<string>? carried, int maxChars = TimelineChars)
+    {
+        var lines = new List<string>();
+        if (carried is { Count: > 0 })
+        {
+            lines.Add("- (in the chat before this one:)");
+            lines.AddRange(carried.Select(l => "  " + l.TrimStart()));
+        }
+
+        string? lastShape = null;
+        var repeats = 0;
+        for (var i = Math.Max(0, from); i < Math.Min(to, messages.Count); i++)
+        {
+            if (messages[i] is not JsonObject message || !LocalHistoryCompaction.IsRealUserTask(message))
+            {
+                continue;
+            }
+
+            var said = LocalHistoryCompaction.CollapseWhitespace(HumanText(message));
+            if (said.Length == 0 || ConversationText.IsAiFluxMuxNotice(said))
+            {
+                continue;
+            }
+
+            var shape = Digits.Replace(said.ToLowerInvariant(), "#");
+            if (shape == lastShape)
+            {
+                repeats++;
+                lines[^1] = Regex.Replace(lines[^1], @" \(and \d+ more like it\)$", string.Empty) + " (and " + repeats + " more like it)";
+                continue;
+            }
+
+            lastShape = shape;
+            repeats = 0;
+            lines.Add("- " + Cap(said, TimelineEntryChars) + (ImageNote(message) is { Length: > 0 } note ? " " + note.TrimEnd() : string.Empty));
+        }
+
+        if (lines.Sum(l => l.Length + 1) <= maxChars || lines.Count <= 6)
+        {
+            return lines;
+        }
+
+        const int head = 3;
+        var tail = new List<string>();
+        var used = lines.Take(head).Sum(l => l.Length + 1) + 60;
+        for (var i = lines.Count - 1; i >= head && used + lines[i].Length + 1 <= maxChars; i--)
+        {
+            tail.Insert(0, lines[i]);
+            used += lines[i].Length + 1;
+        }
+
+        var dropped = lines.Count - head - tail.Count;
+        return dropped <= 0
+            ? lines
+            : [.. lines.Take(head), "- (… " + dropped + " messages in between left out …)", .. tail];
+    }
+
+    /// <summary>
+    /// Commands run, values found in tool output and decisions for [0, <paramref name="keepStart"/>),
+    /// from compaction's own summary without its notes on the person's messages (the history
+    /// covers those), then the files changed, after any facts carried from an earlier brief.
+    /// </summary>
+    private static string Facts(JsonArray messages, int keepStart, string? carried, int maxChars)
+    {
+        var text = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(carried))
+        {
+            text.Append("From the chat before this one:\n").Append(Cap(carried.Trim(), Math.Max(200, maxChars / 3))).Append('\n');
+        }
+
+        var summary = keepStart > 1 ? LocalHistoryCompaction.BuildForwardSummary(messages, keepStart, maxNotes: 0, maxChars) : null;
+        var body = summary?.Split('\n', 2) is [_, var rest] ? rest.Trim() : string.Empty;
+        body = string.Join('\n', body.Split('\n').Where(l => !l.Equals(LatestWinsRule, StringComparison.Ordinal)));
+        if (body.Length > 0)
+        {
+            text.Append(body).Append('\n');
+        }
+
+        var files = FilesChanged(messages);
+        if (files.Count > 0)
+        {
+            text.Append("Files changed:\n");
+            foreach (var file in files)
+            {
+                text.Append("- ").Append(file).Append('\n');
+            }
+        }
+
+        var all = text.ToString();
+        return all.Length <= maxChars ? all : all[..maxChars].TrimEnd() + "\n";
+    }
+
+    /// <summary>
+    /// A brief found at the start of a chat (the chat began by pasting one): its starting point,
+    /// its history lines and its facts, carried into the next brief instead of being quoted as an
+    /// ordinary opening request and cut at <see cref="OpeningChars"/>.
+    /// </summary>
+    internal sealed record EarlierBrief(string Started, IReadOnlyList<string> History, string Facts)
+    {
+        public static EarlierBrief? Parse(string opening)
+        {
+            if (!opening.TrimStart().StartsWith(Title, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var sections = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var part in ("\n" + opening).Split("\n## ").Skip(1))
+            {
+                var split = part.Split('\n', 2);
+                var heading = split[0].Trim();
+                var body = split.Length > 1 ? split[1].Trim() : string.Empty;
+                var key = heading.StartsWith("How we got here", StringComparison.OrdinalIgnoreCase) ? "history"
+                    : heading.StartsWith("Where it started", StringComparison.OrdinalIgnoreCase) || heading.StartsWith("Original request", StringComparison.OrdinalIgnoreCase) ? "started"
+                    : heading.StartsWith("Facts gathered", StringComparison.OrdinalIgnoreCase) || heading.StartsWith("Earlier in the chat", StringComparison.OrdinalIgnoreCase) ? "facts"
+                    : heading.StartsWith("Where things stand now", StringComparison.OrdinalIgnoreCase) ? "now"
+                    : heading;
+                sections[key] = body;
+            }
+
+            var started = sections.TryGetValue("started", out var s)
+                ? string.Join('\n', s.Split('\n').Where(l => !l.StartsWith("The chat began with this request.", StringComparison.Ordinal))).Trim()
+                : string.Empty;
+            var history = sections.TryGetValue("history", out var h)
+                ? h.Split('\n').Where(l => l.TrimStart().StartsWith("- ", StringComparison.Ordinal)).ToList()
+                : new List<string>();
+            // What stood "now" in the earlier chat is history in this one: its final message joins the timeline.
+            if (sections.TryGetValue("now", out var now)
+                && now.Split("### Your final message", 2) is [_, var final]
+                && final.Split('\n', 2) is [_, var finalText]
+                && finalText.Trim() is { Length: > 0 } said
+                && !said.StartsWith("Left out of this brief", StringComparison.Ordinal))
+            {
+                history.Add("- " + Cap(LocalHistoryCompaction.CollapseWhitespace(said), TimelineEntryChars));
+            }
+
+            return new EarlierBrief(started.Length > 0 ? started : opening, history, sections.TryGetValue("facts", out var f) ? f : string.Empty);
+        }
+    }
+
+    /// <summary>"2026-11-26 1025 leave out cancelled invoices priya.md": the date sorts, the words say where the task stands.</summary>
     public static string FileName(JsonArray messages, DateTime capturedUtc)
     {
+        // Named after the latest direction (the person's final message), since the task may have
+        // moved on from its opening; a chat that began from a brief otherwise named every brief
+        // "hand over brief …".
         var first = LocalHistoryCompaction.IndexOfFirstRealUser(messages);
         var opening = first >= 0 ? HumanText(messages[first] as JsonObject) : string.Empty;
-        var words = Regex.Replace(opening, @"[^\p{L}\p{N} ]+", " ")
+        var latest = LastPersonMessage(messages);
+        var basis = latest.Length >= 12 ? latest : EarlierBrief.Parse(opening)?.Started ?? opening;
+        var words = Regex.Replace(basis, @"[^\p{L}\p{N} ]+", " ")
             .Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Where(w => !w.Equals("task", StringComparison.OrdinalIgnoreCase))
             .Take(7);

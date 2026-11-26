@@ -26,7 +26,7 @@ public sealed class HandoverBriefTests
     }
 
     [Fact]
-    public void A_short_chat_is_quoted_whole_with_opening_and_current_task()
+    public void A_short_chat_leads_with_where_things_stand_and_ends_with_where_it_started()
     {
         var messages = new JsonArray
         {
@@ -37,11 +37,77 @@ public sealed class HandoverBriefTests
         };
 
         var brief = HandoverBrief.Build(messages, null, DateTime.UtcNow)!;
-        Assert.Contains("## Original request\nBuild the exporter as report-Q3.csv.", brief, StringComparison.Ordinal);
+        Assert.Contains(HandoverBrief.LatestWinsRule, brief, StringComparison.Ordinal);
         Assert.Contains("- assistant: I'll start with the header row.", brief, StringComparison.Ordinal);
-        Assert.Contains("## Your final message (not answered yet)\nUse semicolons, not commas.", brief, StringComparison.Ordinal);
+        Assert.Contains("### Your final message (not answered yet)\nUse semicolons, not commas.", brief, StringComparison.Ordinal);
         Assert.DoesNotContain("- person: Use semicolons", brief, StringComparison.Ordinal);
-        Assert.DoesNotContain("summarised)\n", brief, StringComparison.Ordinal);
+        var now = brief.IndexOf("## Where things stand now", StringComparison.Ordinal);
+        var started = brief.IndexOf("## Where it started", StringComparison.Ordinal);
+        Assert.True(now >= 0 && started > now, "where things stand must come first, where it started last");
+        Assert.Contains("Build the exporter as report-Q3.csv.", brief[started..], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_history_lists_direction_changes_oldest_first_and_folds_repeats()
+    {
+        var messages = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "agent" },
+            new JsonObject { ["role"] = "user", ["content"] = "Audit the app for DPI scaling." },
+        };
+        void Turn(string said)
+        {
+            messages.Add(new JsonObject { ["role"] = "user", ["content"] = said });
+            messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = "Done." });
+        }
+
+        Turn("Save the brief automatically.");
+        for (var i = 0; i < 5; i++)
+        {
+            Turn("Carry on with module " + i + ".");
+        }
+
+        Turn("Actually, do not save automatically; offer Save to file.");
+        for (var i = 0; i < 12; i++)
+        {
+            Turn("ok " + i);
+        }
+
+        var brief = HandoverBrief.Build(messages, null, DateTime.UtcNow)!;
+        var history = brief[brief.IndexOf("## How we got here", StringComparison.Ordinal)..];
+        var save = history.IndexOf("Save the brief automatically.", StringComparison.Ordinal);
+        var reverse = history.IndexOf("Actually, do not save automatically", StringComparison.Ordinal);
+        Assert.True(save >= 0 && reverse > save, "the reversal must follow what it reverses");
+        Assert.Contains("(and 4 more like it)", history, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_chat_that_began_from_a_brief_carries_that_brief_forward()
+    {
+        var first = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "agent" },
+            new JsonObject { ["role"] = "user", ["content"] = "Audit the app for DPI scaling." },
+            new JsonObject { ["role"] = "assistant", ["content"] = "Done." },
+            new JsonObject { ["role"] = "user", ["content"] = "Now build the handover brief with the codename KESTREL-5821." },
+        };
+        var earlierBrief = HandoverBrief.Build(first, "Cline", DateTime.UtcNow)!;
+
+        var second = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "agent" },
+            new JsonObject { ["role"] = "user", ["content"] = earlierBrief },
+            new JsonObject { ["role"] = "assistant", ["content"] = "Picking up." },
+            new JsonObject { ["role"] = "user", ["content"] = "Next, add per-app detection." },
+        };
+        var brief = HandoverBrief.Build(second, "pi", DateTime.UtcNow)!;
+
+        var started = brief[brief.IndexOf("## Where it started", StringComparison.Ordinal)..];
+        Assert.Contains("Audit the app for DPI scaling.", started, StringComparison.Ordinal);
+        Assert.DoesNotContain("# Hand over brief", started, StringComparison.Ordinal);
+        var history = brief[brief.IndexOf("## How we got here", StringComparison.Ordinal)..];
+        Assert.Contains("(in the chat before this one:)", history, StringComparison.Ordinal);
+        Assert.Contains("KESTREL-5821", history, StringComparison.Ordinal);
     }
 
     [Fact]

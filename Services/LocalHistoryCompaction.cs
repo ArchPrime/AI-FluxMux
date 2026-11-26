@@ -303,7 +303,13 @@ public static class LocalHistoryCompaction
         JsonObject? preservedOpening = null;
         if (firstRealUserIndex >= 0 && firstRealUserIndex < keepStart && firstRealUserIndex != lastRealUserIndex)
         {
-            preservedOpening = PreserveUserTask(messages[firstRealUserIndex] as JsonObject, live.CompactPreservedUserChars);
+            // A chat that began from a pasted hand over brief keeps it whole: it is already a summary,
+            // and cutting it at Preserved user chars threw away what it was written to keep.
+            var openingText = ExtractText((messages[firstRealUserIndex] as JsonObject)?["content"]);
+            var isBrief = ContextEngine.ConversationText.HumanPart(openingText).TrimStart().StartsWith(HandoverBrief.Title, StringComparison.Ordinal);
+            preservedOpening = LabelOpening(PreserveUserTask(
+                messages[firstRealUserIndex] as JsonObject,
+                isBrief ? Math.Max(live.CompactPreservedUserChars, PinnedBriefChars) : live.CompactPreservedUserChars));
         }
 
         var summaryText = BuildForwardSummary(messages, keepStart);
@@ -372,6 +378,32 @@ public static class LocalHistoryCompaction
         return compacted;
     }
 
+    /// <summary>A pasted brief at the start of a chat is pinned up to this many characters.</summary>
+    public const int PinnedBriefChars = 40000;
+
+    /// <summary>Marks the pinned opening as the starting point, which later messages may have replaced.</summary>
+    public const string OpeningLabel = "[Where this chat started. Later messages may have changed the task; where they do, follow them.]\n";
+
+    /// <summary>
+    /// Labels the pinned opening request (26 Nov). Pinned word for word ahead of everything else, it
+    /// anchored a model to a goal the chat had long moved on from. The label never changes, so the
+    /// prompt cache is unaffected.
+    /// </summary>
+    private static JsonObject? LabelOpening(JsonObject? opening)
+    {
+        switch (opening?["content"])
+        {
+            case JsonValue value when value.TryGetValue<string>(out var text):
+                opening["content"] = OpeningLabel + text;
+                break;
+            case JsonArray parts:
+                parts.Insert(0, new JsonObject { ["type"] = "text", ["text"] = OpeningLabel });
+                break;
+        }
+
+        return opening;
+    }
+
     private static bool HasToolHistory(JsonArray messages)
     {
         foreach (var node in messages.OfType<JsonObject>())
@@ -431,7 +463,10 @@ public static class LocalHistoryCompaction
     {
         var lines = new List<string>
         {
-            "Compressed prior conversation context (older turns):"
+            "Compressed prior conversation context (older turns):",
+            // Tasks change direction and decisions get reversed (26 Nov), so the summary says which
+            // word wins rather than presenting every note as still true.
+            HandoverBrief.LatestWinsRule,
         };
         var alreadyRan = LocalToolResultClearing.CollectAlreadyRanLines(messages, keepStart);
         if (alreadyRan.Count > 0)
@@ -457,7 +492,7 @@ public static class LocalHistoryCompaction
         var notes = CollectDroppedNotes(messages, keepStart, maxNotes);
         if (notes.Count > 0)
         {
-            lines.Add("Earlier messages from the person:");
+            lines.Add("Earlier messages from the person (oldest first; later ones override earlier ones):");
             lines.AddRange(notes);
         }
 
@@ -590,6 +625,9 @@ public static class LocalHistoryCompaction
     /// <summary>How many of the person's earlier messages compaction's summary lists.</summary>
     public const int MaxDroppedNotes = 20;
 
+    /// <summary>Of those, how many are simply the newest, kept whatever their score.</summary>
+    public const int NewestDroppedNotes = 8;
+
     /// <summary>
     /// The person's dropped messages: the most informative are chosen (names, numbers, paths and
     /// codes count) and then listed in chat order. "Carry on" style messages carry nothing to keep;
@@ -627,12 +665,16 @@ public static class LocalHistoryCompaction
         }
 
         var repeated = candidates.GroupBy(c => c.Shape).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
-        return candidates
+        var pool = candidates
             .Where(c => !repeated.Contains(c.Shape) || c.Index == candidates.Last(o => o.Shape == c.Shape).Index)
             .Select(c => repeated.Contains(c.Shape) ? c with { Score = 0 } : c)
-            .OrderByDescending(c => c.Score)
-            .ThenByDescending(c => c.Index)
-            .Take(maxNotes)
+            .ToList();
+        // The newest dropped messages are kept whatever their score: in a task that changes
+        // direction they are the latest word, and informativeness alone picked older, wordier
+        // messages over a short "no, do it the other way" (26 Nov).
+        var newest = pool.Where(c => c.Score > 0 || !repeated.Contains(c.Shape)).OrderByDescending(c => c.Index).Take(Math.Min(NewestDroppedNotes, maxNotes)).ToList();
+        var informative = pool.Except(newest).OrderByDescending(c => c.Score).ThenByDescending(c => c.Index).Take(Math.Max(0, maxNotes - newest.Count));
+        return newest.Concat(informative)
             .OrderBy(c => c.Index)
             .Select(c => "- user: " + c.Text)
             .ToList();
