@@ -312,6 +312,24 @@ public static class ClineCompactionWriter
             var compactionPath = Path.Combine(sessionDir, $"{sessionId}.compaction.json");
             Directory.CreateDirectory(sessionDir);
 
+            // Back up any existing .compaction.json before overwriting it. This protects a
+            // compaction Cline wrote itself (e.g., when it compacted the chat on its own) from
+            // being lost if our external rescue is rejected or applied incorrectly.
+            if (File.Exists(compactionPath))
+            {
+                var backupPath = compactionPath + ".hailmary-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + ".bak";
+                try
+                {
+                    File.Copy(compactionPath, backupPath, overwrite: false);
+                    System.Diagnostics.Debug.WriteLine("[ClineCompaction] Backed up existing .compaction.json to: " + backupPath);
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine("[ClineCompaction] Failed to back up existing .compaction.json: " + ex.Message);
+                    // Backup failure is non-fatal; continue with the compaction.
+                }
+            }
+
             var clampedCount = Math.Max(1, Math.Min(sourceMessageCount, sourceMessages.Count));
             var sourcePrefixHash = ComputeClineSourcePrefixHash(sourceMessages, clampedCount);
             var lastMsg = sourceMessages[clampedCount - 1] as JsonObject;
@@ -362,79 +380,6 @@ public static class ClineCompactionWriter
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine("[ClineCompaction] Failed to write valid compaction file: " + ex.Message);
-            return null;
-        }
-    }
-
-    /// <param name="sessionId">The Cline session ID (e.g., "1792478967620_pcp87").</param>
-    /// <param name="summary">The compacted summary to include in the first message.</param>
-    /// <param name="sourceMessageCount">The number of messages in the original conversation.</param>
-    /// <param name="sourceLastMessageKey">The last message ID in the original conversation.</param>
-    /// <returns>The path to the written .compaction.json file, or null if it failed.</returns>
-    public static string? WriteCompactionFile(string sessionId, string summary, int sourceMessageCount, string sourceLastMessageKey)
-    {
-        try
-        {
-            // The .compaction.json file is stored in:
-            // C:\Users\<username>\.cline\data\sessions\<sessionId>\<sessionId>.compaction.json
-            var homeDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            var sessionDir = Path.Combine(homeDir, ".cline", "data", "sessions", sessionId);
-            var compactionPath = Path.Combine(sessionDir, $"{sessionId}.compaction.json");
-
-            // Create the session directory if it doesn't exist
-            Directory.CreateDirectory(sessionDir);
-
-            // Compute a hash of the summary (Cline uses this to verify the compaction is valid)
-            var sourcePrefixHash = ComputeSha256Hash(summary);
-
-            // Build the compaction JSON
-            var compaction = new
-            {
-                version = 1,
-                updated_at = DateTime.UtcNow.ToString("o"),
-                conversation_id = sessionId,
-                source_message_count = sourceMessageCount,
-                source_prefix_hash = $"sha256:{sourcePrefixHash}",
-                source_last_message_key = sourceLastMessageKey,
-                messages = new[]
-                {
-                    new
-                    {
-                        role = "user",
-                        content = new[]
-                        {
-                            new
-                            {
-                                type = "text",
-                                text = $"Context summary:\n\n{summary}"
-                            }
-                        },
-                        metadata = new
-                        {
-                            kind = "compaction_summary",
-                            displayRole = "system",
-                            userRunSpan = 1,
-                            summary = summary
-                        }
-                    }
-                }
-            };
-
-            // Write the JSON file
-            var json = JsonSerializer.Serialize(compaction, new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-            });
-
-            File.WriteAllText(compactionPath, json);
-
-            System.Diagnostics.Debug.WriteLine($"[ClineCompaction] Wrote compaction file: {compactionPath}");
-            return compactionPath;
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[ClineCompaction] Failed to write compaction file: {ex.Message}");
             return null;
         }
     }
@@ -708,115 +653,6 @@ public static class ClineCompactionWriter
         }
         catch
         {
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Replaces the session's .messages.json with a compacted version (summary + recent tail).
-    /// This is the "nuclear" option for a truly stuck Cline chat: when Cline is unresponsive and
-    /// can't process a new turn, the .compaction.json file alone won't help because Cline only
-    /// reads it on a subsequent turn. By directly replacing the .messages.json file, we ensure
-    /// that when Cline reloads the session (close/reopen the chat, or restart Cline), it resumes
-    /// with the compacted context immediately.
-    /// </summary>
-    /// <param name="sessionId">The Cline session ID.</param>
-    /// <param name="summary">The compacted summary to include as the first message.</param>
-    /// <param name="recentTail">Optional recent messages to append after the summary (for continuity).</param>
-    /// <returns>The path to the written .messages.json file, or null if it failed.</returns>
-    public static string? WriteCompactedMessagesFile(string sessionId, string summary, JsonArray? recentTail = null)
-    {
-        try
-        {
-            var sessionDir = GetSessionDir(sessionId);
-            var messagesPath = Path.Combine(sessionDir, $"{sessionId}.messages.json");
-
-            if (!Directory.Exists(sessionDir))
-                return null;
-
-            // Read the original .messages.json to preserve the top-level metadata (version, agent, origin, etc.)
-            JsonObject original = null;
-            if (File.Exists(messagesPath))
-            {
-                try
-                {
-                    original = JsonObject.Parse(File.ReadAllText(messagesPath)) as JsonObject;
-                }
-                catch
-                {
-                    // If we can't parse the original, we'll build a minimal one.
-                }
-            }
-
-            // Build the compacted messages array: summary message + recent tail.
-            var messages = new JsonArray();
-
-            // The summary message (marked as a compaction summary so Cline knows it's a compacted context).
-            var summaryMessage = new JsonObject
-            {
-                ["id"] = "compaction-" + Guid.NewGuid().ToString("N"),
-                ["role"] = "user",
-                ["content"] = new JsonArray
-                {
-                    new JsonObject
-                    {
-                        ["type"] = "text",
-                        ["text"] = "Context summary:\n\n" + summary
-                    }
-                },
-                ["ts"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                ["metadata"] = new JsonObject
-                {
-                    ["kind"] = "compaction_summary",
-                    ["displayRole"] = "system",
-                    ["userRunSpan"] = 1,
-                    ["summary"] = summary
-                }
-            };
-            messages.Add(summaryMessage);
-
-            // Append the recent-message tail (for continuity). We must CLONE each tail message
-            // before adding it to the messages array, because a JsonNode can only have one parent
-            // at a time. Adding a node that already belongs to the recentTail array would throw
-            // InvalidOperationException ("The node already has a parent").
-            if (recentTail is not null)
-            {
-                foreach (var msg in recentTail)
-                {
-                    messages.Add(msg?.DeepClone());
-                }
-            }
-
-            // Build the new .messages.json object, preserving the original top-level metadata.
-            var compacted = new JsonObject
-            {
-                ["version"] = 1,
-                ["updated_at"] = DateTime.UtcNow.ToString("o"),
-                ["sessionId"] = sessionId,
-                ["messages"] = messages,
-            };
-
-            // Preserve the original top-level fields (agent, origin, etc.) if they exist.
-            if (original is not null)
-            {
-                if (original.TryGetPropertyValue("agent", out var agent))
-                    compacted["agent"] = agent;
-                if (original.TryGetPropertyValue("origin", out var origin))
-                    compacted["origin"] = origin;
-            }
-
-            File.WriteAllText(messagesPath, compacted.ToJsonString(new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            }));
-
-            System.Diagnostics.Debug.WriteLine("[ClineCompaction] Wrote compacted .messages.json: " + messagesPath);
-            return messagesPath;
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine("[ClineCompaction] Failed to write compacted .messages.json: " + ex.Message);
             return null;
         }
     }

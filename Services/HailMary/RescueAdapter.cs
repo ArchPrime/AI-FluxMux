@@ -122,7 +122,7 @@ public static class RescueAdapterCatalog
             Find = new RescueFind { Root = @"%USERPROFILE%\.cline\data\sessions", Dirs = "*", File = "*.messages.json" },
             Backup = false,
             Steps = [new RescueStep { Kind = RescueStep.BuiltInKind, Name = ClineCompactionStep }],
-            DoneMessage = "External Cline compaction written. To apply it, close and reopen this Cline chat (or restart Cline) so the session reloads with the compacted context.",
+            DoneMessage = "External Cline compaction written. Cline reads the rebuild when the chat is opened: open another task, reopen this one from history, then type retry. Cline still shows the full history; the summary is in what it sends to the model.",
         },
         new RescueAdapterDefinition
         {
