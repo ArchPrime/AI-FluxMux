@@ -4362,7 +4362,7 @@ style='font-family:"Calibri",sans-serif'>Appendix A</span></em>).<o:p></o:p></sp
   padding:4.2pt 6.0pt 4.2pt 6.0pt'>
   <p class=MsoNormal style='margin-top:7.2pt;margin-right:0cm;margin-bottom:
   7.2pt;margin-left:0cm'><span style='font-size:10.5pt;font-family:"Calibri",sans-serif;
-  mso-fareast-font-family:"Times New Roman";color:#111111'>With either AI-FluxMux choice, your Client app still keeps the full chat, and <b>Launch</b> turns Cline Auto compact off. With <b>The Client app</b>, <b>Launch</b> turns Cline Auto compact back on (if AI-FluxMux turned it off), pruning and paging are not used, and AI-FluxMux still shortens the chat as a last resort when it reaches 95% of the Context, so the turn runs instead of failing. For Harness, prefer an AI-FluxMux choice: Harness is told the largest Context of any profile you could load, so with a smaller profile loaded its own shortening starts late. Applies from the next message.<o:p></o:p></span></p>
+  mso-fareast-font-family:"Times New Roman";color:#111111'>With either AI-FluxMux choice, your Client app still keeps the full chat, and <b>Launch</b> turns Cline Auto compact off. With <b>The Client app</b>, Cline Auto compact is turned on and Harness is told the loaded Context, so their own shortening starts in time (the setting follows the running profile both ways, at <b>Launch</b> and when you save it), pruning and paging are not used, and AI-FluxMux still shortens the chat as a last resort when it reaches 95% of the Context, so the turn runs instead of failing. Applies from the next message.<o:p></o:p></span></p>
   </td>
  </tr>
  <tr style='mso-yfti-irow:12'>
@@ -6594,7 +6594,7 @@ provider as something you configured, so <strong>Context Window</strong> is a
 number you typed, and it defaults to 128000. Cline fetches the model list to
 fill its picker, but takes capacity from its own settings. Its <strong>Auto
 compact</strong> then decides when to summarise against that typed number rather
-than against the model actually loaded, which is why <strong>Launch</strong> turns Auto compact off and leaves shortening to FluxMux <strong>Compact</strong>. When the model profile's <strong>Context compaction controlled by</strong> is set to <strong>The Client app</strong>, AI-FluxMux leaves the shortening to Cline, so <strong>Launch</strong> leaves Cline Auto compact on, and turns it back on if AI-FluxMux was the one that turned it off.<o:p></o:p></span></p>
+than against the model actually loaded, which is why <strong>Launch</strong> turns Auto compact off and leaves shortening to FluxMux <strong>Compact</strong>. When the model profile's <strong>Context compaction controlled by</strong> is set to <strong>The Client app</strong>, AI-FluxMux leaves the shortening to Cline, so Cline Auto compact is turned on, whatever it was before; with either AI-FluxMux choice it is turned off.<o:p></o:p></span></p>
 
 <p class=MsoNormal style='mso-margin-top-alt:auto;mso-margin-bottom-alt:auto;
 margin-left:36.0pt;text-indent:-18.0pt;mso-list:l15 level1 lfo16;tab-stops:

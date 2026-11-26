@@ -324,8 +324,10 @@ public sealed class ClineContextSyncTests
     }
 
     [Fact]
-    public void Auto_compact_turned_off_by_FluxMux_comes_back_when_FluxMux_stops_compacting()
+    public void Auto_compact_follows_the_running_profile_both_ways_whatever_it_was()
     {
+        // The operator's rule (27 Nov): the profile's "Context compaction controlled by" decides,
+        // nothing hard-wired. Earlier builds only switched it back on if AI-FluxMux had switched it off.
         using var dir = new TempDir();
         var (modelsPath, providersPath) = WritePointedAtPort(dir);
         var statePath = Path.Combine(dir.Path, "globalState.json");
@@ -333,36 +335,43 @@ public sealed class ClineContextSyncTests
         File.WriteAllText(statePath, """{ "useAutoCondense": true }""");
         File.WriteAllText(settingsPath, """{ "autoCompactEnabled": true }""");
 
-        // Client style Other: FluxMux compacts, so Cline's own Auto compact is turned off.
+        // An AI-FluxMux choice: AI-FluxMux compacts, so Cline's own Auto compact is off.
         ClineContextSync.MergeIntoModelsFile(
-            ClineContextSyncOptions.Create(5001, 65536), modelsPath, providersPath, statePath, settingsPath);
+            ClineContextSyncOptions.Create(5001, 65536, compactMode: "per-profile"), modelsPath, providersPath, statePath, settingsPath);
         Assert.False(ReadBool(statePath, "useAutoCondense"));
         Assert.False(ReadBool(settingsPath, "autoCompactEnabled"));
 
-        // Client style Cline-like: FluxMux stops compacting, so Cline's is put back on.
+        // The Client app: Cline's Auto compact is on.
         var result = ClineContextSync.MergeIntoModelsFile(
             ClineContextSyncOptions.Create(5001, 65536, compactMode: "none"), modelsPath, providersPath, statePath, settingsPath);
         Assert.True(ReadBool(statePath, "useAutoCondense"));
         Assert.True(ReadBool(settingsPath, "autoCompactEnabled"));
-        Assert.Contains("turned back on", result.Message, StringComparison.Ordinal);
-        Assert.Null(JsonNode.Parse(File.ReadAllText(statePath))!["useAutoCondense" + ClineContextSync.TurnedOffMarkerSuffix]);
+        Assert.Contains("turned on", result.Message, StringComparison.Ordinal);
+
+        // And off again when the choice goes back.
+        ClineContextSync.MergeIntoModelsFile(
+            ClineContextSyncOptions.Create(5001, 65536, compactMode: "port-rules"), modelsPath, providersPath, statePath, settingsPath);
+        Assert.False(ReadBool(statePath, "useAutoCondense"));
+        Assert.False(ReadBool(settingsPath, "autoCompactEnabled"));
     }
 
     [Fact]
-    public void Auto_compact_the_user_turned_off_stays_off_when_FluxMux_stops_compacting()
+    public void Auto_compact_switched_off_by_hand_goes_on_when_the_profile_leaves_compaction_to_the_Client_app()
     {
         using var dir = new TempDir();
         var (modelsPath, providersPath) = WritePointedAtPort(dir);
         var statePath = Path.Combine(dir.Path, "globalState.json");
         var settingsPath = Path.Combine(dir.Path, "global-settings.json");
-        File.WriteAllText(statePath, """{ "useAutoCondense": false }""");
-        File.WriteAllText(settingsPath, """{ "autoCompactEnabled": false }""");
+        // Off with no marker (switched off by hand), plus an earlier build's marker on another key.
+        File.WriteAllText(statePath, """{ "useAutoCondense": false, "useAutoCondenseTurnedOffByFluxMux": true }""");
+        File.WriteAllText(settingsPath, """{ }""");
 
         ClineContextSync.MergeIntoModelsFile(
             ClineContextSyncOptions.Create(5001, 65536, compactMode: "none"), modelsPath, providersPath, statePath, settingsPath);
 
-        Assert.False(ReadBool(statePath, "useAutoCondense"));
-        Assert.False(ReadBool(settingsPath, "autoCompactEnabled"));
+        Assert.True(ReadBool(statePath, "useAutoCondense"));
+        Assert.True(ReadBool(settingsPath, "autoCompactEnabled"));
+        Assert.Null(JsonNode.Parse(File.ReadAllText(statePath))!["useAutoCondense" + ClineContextSync.TurnedOffMarkerSuffix]);
     }
 
     private static (string Models, string Providers) WritePointedAtPort(TempDir dir)

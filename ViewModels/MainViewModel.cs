@@ -1930,8 +1930,14 @@ public partial class MainViewModel : ViewModelBase
                     .Equals("Enabled", StringComparison.OrdinalIgnoreCase)));
     }
 
+    // Harness compacts by itself against the Context it is told. With an AI-FluxMux choice it is told
+    // the largest Context any usable profile offers, so a bigger turn can still reach Port and be
+    // offered a larger profile, and AI-FluxMux shortens first. With The Client app it is told the
+    // loaded Context: told 262,144 with 213,056 loaded, its own compaction started too late to help.
     private int AdvertiseHarnessYamlContext(int loadedContext)
-        => DeepSeekHarnessSetup.AdvertiseNumericCapacity(loadedContext, MaxOfferableLocalNumeric("OverrideContext"));
+        => string.Equals(ResolveRunningProfileCompactMode(), "none", StringComparison.OrdinalIgnoreCase)
+            ? loadedContext
+            : DeepSeekHarnessSetup.AdvertiseNumericCapacity(loadedContext, MaxOfferableLocalNumeric("OverrideContext"));
 
     private int AdvertiseHarnessYamlMaxTokens(int loadedMaxTokens)
         => DeepSeekHarnessSetup.AdvertiseNumericCapacity(loadedMaxTokens, MaxOfferableLocalNumeric("OverrideMaxTokens"));
@@ -2143,9 +2149,25 @@ public partial class MainViewModel : ViewModelBase
             SelectedEndpointApp.Equals("DeepSeek Harness", StringComparison.OrdinalIgnoreCase)
                 || HarnessWebIsInPlay,
             ResolveRunningProfileExtendContextIntoRam() ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : 0,
-            // "none" = the profile leaves context compaction to the Client app, so ClineContextSync turns
-            // Cline Auto compact back on; any other mode turns it off so AI-FluxMux shortens.
-            LocalAutoCompactMode);
+            // The RUNNING profile's choice, read from disk: "none" = the Client app compacts, so Cline's
+            // Auto compact is switched on; any other choice switches it off so AI-FluxMux shortens. It
+            // used to be the profile open in the editor, so viewing another profile set Cline wrong.
+            ResolveRunningProfileCompactMode());
+
+    /// <summary>
+    /// The running local profile's "Context compaction controlled by" choice, read from disk like
+    /// the gateway reads it; the editor's value only when no local profile is running.
+    /// </summary>
+    private string ResolveRunningProfileCompactMode()
+    {
+        if (string.IsNullOrWhiteSpace(_runningLocalModel))
+        {
+            return LocalAutoCompactMode;
+        }
+
+        var settings = GetLiveLocalProfileSettings(_runningLocalVariant, _runningLocalModel);
+        return settings is null ? LocalAutoCompactMode : CoerceLocalAutoCompactMode(settings["LocalAutoCompactMode"]?.ToString());
+    }
 
     /// <summary>
     /// Reads the YaRN "Extend context into RAM" flag directly from the running profile's
@@ -13268,6 +13290,11 @@ public partial class MainViewModel : ViewModelBase
                 ParseDouble(live["LocalTemperature"]?.ToString(), 0.3),
                 ParseInt(live["OverrideMaxTokens"]?.ToString(), 2048),
                 ResolveRequestReasoningForLocal(SelectedLocalProfile, variantName));
+
+            // The running profile's choices reach the Client apps now, not at the next Launch: a
+            // changed "Context compaction controlled by" switches Cline's Auto compact and Harness's
+            // Context straight away (the sync's fingerprint includes the choice).
+            TrySyncEndpointSettingsForMountedRoute();
         }
         SaveCurrentSelections();
         CaptureLocalVariantEditorBaseline();

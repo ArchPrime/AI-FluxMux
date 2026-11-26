@@ -64,9 +64,9 @@ public enum ClinePortStatus
 /// It also writes <c>maxTokens</c> from the loaded reply budget (llama-server
 /// <c>-n</c>), not Context, so Cline does not keep an 8k OpenAI default and
 /// report a full output limit while the window is half empty.
-/// It also turns off Cline Auto compact (useAutoCondense) in globalState.json so
-/// FluxMux Compact is the one that shortens forwarded history (and turns it back on, if
-/// it was FluxMux that turned it off, when FluxMux stops compacting), and sets Supports
+/// It also sets Cline Auto compact (useAutoCondense in globalState.json, autoCompactEnabled in
+/// global-settings.json) to follow the running model profile: on when the profile leaves context
+/// compaction to the Client app, off for either AI-FluxMux choice, whatever it was before. It sets Supports
 /// Images from the loaded model profile (not a Cline-side VRAM switch).
 /// Older Cline is not updated here (editor Model Configuration). Do not treat this
 /// as a generic Client-app settings mapper.
@@ -281,10 +281,8 @@ public static class ClineContextSync
                 options.DisplayName,
                 options.MaxTokens,
                 options.CompactMode);
-            // Only turn off Cline's auto-compact when FluxMux is managing compacting.
-            // When the profile's compact mode is "none" (compaction controlled by the Client app), Cline should
-            // keep its own auto-compact on — FluxMux is not doing the compacting.
-            // When it is "none", put back an Auto compact that FluxMux itself turned off earlier.
+            // Cline's own Auto compact follows the running profile: on for "none" (the Client app
+            // compacts), off for either AI-FluxMux choice, so exactly one side shortens the chat.
             var settingsChanged = PatchGlobalSettingsAutoCompact(
                 globalSettingsPath,
                 turnOff: !string.Equals(options.CompactMode, "none", StringComparison.OrdinalIgnoreCase));
@@ -417,55 +415,27 @@ public static class ClineContextSync
     }
 
     /// <summary>
-    /// Marker written beside a Cline flag that AI-FluxMux switched off, so it can switch
-    /// it back on when FluxMux stops compacting (Client style Cline-like, or Compact mode
-    /// none). Without it, a Launch under Client style Other turns Cline Auto compact off,
-    /// and a later switch to Cline-like leaves nobody shortening the chat. A flag the user
-    /// turned off themselves carries no marker and is never turned back on.
+    /// Key suffix of a marker earlier builds wrote beside a Cline flag AI-FluxMux had switched off, so
+    /// it could switch it back on only if it had been the one to switch it off. The flag now simply
+    /// follows the running profile's choice (operator's rule, 27 Nov: "nothing should be hard
+    /// wired"), so the marker is only removed where it is found.
     /// </summary>
     internal const string TurnedOffMarkerSuffix = "TurnedOffByFluxMux";
 
-    internal static bool ApplyAutoCondenseOff(JsonObject root)
-        => ApplyFlagOff(root, "useAutoCondense", addIfMissing: true);
-
-    internal static bool ApplyAutoCondenseRestore(JsonObject root)
-        => RestoreFlag(root, "useAutoCondense");
-
-    private static bool ApplyFlagOff(JsonObject root, string key, bool addIfMissing)
+    /// <summary>
+    /// Sets Cline's Auto compact flag to <paramref name="on"/>: on when the running profile leaves
+    /// compaction to the Client app, off for either AI-FluxMux choice — whatever it was before, and
+    /// written even when missing so Cline's own default cannot decide. True when anything changed.
+    /// </summary>
+    internal static bool ApplyAutoCompactFlag(JsonObject root, string key, bool on)
     {
-        if (root[key] is JsonValue existing
-            && existing.TryGetValue<bool>(out var on)
-            && !on)
+        var changed = root.Remove(key + TurnedOffMarkerSuffix);
+        if (root[key] is JsonValue existing && existing.TryGetValue<bool>(out var current) && current == on)
         {
-            return false;
+            return changed;
         }
 
-        if (root[key] is null && !addIfMissing)
-        {
-            return false;
-        }
-
-        root[key] = false;
-        root[key + TurnedOffMarkerSuffix] = true;
-        return true;
-    }
-
-    private static bool RestoreFlag(JsonObject root, string key)
-    {
-        var marker = key + TurnedOffMarkerSuffix;
-        if (root[marker] is null)
-        {
-            return false;
-        }
-
-        root.Remove(marker);
-        if (root[key] is JsonValue existing
-            && existing.TryGetValue<bool>(out var on)
-            && !on)
-        {
-            root[key] = true;
-        }
-
+        root[key] = on;
         return true;
     }
 
@@ -726,8 +696,8 @@ public static class ClineContextSync
         // should keep its own auto-compact on — FluxMux is not doing the compacting. This
         // mirrors the gate on PatchGlobalSettingsAutoCompactOff (autoCompactEnabled in
         // global-settings.json), which was already correctly gated but this one was not.
-        var turnOffAutoCondense = !string.Equals(compactMode, "none", StringComparison.OrdinalIgnoreCase);
-        var changed = (turnOffAutoCondense ? ApplyAutoCondenseOff(root) : ApplyAutoCondenseRestore(root))
+        var clientCompacts = string.Equals(compactMode, "none", StringComparison.OrdinalIgnoreCase);
+        var changed = ApplyAutoCompactFlag(root, "useAutoCondense", clientCompacts)
             | ApplyOpenAiModelInfo(root, contextWindow, imagesOn, displayName, maxTokens);
         if (!changed)
         {
@@ -750,9 +720,7 @@ public static class ClineContextSync
             return false;
         }
 
-        var changed = turnOff
-            ? ApplyFlagOff(root, "autoCompactEnabled", addIfMissing: false)
-            : RestoreFlag(root, "autoCompactEnabled");
+        var changed = ApplyAutoCompactFlag(root, "autoCompactEnabled", !turnOff);
         if (!changed)
         {
             return false;
@@ -768,8 +736,8 @@ public static class ClineContextSync
             + contextWindow.ToString(CultureInfo.InvariantCulture)
             + " to match this model profile";
         var compact = string.Equals(compactMode, "none", StringComparison.OrdinalIgnoreCase)
-            ? "Cline Auto compact was turned back on, because AI-FluxMux is not shortening this chat"
-            : "Cline Auto compact was turned off so FluxMux Compact can run";
+            ? "Cline Auto compact was turned on, because this model profile leaves compaction to the Client app"
+            : "Cline Auto compact was turned off, because AI-FluxMux compacts for this model profile";
         var follow = "Start a new Cline task. If the bar or Auto compact toggle is unchanged, reload the editor that has Cline.";
         if (contextChanged && compactChanged)
         {
