@@ -523,10 +523,34 @@ public static class LocalHistoryCompaction
     /// doesn't need the 20 pages of reasoning that got it to "use JWT" —
     /// it needs to know that JWT was chosen and why sessions were ruled out.
     /// </summary>
+    private const int MaxDecisions = 12;
+
+    // The first twelve assistant texts used to be taken as they came: a repeated closing line ("Done
+    // with this part.", "Checking export run 4.") filled the list, and a decision after the first
+    // dozen ("client.py sets the retry budget to 1375 ms") never appeared (Harness lab, 26 Nov). Now a
+    // text repeated with only its numbers changed is kept once, and over the cap the most
+    // informative are kept, in chat order.
     private static List<string> CollectAssistantDecisions(JsonArray messages, int keepStart)
     {
-        var decisions = new List<string>();
-        for (var i = 0; i < keepStart && decisions.Count < 12; i++)
+        var found = new List<(int Index, int Score, string Line)>();
+        var shapes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (index, line) in AssistantDecisionLines(messages, keepStart))
+        {
+            if (shapes.Add(Digits.Replace(line.ToLowerInvariant(), "#")))
+            {
+                found.Add((index, InformationScore(line), line));
+            }
+        }
+
+        var kept = found.Count <= MaxDecisions
+            ? found
+            : found.OrderByDescending(d => d.Score).ThenByDescending(d => d.Index).Take(MaxDecisions).OrderBy(d => d.Index).ToList();
+        return kept.Select(d => d.Line).ToList();
+    }
+
+    private static IEnumerable<(int Index, string Line)> AssistantDecisionLines(JsonArray messages, int keepStart)
+    {
+        for (var i = 0; i < Math.Min(keepStart, messages.Count); i++)
         {
             if (messages[i] is not JsonObject message)
             {
@@ -556,11 +580,9 @@ public static class LocalHistoryCompaction
             var extracted = ExtractDecision(text);
             if (!string.IsNullOrWhiteSpace(extracted))
             {
-                decisions.Add("- " + extracted);
+                yield return (i, "- " + extracted);
             }
         }
-
-        return decisions;
     }
 
     /// <summary>
@@ -712,6 +734,10 @@ public static class LocalHistoryCompaction
         "^\\s*[A-Za-z][\\w.\\-]*\\s*[=:]\\s*(\"[^\"]{1,80}\"|'[^']{1,80}'|-?\\d[\\d.,_]*\\s*\\w{0,4}|true|false|[\\w.\\-/:]{1,60})\\s*$",
         RegexOptions.Compiled);
 
+    // A file read's line number, as tools print it: Harness "4: ", "     4<tab>", "4→". Left on, it
+    // kept a setting from matching (Harness lab, 26 Nov: "4: metrics_port = 47193" was not a value).
+    private static readonly Regex LineNumberPrefix = new(@"^\s*\d{1,6}(?::\s?|\t|→)", RegexOptions.Compiled);
+
     // A line of git log output: a hash, then the subject.
     private static readonly Regex CommitLine = new("^\\s*[0-9a-f]{7,40}\\s+\\S", RegexOptions.Compiled);
 
@@ -720,8 +746,42 @@ public static class LocalHistoryCompaction
         "\\b(flaky|failed|failure|error|passed|warning|exception|traceback)\\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    // The call's target: a path or command, or the first entry of Cline 4.x's lists
+    // (run_commands {"commands": ["…"]}, read_files {"paths": ["…"]}).
     private static readonly Regex CallTarget = new(
-        "\"(?:path|file_path|command|target)\"\\s*:\\s*\"([^\"]{1,80})\"", RegexOptions.Compiled);
+        "\"(?:path|file_path|command|target|commands|paths)\"\\s*:\\s*\\[?\\s*\"([^\"]{1,80})\"", RegexOptions.Compiled);
+
+    /// <summary>
+    /// The output text of a tool result. Cline 4.x sends a command's output as the JSON of its
+    /// result list (<c>[{"query","result","error"}]</c>), so the whole output was one line with
+    /// escaped line breaks and no setting in it could match a line: a Cline chat's config read
+    /// (<c>metrics_port = 47193</c>) was dropped from every summary (26 Nov, Hail Mary fidelity
+    /// test). The list's result and error texts are read instead; anything else is used as is.
+    /// </summary>
+    internal static string ToolResultBody(string text)
+    {
+        var trimmed = text.TrimStart();
+        if (!trimmed.StartsWith('[') && !trimmed.StartsWith('{'))
+        {
+            return text;
+        }
+
+        try
+        {
+            var node = JsonNode.Parse(trimmed);
+            var items = node is JsonArray list ? list.OfType<JsonObject>().ToList() : node is JsonObject one ? [one] : [];
+            var parts = items
+                .SelectMany(item => new[] { item["result"], item["error"] })
+                .Select(value => value is JsonValue v && v.TryGetValue<string>(out var s) ? s : null)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
+            return parts.Count > 0 ? string.Join("\n", parts!) : text;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return text;
+        }
+    }
 
     private const int MaxToolFacts = 40;
 
@@ -762,7 +822,7 @@ public static class LocalHistoryCompaction
                 continue;
             }
 
-            var text = ExtractText(message["content"]);
+            var text = ToolResultBody(ExtractText(message["content"]));
             if (string.IsNullOrWhiteSpace(text))
             {
                 continue;
@@ -770,7 +830,7 @@ public static class LocalHistoryCompaction
 
             var source = callNames.TryGetValue(message["tool_call_id"]?.ToString() ?? string.Empty, out var named) ? named : "tool";
             var found = text.Split('\n')
-                .Select(l => l.TrimEnd())
+                .Select(l => LineNumberPrefix.Replace(l, string.Empty).TrimEnd())
                 .Where(l => l.Length is > 0 and <= 160)
                 .Where(l => SettingLine.IsMatch(l) || CommitLine.IsMatch(l) || OutcomeLine.IsMatch(l))
                 .Distinct()

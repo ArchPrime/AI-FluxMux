@@ -742,6 +742,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
             }
         }
 
+        // A Client app's own summary request: AI-FluxMux's record of the chat is built here, from the
+        // request as the app sent it, before compaction or the 95 % last resort shorten it — built
+        // later, from the shortened request, the record lost a config value (Harness lab, 26 Nov).
+        var summaryClient = isProbeRequest ? null : ClientCompactionRequest.SummaryRequestClient(payload);
+        var clientRecord = summaryClient is null ? null : HandoverBrief.ClientSummaryRecord(RecordSource(payload, summaryClient));
+
         var state = await WaitForRoutableStateAsync().ConfigureAwait(false);
         SavedChats.NoteContext(ParseInt(Str(state, "local_context"), 0));
         if (!HasReadyTarget(state))
@@ -1143,18 +1149,48 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // nearly the whole chat, so it overflowed too and the chat stayed stuck. Make it fit,
             // or answer it from the session note, so the Client app's compaction completes and
             // the chat continues in place.
-            if (!isProbeRequest && hotContext > 0 && ClientCompactionRequest.IsSummaryRequest(payload))
+            // Any recognised Client app's summary request also gets AI-FluxMux's own record of the
+            // chat (the person's messages, values from tool output, decisions), so the app's summary
+            // keeps what its summariser was not shown. The same for every app that compacts itself.
+            if (clientRecord is not null)
+            {
+                ClientCompactionRequest.AppendToInstruction(payload, ClientCompactionRequest.RecordForRequest(clientRecord));
+                var factsPort = ParseInt(Str(state, "local_port"), 0);
+                measuredPromptTokens = factsPort > 0
+                    ? await LocalPromptTokenCounter.CountAsync(factsPort, payload, Str(state, "local_preferred_model")).ConfigureAwait(false)
+                    : null;
+                Log("client compaction: added AI-FluxMux's record of the chat (" + clientRecord.Length.ToString(CultureInfo.InvariantCulture)
+                    + " chars) to " + summaryClient + "'s summary request, so its summary keeps the facts");
+            }
+
+            if (summaryClient is not null && hotContext > 0)
             {
                 var fitted = await TryFitClientSummaryRequestAsync(payload, state, hotContext, measuredPromptTokens).ConfigureAwait(false);
                 measuredPromptTokens = fitted.MeasuredTokens;
                 if (!fitted.Fits)
                 {
-                    var checkpoint = ClientCompactionRequest.BuildFallbackCheckpoint(EssenceReasserter?.BuildRescueBlock());
-                    Log("client compaction: the summary request still does not fit after trimming, so AI-FluxMux answered it with its own session note ("
+                    var checkpoint = ClientCompactionRequest.BuildFallbackCheckpoint(clientRecord ?? EssenceReasserter?.BuildRescueBlock());
+                    Log("client compaction: the summary request still does not fit after trimming, so AI-FluxMux answered it with its own "
+                        + (clientRecord is null ? "session note" : "record of the chat") + " ("
                         + checkpoint.Length.ToString(CultureInfo.InvariantCulture) + " chars)");
                     await SendAssistantReplyAsync(context.Response, checkpoint, payload["stream"]?.ToString() is "true" or "True").ConfigureAwait(false);
                     return;
                 }
+            }
+
+            // The model's summary is a short note, and a short note drops facts: with the record in
+            // the request, Cline's own compaction still lost a commit hash the record held (9 of 10,
+            // 26 Nov). So the record is also appended to the summary the Client app receives — the
+            // app keeps that reply as its compaction, so the record travels with the chat word for
+            // word, whichever app it is. Asked without streaming so the reply can be finished first.
+            if (clientRecord is not null && routeKind.Equals("local", StringComparison.OrdinalIgnoreCase)
+                && await AskLocalForSummaryAsync(payload, state).ConfigureAwait(false) is { } modelSummary)
+            {
+                var withRecord = ClientCompactionRequest.SummaryWithRecord(modelSummary, clientRecord);
+                Log("client compaction: " + summaryClient + "'s summary (" + modelSummary.Length.ToString(CultureInfo.InvariantCulture)
+                    + " chars) sent back with AI-FluxMux's record of the chat appended (" + withRecord.Length.ToString(CultureInfo.InvariantCulture) + " chars)");
+                await SendAssistantReplyAsync(context.Response, withRecord, payload["stream"]?.ToString() is "true" or "True").ConfigureAwait(false);
+                return;
             }
 
             // Local "context filling" block, now that the payload is finalized and we have the
@@ -3090,6 +3126,79 @@ public sealed class FluxMuxGatewayHost : IDisposable
 
         return (fits, remeasured);
     }
+
+    /// <summary>
+    /// The chat AI-FluxMux's record is built from for a Client app's summary request: the app's
+    /// saved chat, or the summary request's own messages (without its closing instruction) when
+    /// they hold more. Harness sends the chat itself to be summarised, and a summary request can be
+    /// the first request of a session AI-FluxMux sees (a chat resumed after a restart); Cline sends
+    /// the chat as text in one message, so for Cline the saved chat is the source.
+    /// </summary>
+    private static JsonArray? RecordSource(JsonObject payload, string clientApp)
+    {
+        var saved = SavedChats.Get(SavedChats.KeyFor(clientApp))?.Messages;
+        if (payload["messages"] is not JsonArray own || own.Count < 2)
+        {
+            return saved;
+        }
+
+        if (saved is not null && saved.Count >= own.Count - 1)
+        {
+            return saved;
+        }
+
+        var withoutInstruction = new JsonArray();
+        for (var i = 0; i < own.Count - 1; i++)
+        {
+            withoutInstruction.Add(own[i]?.DeepClone());
+        }
+
+        return withoutInstruction;
+    }
+
+    /// <summary>
+    /// The model's reply to a Client app's summary request, asked of llama-server without streaming
+    /// (the request as the app sent it, fitted, with AI-FluxMux's record in it). Null on any failure,
+    /// so the request then goes the ordinary way and the app still gets the model's summary.
+    /// </summary>
+    private async Task<string?> AskLocalForSummaryAsync(JsonObject payload, JsonObject state)
+    {
+        var port = ParseInt(Str(state, "local_port"), 0);
+        if (port <= 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            var body = (JsonObject)payload.DeepClone();
+            body["stream"] = false;
+            body.Remove("stream_options");
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            using var response = await _http.PostAsync(
+                "http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture) + "/v1/chat/completions",
+                new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json"),
+                cts.Token).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                Log("client compaction: llama-server answered the summary request with HTTP " + (int)response.StatusCode + "; sent the ordinary way instead");
+                return null;
+            }
+
+            var reply = JsonNode.Parse(await response.Content.ReadAsStringAsync(cts.Token).ConfigureAwait(false));
+            var text = reply?["choices"]?[0]?["message"]?["content"]?.ToString();
+            text = string.IsNullOrWhiteSpace(text) ? null : ThinkBlock.Replace(text, string.Empty).Trim();
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        {
+            Log("client compaction: could not get the summary from llama-server (" + ex.GetType().Name + "); sent the ordinary way instead");
+            return null;
+        }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex ThinkBlock =
+        new(@"<think>[\s\S]*?</think>", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>A normal assistant reply written by AI-FluxMux, streamed or not as the request asked.</summary>
     private static async Task SendAssistantReplyAsync(HttpListenerResponse response, string text, bool stream)

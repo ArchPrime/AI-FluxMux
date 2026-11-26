@@ -232,8 +232,8 @@ public static class LocalToolResultClearing
         var name = ToolName(call);
         var args = call["function"]?["arguments"] ?? call["arguments"];
         var detail = FirstNonEmpty(
-            ReadArgField(args, "command", "cmd", "input"),
-            ReadArgField(args, "path", "file_path", "file", "target", "target_file"));
+            ReadArgField(args, "command", "cmd", "commands", "input"),
+            ReadArgField(args, "path", "file_path", "file", "target", "target_file", "paths"));
         if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(detail))
         {
             return name + ": " + Truncate(CollapseWhitespace(detail), 80);
@@ -580,6 +580,13 @@ public static class LocalToolResultClearing
             ?? call["name"]?.ToString()
             ?? string.Empty).Trim();
 
+    // Cline 4.x passes lists (run_commands {"commands": [...]}, read_files {"paths": [...]}): name
+    // their entries, not the JSON of the list.
+    private static string? ArgText(JsonNode? value)
+        => value is JsonArray list
+            ? string.Join("; ", list.Select(item => item?.ToString()).Where(item => !string.IsNullOrWhiteSpace(item)))
+            : value?.ToString();
+
     private static string ReadArgField(JsonNode? args, params string[] keys)
     {
         if (args is null)
@@ -589,7 +596,7 @@ public static class LocalToolResultClearing
 
         if (args is JsonObject obj)
         {
-            return FirstNonEmpty(keys.Select(key => obj[key]?.ToString()).ToArray());
+            return FirstNonEmpty(keys.Select(key => ArgText(obj[key])).ToArray());
         }
 
         var text = args.ToString() ?? string.Empty;
@@ -602,7 +609,7 @@ public static class LocalToolResultClearing
         {
             if (JsonNode.Parse(text) is JsonObject parsed)
             {
-                return FirstNonEmpty(keys.Select(key => parsed[key]?.ToString()).ToArray());
+                return FirstNonEmpty(keys.Select(key => ArgText(parsed[key])).ToArray());
             }
         }
         catch (System.Text.Json.JsonException)

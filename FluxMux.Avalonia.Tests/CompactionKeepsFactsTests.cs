@@ -69,6 +69,45 @@ public sealed class CompactionKeepsFactsTests
     }
 
     [Fact]
+    public void Values_are_found_inside_Cline_4_result_lists_and_its_commands_are_named()
+    {
+        // Cline 4.x: run_commands {"commands": [...]}, output as the JSON of its result list.
+        JsonObject Call(string id, string command) => new()
+        {
+            ["role"] = "assistant",
+            ["content"] = null,
+            ["tool_calls"] = new JsonArray { new JsonObject { ["id"] = id, ["type"] = "function", ["function"] = new JsonObject { ["name"] = "run_commands", ["arguments"] = new JsonObject { ["commands"] = new JsonArray { command } }.ToJsonString() } } },
+        };
+        JsonObject Result(string id, string command, string output) => new()
+        {
+            ["role"] = "tool",
+            ["tool_call_id"] = id,
+            ["content"] = new JsonArray { new JsonObject { ["query"] = command, ["result"] = output } }.ToJsonString(),
+        };
+
+        var messages = new JsonArray
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "agent" },
+            new JsonObject { ["role"] = "user", ["content"] = "Tidy the billing service." },
+            Call("a", "Get-Content config/service.toml"),
+            Result("a", "Get-Content config/service.toml", "[service]\nname = \"billing\"\nmetrics_port = 47193\n"),
+        };
+        for (var i = 0; i < 30; i++)
+        {
+            messages.Add(new JsonObject { ["role"] = "user", ["content"] = "Carry on " + i });
+            messages.Add(new JsonObject { ["role"] = "assistant", ["content"] = "Working on step " + i + "." });
+        }
+
+        var payload = new JsonObject { ["messages"] = messages };
+        Assert.True(LocalHistoryCompaction.TryCompactPayload(payload, PortForwardingRules.Defaults, force: true));
+        var summary = payload["messages"]!.AsArray().OfType<JsonObject>()
+            .First(m => m["content"]?.ToString().StartsWith("Compressed prior conversation context", StringComparison.Ordinal) == true)["content"]!.ToString();
+        Assert.Contains("run_commands Get-Content config/service.toml: metrics_port = 47193", summary, StringComparison.Ordinal);
+        Assert.Contains("- run_commands: Get-Content config/service.toml", summary, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\n", summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void The_opening_request_is_pinned_ahead_of_the_summary()
     {
         var messages = new JsonArray

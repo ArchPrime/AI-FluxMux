@@ -231,6 +231,114 @@ public static class HandoverBrief
         return text.Length <= maxChars ? text : text[..maxChars];
     }
 
+    /// <summary>
+    /// AI-FluxMux's record of a chat for a Client app's own compaction (26 Nov): the person's
+    /// messages in order, the values found in tool output, decisions and files changed, and where
+    /// the chat started, from the whole chat as the app last sent it. A client's summariser sees
+    /// only what the app chose to send it, often with tool output cut short, so values that lived
+    /// there (a port in a config file, a flaky test, a commit hash) were lost: Cline's own
+    /// compaction of the Live-Switch chat kept 7 of 10 facts. It goes into the app's summary
+    /// request and onto the summary the app gets back (<see cref="HailMary.ClientCompactionRequest"/>
+    /// adds the wording for each). Null when the chat holds nothing the person wrote.
+    /// </summary>
+    public static string? ClientSummaryRecord(JsonArray? messages, int maxChars = 8000)
+    {
+        if (messages is null || messages.Count == 0)
+        {
+            return null;
+        }
+
+        var first = LocalHistoryCompaction.IndexOfFirstRealUser(messages);
+        var opening = first >= 0 ? HumanText(messages[first] as JsonObject) : string.Empty;
+
+        // After a Client app's first compaction its chats start with the summary it kept, which ends
+        // with AI-FluxMux's earlier record, and the opening request is gone from them. That record is
+        // carried forward, so a chat compacted again keeps what the first compaction kept.
+        var earlier = PreviousClientRecord(messages) ?? (string.IsNullOrWhiteSpace(opening) ? null : EarlierBrief.Parse(opening));
+        var startedText = string.IsNullOrWhiteSpace(earlier?.Started) ? opening : earlier.Started;
+        if (string.IsNullOrWhiteSpace(startedText) && earlier is null && first < 0)
+        {
+            return null;
+        }
+
+        var head = LatestWinsRule + "\n";
+        var started = string.IsNullOrWhiteSpace(startedText)
+            ? string.Empty
+            : "\n## Where it started\n" + Cap(startedText, Math.Min(OpeningChars, Math.Max(200, maxChars / 5))) + "\n";
+        var room = maxChars - head.Length - started.Length;
+        var text = new StringBuilder(head);
+        var timeline = Timeline(messages, first + 1, messages.Count, earlier?.History, Math.Max(0, room / 2));
+        if (timeline.Count > 0)
+        {
+            text.Append("\n## The person's messages (oldest first; later ones override earlier ones)\n");
+            foreach (var line in timeline)
+            {
+                text.Append(line).Append('\n');
+            }
+        }
+
+        var factsRoom = maxChars - text.Length - started.Length - 40;
+        var facts = factsRoom > 200 ? Facts(messages, messages.Count, earlier?.Facts, factsRoom) : string.Empty;
+        if (facts.Length > 0)
+        {
+            text.Append("\n## Facts gathered along the way\n").Append(facts);
+        }
+
+        text.Append(started);
+        var all = text.ToString();
+        return all.Length <= maxChars ? all : all[..maxChars];
+    }
+
+    /// <summary>Heading that opens AI-FluxMux's record on a summary a Client app keeps.</summary>
+    public const string ClientRecordHeading = "Record kept by AI-FluxMux from the whole conversation";
+
+    /// <summary>The newest AI-FluxMux record found in the chat (on a summary the app kept), as an earlier brief.</summary>
+    private static EarlierBrief? PreviousClientRecord(JsonArray messages)
+    {
+        for (var i = messages.Count - 1; i >= 0; i--)
+        {
+            var text = messages[i] is JsonObject message ? LocalHistoryCompaction.ExtractText(message["content"]) : string.Empty;
+            var at = text.LastIndexOf(ClientRecordHeading, StringComparison.Ordinal);
+            if (at < 0)
+            {
+                continue;
+            }
+
+            var body = text[at..];
+            var lineEnd = body.IndexOf('\n');
+            body = lineEnd < 0 ? string.Empty : body[(lineEnd + 1)..];
+            string? started = null, facts = null;
+            var history = new List<string>();
+            foreach (var section in ("\n" + body).Split("\n## "))
+            {
+                var nl = section.IndexOf('\n');
+                if (nl < 0)
+                {
+                    continue;
+                }
+
+                var heading = section[..nl].Trim();
+                var content = section[(nl + 1)..].Trim();
+                if (heading.StartsWith("Where it started", StringComparison.Ordinal))
+                {
+                    started = content;
+                }
+                else if (heading.StartsWith("The person's messages", StringComparison.Ordinal))
+                {
+                    history.AddRange(content.Split('\n').Where(l => l.TrimStart().StartsWith("- ", StringComparison.Ordinal)));
+                }
+                else if (heading.StartsWith("Facts gathered", StringComparison.Ordinal))
+                {
+                    facts = content;
+                }
+            }
+
+            return new EarlierBrief(started ?? string.Empty, history, facts ?? string.Empty);
+        }
+
+        return null;
+    }
+
     private const int TimelineEntryChars = 240;
     private const int TimelineChars = 8000;
     private static readonly Regex Digits = new(@"\d+", RegexOptions.Compiled);
