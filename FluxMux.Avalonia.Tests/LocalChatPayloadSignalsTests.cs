@@ -541,6 +541,21 @@ public sealed class LocalChatPayloadSignalsTests
     }
 
     [Fact]
+    public void CountRepeatedToolCommand_ends_the_run_at_a_message_from_the_person()
+    {
+        // A resumed chat whose tail is three repeats, then the person's own message: they have
+        // stepped in, so no pause asking them to steer.
+        var payload = PayloadWithAssistantCalls(ShellCall("execute_command", "dir"), ShellCall("execute_command", "dir"), ShellCall("execute_command", "dir"));
+        payload["messages"]!.AsArray().Add(new JsonObject { ["role"] = "user", ["content"] = "<user_input mode=\"act\">Stop. Just reply OK.</user_input>" });
+        Assert.Equal(0, LocalChatPayloadSignals.CountRepeatedToolCommand(payload, out _));
+
+        // Client-app text in the user role (an environment dump) is not the person stepping in.
+        var dump = PayloadWithAssistantCalls(ShellCall("execute_command", "dir"), ShellCall("execute_command", "dir"), ShellCall("execute_command", "dir"));
+        dump["messages"]!.AsArray().Add(new JsonObject { ["role"] = "user", ["content"] = "<environment_details>x</environment_details>" });
+        Assert.Equal(3, LocalChatPayloadSignals.CountRepeatedToolCommand(dump, out _));
+    }
+
+    [Fact]
     public void CollapseRepeatedToolRun_keeps_only_the_first_attempt_of_the_run()
     {
         var payload = PayloadWithAssistantCalls(

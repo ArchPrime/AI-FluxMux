@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace FluxMux.Avalonia.Services;
 
@@ -159,9 +160,9 @@ public static class ClineCompactionWriter
     }
 
     /// <summary>
-    /// Normalizes a message's content the way Cline's <c>iL</c>/<c>de</c> do before hashing:
-    /// for user messages, trim whitespace on string content or on the "text" parts of array
-    /// content. Non-user messages pass through unchanged.
+    /// Normalizes a message's content the way Cline does before hashing (4.1.27: <c>RGo</c>
+    /// applying <c>s0</c>): for user messages, <see cref="ClineUserText"/> on string content or
+    /// on the "text" parts of array content. Non-user messages pass through unchanged.
     /// </summary>
     private static JsonNode NormalizeContentForHash(JsonNode? content, string role)
     {
@@ -177,7 +178,7 @@ public static class ClineCompactionWriter
 
         if (content is JsonValue stringVal && stringVal.TryGetValue<string>(out var s))
         {
-            return JsonValue.Create(s.Trim());
+            return JsonValue.Create(ClineUserText(s));
         }
 
         if (content is JsonArray arr)
@@ -190,7 +191,7 @@ public static class ClineCompactionWriter
                     po["text"] is JsonValue tv && tv.TryGetValue<string>(out var text))
                 {
                     var clone = po.DeepClone() as JsonObject;
-                    clone?["text"] = text.Trim();
+                    clone?["text"] = ClineUserText(text);
                     newArr.Add(clone);
                 }
                 else
@@ -203,6 +204,68 @@ public static class ClineCompactionWriter
         }
 
         return content.DeepClone();
+    }
+
+    /// <summary>
+    /// A user text part as Cline 4.1.27 hashes it (<c>s0</c> = <c>F7e(_C(t))</c> plus the
+    /// <c>_Ei</c> slash-command prefix, ported from its extension.js): unwrap
+    /// <c>&lt;user_input …&gt;</c> and <c>&lt;user_command …&gt;</c> (or drop a lone opening tag),
+    /// remove <c>&lt;mode_notice&gt;…&lt;/mode_notice&gt;</c>, trim; a whole-message
+    /// <c>&lt;user_command slash="x"&gt;</c> becomes "/x text". Earlier Cline only trimmed, and
+    /// this code still did on 26 Nov, so every 4.x task (which wraps typed input as
+    /// <c>&lt;user_input mode="act"&gt;</c>) got a hash Cline rejected and Hail Mary's rebuild was
+    /// silently ignored on reopen. Checked against Cline's own functions run in node.
+    /// </summary>
+    internal static string ClineUserText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var unwrapped = text.Trim();
+        foreach (var tag in new[] { "user_input", "user_command" })
+        {
+            var inner = Regex.Replace(unwrapped, "<" + tag + @"\b[^>]*>([\s\S]*?)</" + tag + ">", "$1");
+            unwrapped = (inner != unwrapped ? inner : Regex.Replace(unwrapped, "<" + tag + "[^>]*>", string.Empty)).Trim();
+        }
+
+        var result = RemoveTagBlocks(unwrapped, "mode_notice").Trim();
+        var command = Regex.Match(text.Trim(), @"^<user_command\b([^>]*)>([\s\S]*?)</user_command>$", RegexOptions.IgnoreCase);
+        var slash = command.Success ? Regex.Match(command.Groups[1].Value, "slash=\"([^\"]+)\"", RegexOptions.IgnoreCase).Groups[1].Value.Trim() : string.Empty;
+        if (slash.Length == 0)
+        {
+            return result;
+        }
+
+        if (slash.Equals("team", StringComparison.OrdinalIgnoreCase))
+        {
+            var task = result.ToLowerInvariant().StartsWith("spawn a team of agents for the following task:", StringComparison.Ordinal) ? result[46..].Trim() : result;
+            return task.Length > 0 ? "/team " + task : "/team";
+        }
+
+        return result.Length > 0 ? "/" + slash + " " + result : "/" + slash;
+    }
+
+    // Cline's fVu: removes each <tag>…</tag> block (exact tags, no attributes), left to right.
+    private static string RemoveTagBlocks(string text, string tag)
+    {
+        var open = "<" + tag + ">";
+        var close = "</" + tag + ">";
+        var at = text.IndexOf(open, StringComparison.Ordinal);
+        while (at != -1)
+        {
+            var end = text.IndexOf(close, at + open.Length, StringComparison.Ordinal);
+            if (end == -1)
+            {
+                break;
+            }
+
+            text = text[..at] + text[(end + close.Length)..];
+            at = text.IndexOf(open, at, StringComparison.Ordinal);
+        }
+
+        return text;
     }
 
     /// <summary>

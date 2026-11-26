@@ -401,6 +401,18 @@ public static class LocalChatPayloadSignals
             return 0;
         }
 
+        // The person has written since the run: they have already stepped in, so it is no longer
+        // a run "in a row". Counted anyway, a resumed chat whose kept tail ended in three repeats
+        // paused the person's own "Stop, just reply OK" to ask them to steer (26 Nov, Hail Mary
+        // test). A repeat after their message starts a new run and is caught as usual.
+        if (payload["messages"] is JsonArray all
+            && all.OfType<JsonObject>().Skip(calls[^1].Message + 1).Any(m =>
+                Str(m, "role").Equals("user", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(ContextEngine.ConversationText.HumanPart(MessageText(m)))))
+        {
+            return 0;
+        }
+
         var run = RepeatRunMessages(payload, calls);
         if (run.Count >= 2)
         {
