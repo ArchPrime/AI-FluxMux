@@ -492,6 +492,14 @@ public partial class MainViewModel : ViewModelBase
         };
         // A brief kept from before a restart: the Chat handover brief button pulses if it was never copied.
         LoadKeptBrief();
+        global::FluxMux.Avalonia.Services.HailMary.HailMaryVerification.Observed += sentence =>
+            global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                StatusMessage = sentence;
+                SetHailMaryOutcome(sentence.Contains("is using the rebuilt chat", StringComparison.Ordinal)
+                    ? "Rebuild taken" : "Rebuild not taken yet — reopen the chat");
+                _runtimeService.Supervisor?.LogLaunchMonitor("[HailMary] " + sentence);
+            });
         _runtimeService.HailMaryOffered += line =>
         {
             SafeUiInvoke(() => ApplyHailMaryOffer(line));
@@ -5609,6 +5617,11 @@ public partial class MainViewModel : ViewModelBase
                 {
                     StatusMessage = result.Message + " Rebuilt as " + plan.Describe() + "."
                         + (adapter.IsBuiltInCline ? string.Empty : " Type retry in the same chat.");
+
+                    // Whichever Client app was rebuilt, its next request for this chat shows whether
+                    // it took the rebuild; nothing on screen does (HailMaryVerification).
+                    global::FluxMux.Avalonia.Services.HailMary.HailMaryVerification.Arm(
+                        chat.ClientApp, HandoverBrief.OpeningProbe(chat.Messages), chat.Messages.Count);
                 }
                 else
                 {

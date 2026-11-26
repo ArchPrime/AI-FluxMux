@@ -179,6 +179,9 @@ public static class HandoverBrief
         return text.ToString();
     }
 
+    /// <summary>Opening words of Hail Mary's rebuild summary; <see cref="HailMary.HailMaryVerification"/> looks for them.</summary>
+    public const string RescueSummaryHeading = "Summary of the earlier part of this chat, written by AI-FluxMux (Hail Mary)";
+
     /// <summary>Stated in every brief and compaction summary: in a task that changes direction, the latest word wins.</summary>
     public const string LatestWinsRule = "Later messages override earlier ones: where anything below conflicts, follow the latest.";
 
@@ -205,7 +208,7 @@ public static class HandoverBrief
         }
 
         var earlier = EarlierBrief.Parse(opening);
-        var head = "Summary of the earlier part of this chat, written by AI-FluxMux (Hail Mary) to make room. "
+        var head = RescueSummaryHeading + " to make room. "
                    + "The most recent messages follow word for word. " + LatestWinsRule
                    + " File contents are not in it; reread a file before changing it.\n";
         var started = "\n## Where it started\nThe chat began with this request. Later messages may have changed the task; where they do, follow them.\n"

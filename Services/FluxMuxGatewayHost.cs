@@ -739,6 +739,10 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 ClientAppLastSeen[shown] = DateTime.UtcNow;
                 ChatClientAppSeen?.Invoke(shown);
                 KeepLatestChat(payload, sender);
+                if (!ClientCompactionRequest.IsSummaryRequest(payload))
+                {
+                    HailMary.HailMaryVerification.Observe(payload["messages"] as JsonArray, sender);
+                }
             }
         }
 
