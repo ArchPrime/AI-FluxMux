@@ -27,7 +27,7 @@ public static class FluxMuxGatewayRouting
     public const string LocalFillingBlockedMessage =
         "This chat turn failed as it was too large to fit into the remaining Context space. "
         + "You can try recovering the chat by launching a model profile with larger Context, if you have one, "
-        + "then retrying. Otherwise start a new chat: AI-FluxMux's **Create hand over brief for fresh chat** "
+        + "then retrying. Otherwise start a new chat: AI-FluxMux's **Chat handover brief** "
         + "writes a brief to paste into it. Consider making a more focussed or simpler request.";
     /// <summary>
     /// Standard overflow wording added to a too-large refusal. Harness (and other Client apps
@@ -48,7 +48,7 @@ public static class FluxMuxGatewayRouting
     public const string LocalContextOverflowMessage =
         "This chat turn failed as it was too large to fit into the remaining Context space. "
         + "You can try recovering the chat by launching a model profile with larger Context, if you have one, "
-        + "then retrying. Otherwise start a new chat: AI-FluxMux's **Create hand over brief for fresh chat** "
+        + "then retrying. Otherwise start a new chat: AI-FluxMux's **Chat handover brief** "
         + "writes a brief to paste into it. Consider making a more focussed or simpler request.";
     public const string RepeatedToolType = "cline_repeated_command";
     public const string RepeatedToolMessage =

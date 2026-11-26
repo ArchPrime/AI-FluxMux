@@ -93,7 +93,7 @@ try {
   const log = arg('log');
   const summaryFile = arg('summary-file');
   if (!log || !summaryFile) done({ ok: false, error: 'need --log and --summary-file' }, 2);
-  const keep = Math.max(2, parseInt(arg('keep', '6'), 10) || 6);
+  let keep = Math.max(2, parseInt(arg('keep', '6'), 10) || 6);
   const out = arg('out', log);
   const root = arg('dsh-root', path.join(process.env.APPDATA ?? '', 'npm', 'node_modules', '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai'));
   const load = (pkg) => import(pathToFileURL(path.join(root, pkg, 'lib', 'index.js')).href);
@@ -147,7 +147,10 @@ try {
   }
 
   const nodes = [...session.surface.nodes];
-  if (nodes.length < keep + 3) done({ ok: false, error: 'chat too short to compact (' + nodes.length + ' messages)' }, 3);
+  // AI-FluxMux sizes --keep to fill the Context to about 60 %; on a chat with fewer messages than
+  // that, keep all but the oldest few rather than refusing.
+  keep = Math.min(keep, nodes.length - 3);
+  if (keep < 2) done({ ok: false, error: 'chat too short to compact (' + nodes.length + ' messages)' }, 3);
   // Node 0 is the system prompt (protected). Replace node 1 up to just before the kept tail,
   // moving both ends to boundaries that do not split a tool call from its result.
   let startIdx = 1;

@@ -493,6 +493,47 @@ public static class ClineCompactionWriter
     }
 
     /// <summary>
+    /// The newest of the most recent <paramref name="maxSessions"/> Cline tasks whose chat file holds
+    /// <paramref name="text"/> (Hail Mary uses the chat's opening request). Cline stores its chat as
+    /// JSON, so the text is looked for with quotes and backslashes escaped as JSON escapes them.
+    /// Null when none does. Hail Mary used to take the newest task only, which after another task
+    /// was opened was the wrong one (26 Nov).
+    /// </summary>
+    public static string? FindRecentSessionContaining(string text, int maxSessions = 20)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var probe = text.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        try
+        {
+            var sessionsDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cline", "data", "sessions");
+            if (!Directory.Exists(sessionsDir))
+            {
+                return null;
+            }
+
+            foreach (var dir in Directory.GetDirectories(sessionsDir).OrderByDescending(Directory.GetLastWriteTimeUtc).Take(maxSessions))
+            {
+                var sessionId = Path.GetFileName(dir);
+                var messagesPath = Path.Combine(dir, sessionId + ".messages.json");
+                if (File.Exists(messagesPath) && File.ReadAllText(messagesPath).Contains(probe, StringComparison.Ordinal))
+                {
+                    return sessionId;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine("[ClineCompaction] Failed to search sessions: " + ex.Message);
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Gets the on-disk directory for a Cline session (where its .messages.json and
     /// .compaction.json live). Used by the rescue path to locate the session's message history.
     /// </summary>

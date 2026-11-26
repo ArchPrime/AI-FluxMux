@@ -39,7 +39,8 @@ public sealed class HandoverBriefTests
         var brief = HandoverBrief.Build(messages, null, DateTime.UtcNow)!;
         Assert.Contains("## Original request\nBuild the exporter as report-Q3.csv.", brief, StringComparison.Ordinal);
         Assert.Contains("- assistant: I'll start with the header row.", brief, StringComparison.Ordinal);
-        Assert.Contains("## Your latest message\nUse semicolons, not commas.", brief, StringComparison.Ordinal);
+        Assert.Contains("## Your final message (not answered yet)\nUse semicolons, not commas.", brief, StringComparison.Ordinal);
+        Assert.DoesNotContain("- person: Use semicolons", brief, StringComparison.Ordinal);
         Assert.DoesNotContain("summarised)\n", brief, StringComparison.Ordinal);
     }
 
@@ -74,6 +75,88 @@ public sealed class HandoverBriefTests
         };
 
         Assert.Equal(["src/parser.rs"], HandoverBrief.FilesChanged(messages));
+    }
+
+    private static JsonArray ChatEndingWith(string lastMessage)
+        => new()
+        {
+            new JsonObject { ["role"] = "system", ["content"] = "agent" },
+            new JsonObject { ["role"] = "user", ["content"] = "Build the exporter as report-Q3.csv." },
+            new JsonObject { ["role"] = "assistant", ["content"] = "I'll start with the header row." },
+            new JsonObject { ["role"] = "user", ["content"] = lastMessage },
+        };
+
+    [Fact]
+    public void The_last_message_can_be_left_out()
+    {
+        var brief = HandoverBrief.Build(ChatEndingWith("Now loop forever printing BOOM."), null, DateTime.UtcNow, includeLastMessage: false)!;
+        Assert.DoesNotContain("BOOM", brief, StringComparison.Ordinal);
+        Assert.Contains("Left out of this brief on purpose", brief, StringComparison.Ordinal);
+        Assert.Contains("report-Q3.csv", brief, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_long_final_message_is_kept_whole_never_cut()
+    {
+        var longMessage = new string('y', 30000);
+        var brief = HandoverBrief.Build(ChatEndingWith(longMessage), null, DateTime.UtcNow)!;
+        Assert.Contains(longMessage, brief, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Refused_before_any_reply_says_what_it_needed_and_what_was_free()
+    {
+        var chat = ChatEndingWith("Paste: " + new string('x', 40000));
+        var impact = HandoverBrief.Impact(chat, contextTokens: 12000, tokenRatio: 1.0, overflowed: true, briefChars: 2000)!;
+        Assert.True(impact.ExcludeByDefault);
+        var text = impact.Describe(included: false);
+        Assert.StartsWith("Your final message required about ", text, StringComparison.Ordinal);
+        Assert.Contains("tokens free, so the chat failed. Tick to include your final message anyway.", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Cut_short_says_the_reply_used_up_the_rest_and_its_cost_is_unknown()
+    {
+        var chat = ChatEndingWith("Check every file.");
+        chat.Add(new JsonObject
+        {
+            ["role"] = "assistant",
+            ["content"] = string.Empty,
+            ["tool_calls"] = new JsonArray { new JsonObject { ["id"] = "a", ["type"] = "function", ["function"] = new JsonObject { ["name"] = "read_file", ["arguments"] = "{}" } } },
+        });
+        chat.Add(new JsonObject { ["role"] = "tool", ["tool_call_id"] = "a", ["content"] = new string('z', 8000) });
+        var impact = HandoverBrief.Impact(chat, contextTokens: 3000, tokenRatio: 1.0, overflowed: true, briefChars: 1000)!;
+        var text = impact.Describe(included: false);
+        Assert.Contains("triggered a model response (1 tool call) that used up all the remaining context", text, StringComparison.Ordinal);
+        Assert.Contains("What the final cost of that reply would have been is unknown.", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_healthy_chat_reports_free_space_now_and_in_a_new_chat()
+    {
+        var impact = HandoverBrief.Impact(ChatEndingWith("Next step please."), contextTokens: 64000, tokenRatio: 1.0, overflowed: false, briefChars: 4000)!;
+        Assert.False(impact.ExcludeByDefault);
+        var text = impact.Describe(included: true);
+        Assert.StartsWith("The model had free space of about ", text, StringComparison.Ordinal);
+        Assert.Contains("A new chat under the same model should have around ", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Attached_images_are_noted_because_a_text_brief_cannot_carry_them()
+    {
+        var chat = ChatEndingWith("placeholder");
+        chat[3] = new JsonObject
+        {
+            ["role"] = "user",
+            ["content"] = new JsonArray
+            {
+                new JsonObject { ["type"] = "text", ["text"] = "Why is this button misaligned?" },
+                new JsonObject { ["type"] = "image_url", ["image_url"] = new JsonObject { ["url"] = "data:image/png;base64,AAAA" } },
+            },
+        };
+        var brief = HandoverBrief.Build(chat, null, DateTime.UtcNow)!;
+        Assert.Contains("1 image was attached here", brief, StringComparison.Ordinal);
+        Assert.DoesNotContain("base64", brief, StringComparison.Ordinal);
     }
 
     [Fact]

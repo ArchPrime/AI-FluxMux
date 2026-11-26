@@ -1,16 +1,17 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace FluxMux.Avalonia.Services.HailMary;
 
 /// <summary>
-/// Stage 1 strategy (the rescue path): when Cline is non-responsive and cannot run /smol itself,
-/// we compact externally. ExecuteAsync is the PREPARE step — it builds the Cline-format summary
-/// (from the fidelity source) and returns it as a preview WITHOUT writing anything. The ViewModel
-/// shows a confirmation dialog; on confirm it calls CommitAsync, which writes the .compaction.json
-/// via ClineCompactionWriter. Cline then reads that file on its next turn and resumes with the
-/// compacted, fidelity-preserving context.
+/// Hail Mary for Cline ("Cline can't continue"): writes a .compaction.json that Cline applies when
+/// the chat is reopened. ExecuteAsync builds the summary — from <see cref="CompactionContext.Plan"/>
+/// (the stuck chat as Cline last sent it, sized by <see cref="RescuePlanner"/>) or, without one, from
+/// the session note — and CommitAsync writes the file. With a plan only the older part of the chat
+/// is compacted: the newest messages that fit the plan's budget stay word for word after the summary
+/// (26 Nov). Before, every message was replaced, so a rescued Cline chat held the summary alone.
 /// </summary>
 public sealed class ExternalRescueStrategy : ICompactionStrategy
 {
@@ -33,7 +34,7 @@ public sealed class ExternalRescueStrategy : ICompactionStrategy
         {
             return CompactionResult.Fail(
                 "Could not find a Cline session to compact. Is Cline running on this PC? " +
-                "If so, try the /smol option, or type /smol manually in Cline's chat input.");
+                "If so, use Cline's own compact button, or Chat handover brief.");
         }
 
         var messagesPath = ctx.ClineMessagesPath
@@ -51,12 +52,18 @@ public sealed class ExternalRescueStrategy : ICompactionStrategy
             ContextLimit = ctx.ContextLimit,
         };
 
+        if (ctx.Plan is { } plan)
+        {
+            ctx.LogLine("[HailMary] strategy=" + Name + ": summary from the chat as Cline last sent it (" + plan.Summary.Length + " chars; " + plan.Describe() + ")");
+            return new CompactionResult(true, "Ready to rebuild Cline session " + sessionId + ": " + plan.Describe() + ".", SummaryPreview: plan.Summary);
+        }
+
         var snapshot = await _fidelity.BuildAsync(prepareCtx).ConfigureAwait(false);
         if (snapshot.IsEmpty)
         {
             return CompactionResult.Fail(
                 "No fidelity data available to compact with (VIBE_STATE empty and Cline .messages.json unreadable). " +
-                "Try the /smol option, or type /smol manually in Cline's chat input.");
+                "Use Cline's own compact button, or Chat handover brief.");
         }
 
         var summary = snapshot.ToClineSummary();
@@ -107,17 +114,21 @@ public sealed class ExternalRescueStrategy : ICompactionStrategy
         var sourceMessages = ClineCompactionWriter.ReadMessagesArray(messagesPath);
 
         string? written;
+        var compacted = 0;
         if (sourceMessages is not null && sourceMessages.Count > 0)
         {
-            // Compact the ENTIRE history: replace all N messages with the summary. Cline's sd()
-            // then rebuilds the context as [summary] + [] (no tail), which is what we want for a
-            // truly stuck chat.
-            ctx.LogLine("[HailMary] strategy=" + Name + ": Using WriteCompactionFileValid with " + sourceMessages.Count + " source messages.");
+            // Cline rebuilds the chat as [summary] + the messages after the compacted count. With a
+            // plan, keep the newest messages that fit its budget; without one, compact them all.
+            compacted = ctx.Plan is { } plan
+                ? CompactCount(sourceMessages, plan.KeptTokens, plan.TokenRatio)
+                : sourceMessages.Count;
+            ctx.LogLine("[HailMary] strategy=" + Name + ": compacting " + compacted + " of " + sourceMessages.Count + " messages; "
+                + (sourceMessages.Count - compacted) + " kept word for word.");
             written = ClineCompactionWriter.WriteCompactionFileValid(
                 sessionId,
                 prepared.SummaryPreview,
                 sourceMessages,
-                sourceMessages.Count);
+                compacted);
         }
         else
         {
@@ -135,7 +146,7 @@ public sealed class ExternalRescueStrategy : ICompactionStrategy
         {
             ctx.LogLine("[HailMary] strategy=" + Name + ": FAILED to write .compaction.json for " + sessionId);
             return Task.FromResult(CompactionResult.Fail(
-                "Failed to write the .compaction.json file. Cline was NOT compacted. Try the /smol option, or type /smol manually."));
+                "Failed to write the .compaction.json file. Cline was NOT compacted. Use Cline's own compact button, or Chat handover brief."));
         }
 
         ctx.LogLine("[HailMary] strategy=" + Name + ": WROTE .compaction.json at " + written +
@@ -148,13 +159,37 @@ public sealed class ExternalRescueStrategy : ICompactionStrategy
         // closes and reopens the chat, Cline loads the original .messages.json, validates the
         // .compaction.json (hash matches), and applies the compaction.
 
+        var keptNote = sourceMessages is { Count: > 0 } && compacted < sourceMessages.Count
+            ? " The last " + (sourceMessages.Count - compacted) + " messages are kept word for word."
+            : string.Empty;
         return Task.FromResult(new CompactionResult(
             Success: true,
-            Message: "Wrote external compaction for Cline session " + sessionId +
-                     ". To apply it, close and reopen this Cline chat (or restart Cline) so the session reloads with the compacted context.",
+            Message: "Cline chat rebuilt: the older part is now a summary." + keptNote
+                     + " Close and reopen this Cline chat (or restart Cline), then type retry.",
             CompactionPath: written,
             SummaryPreview: prepared.SummaryPreview));
     }
+
+    /// <summary>
+    /// How many leading messages of Cline's own chat file to compact so the rest fits
+    /// <paramref name="keptTokens"/>. The kept part never starts on a tool result whose call is
+    /// compacted, and at least one message is compacted.
+    /// </summary>
+    internal static int CompactCount(System.Text.Json.Nodes.JsonArray messages, int keptTokens, double tokenRatio)
+    {
+        var tokens = messages.Select(m => RescuePlanner.MessageTokens(m?["content"], tokenRatio)).ToList();
+        var start = RescuePlanner.TailStart(tokens, Math.Max(0, keptTokens), 1);
+        while (start < messages.Count - 1 && StartsWithToolResult(messages[start]))
+        {
+            start++;
+        }
+
+        return Math.Clamp(start, 1, messages.Count);
+    }
+
+    private static bool StartsWithToolResult(System.Text.Json.Nodes.JsonNode? message)
+        => message?["content"] is System.Text.Json.Nodes.JsonArray parts
+           && parts.OfType<System.Text.Json.Nodes.JsonObject>().Any(p => p["type"]?.ToString() == "tool_result");
 
     private static string? ResolveSessionId(CompactionContext ctx)
     {

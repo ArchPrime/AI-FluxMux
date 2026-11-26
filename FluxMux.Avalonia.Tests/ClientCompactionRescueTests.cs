@@ -36,7 +36,7 @@ public sealed class ClientCompactionRescueTests
         var overflow = FluxMuxGatewayRouting.FormatLocalContextOverflowMessage(state);
         Assert.Equal(expected, filling.Contains(FluxMuxGatewayRouting.StandardOverflowPhrase, StringComparison.Ordinal));
         Assert.Equal(expected, overflow.Contains(FluxMuxGatewayRouting.StandardOverflowPhrase, StringComparison.Ordinal));
-        Assert.Contains("Create hand over brief for fresh chat", filling, StringComparison.Ordinal);
+        Assert.Contains("Chat handover brief", filling, StringComparison.Ordinal);
     }
 
     [Fact]

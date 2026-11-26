@@ -9,45 +9,6 @@ namespace FluxMux.Avalonia.Tests;
 
 public sealed class HailMaryStrategyTests
 {
-    // ── Picker ────────────────────────────────────────────────────────────────────
-
-    [Theory]
-    [InlineData("WaitForCline", HailMaryStrategy.WaitForCline)]
-    [InlineData("ExternalRescue", HailMaryStrategy.ExternalRescue)]
-    [InlineData("anything else", HailMaryStrategy.ExternalRescue)]
-    public void Picker_radios_map_to_their_strategy(string radio, HailMaryStrategy expected)
-    {
-        var converter = new FluxMux.Avalonia.ViewModels.HailMaryStrategyToBoolConverter();
-        var picked = converter.ConvertBack(true, typeof(HailMaryStrategy), radio, System.Globalization.CultureInfo.InvariantCulture);
-        Assert.Equal(expected, picked);
-        Assert.Equal(true, converter.Convert(expected, typeof(bool), expected.ToString(), System.Globalization.CultureInfo.InvariantCulture));
-    }
-
-    // ── Strategy resolver ──────────────────────────────────────────────────────────
-
-    [Fact]
-    public void Resolve_Default_IsWaitForCline()
-    {
-        var strategy = CompactionStrategyResolver.Resolve(CompactionStrategyResolver.Default);
-        Assert.IsType<WaitForClineStrategy>(strategy);
-        Assert.Equal("wait-for-cline", strategy.Name);
-    }
-
-    [Fact]
-    public void Resolve_WaitForCline_ReturnsWaitForCline()
-    {
-        var strategy = CompactionStrategyResolver.Resolve(HailMaryStrategy.WaitForCline);
-        Assert.IsType<WaitForClineStrategy>(strategy);
-    }
-
-    [Fact]
-    public void Resolve_ExternalRescue_ReturnsExternalRescue()
-    {
-        var strategy = CompactionStrategyResolver.Resolve(HailMaryStrategy.ExternalRescue);
-        Assert.IsType<ExternalRescueStrategy>(strategy);
-        Assert.Equal("external-rescue", strategy.Name);
-    }
-
     // ── FidelitySnapshot.ToClineSummary ────────────────────────────────────────────
 
     [Fact]
@@ -358,75 +319,6 @@ public sealed class HailMaryStrategyTests
         {
             Directory.Delete(tmp, recursive: true);
         }
-    }
-
-    // ── Headroom policy ────────────────────────────────────────────────────────────
-
-    [Fact]
-    public void HeadroomPolicy_TargetFreeFraction()
-    {
-        Assert.Equal(0.20, HailMaryHeadroomPolicy.TargetFreeFraction(HailMaryHeadroom.PreserveMore));
-        Assert.Equal(0.40, HailMaryHeadroomPolicy.TargetFreeFraction(HailMaryHeadroom.Balanced));
-        Assert.Equal(0.60, HailMaryHeadroomPolicy.TargetFreeFraction(HailMaryHeadroom.LeaveMoreRoom));
-    }
-
-    // ── Headroom radio-button converter (regression: unchecked radios must not clobber) ──
-    // All three headroom radio buttons are two-way bound to the SAME HailMaryHeadroom property.
-    // When the user checks one, the other two are unchecked and each fires ConvertBack(false).
-    // The unchecked case must return the last-selected value (a no-op), NOT a hardcoded default.
-    // Otherwise the last unchecked radio clobbers the property with the default (Balanced/40%),
-    // making "PreserveMore (20%)" and "LeaveMoreRoom (60%)" silently collapse to 40%.
-
-    [Fact]
-    public void HeadroomConverter_Checked_PreserveMore_ReturnsPreserveMore()
-    {
-        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
-        var result = converter.ConvertBack(true, typeof(HailMaryHeadroom), "PreserveMore", null);
-        Assert.Equal(HailMaryHeadroom.PreserveMore, result);
-    }
-
-    [Fact]
-    public void HeadroomConverter_Checked_LeaveMoreRoom_ReturnsLeaveMoreRoom()
-    {
-        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
-        var result = converter.ConvertBack(true, typeof(HailMaryHeadroom), "LeaveMoreRoom", null);
-        Assert.Equal(HailMaryHeadroom.LeaveMoreRoom, result);
-    }
-
-    [Fact]
-    public void HeadroomConverter_Unchecked_DoesNotClobberLastSelection()
-    {
-        // Simulate the user checking PreserveMore, then the other two radios firing
-        // ConvertBack(false) as they get unchecked. The unchecked events must NOT overwrite
-        // the PreserveMore selection with the default (Balanced).
-        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
-        converter.ConvertBack(true, typeof(HailMaryHeadroom), "PreserveMore", null); // user picks 20%
-        var afterUncheckBalanced = converter.ConvertBack(false, typeof(HailMaryHeadroom), "Balanced", null);
-        var afterUncheckLeaveMore = converter.ConvertBack(false, typeof(HailMaryHeadroom), "LeaveMoreRoom", null);
-        Assert.Equal(HailMaryHeadroom.PreserveMore, afterUncheckBalanced);
-        Assert.Equal(HailMaryHeadroom.PreserveMore, afterUncheckLeaveMore);
-    }
-
-    [Fact]
-    public void HeadroomConverter_SwitchingOptions_UpdatesSelection()
-    {
-        // The user can change their mind: checking a different option updates the selection.
-        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
-        converter.ConvertBack(true, typeof(HailMaryHeadroom), "PreserveMore", null);
-        var switched = converter.ConvertBack(true, typeof(HailMaryHeadroom), "LeaveMoreRoom", null);
-        Assert.Equal(HailMaryHeadroom.LeaveMoreRoom, switched);
-        // And the now-unchecked PreserveMore radio does not revert it.
-        var afterUncheck = converter.ConvertBack(false, typeof(HailMaryHeadroom), "PreserveMore", null);
-        Assert.Equal(HailMaryHeadroom.LeaveMoreRoom, afterUncheck);
-    }
-
-    [Fact]
-    public void HeadroomConverter_Convert_MatchesCurrentSelection()
-    {
-        var converter = new global::FluxMux.Avalonia.ViewModels.HailMaryHeadroomToBoolConverter();
-        Assert.True((bool)converter.Convert(HailMaryHeadroom.PreserveMore, typeof(bool), "PreserveMore", null)!);
-        Assert.False((bool)converter.Convert(HailMaryHeadroom.PreserveMore, typeof(bool), "Balanced", null)!);
-        Assert.True((bool)converter.Convert(HailMaryHeadroom.Balanced, typeof(bool), "Balanced", null)!);
     }
 
     // ── AlreadyHasHeadroom detection ───────────────────────────────────────────────

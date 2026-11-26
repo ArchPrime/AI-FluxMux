@@ -71,45 +71,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private static volatile string? _lastChatClientAppPath;
 
     /// <summary>
-    /// The latest agent chat exactly as its Client app sent it (before Omit, compaction or any
-    /// other rewrite), for "Create hand over brief for fresh chat" (<see cref="HandoverBrief"/>).
-    /// Also written to <c>Logs\last_chat_for_handover.json</c>, off the request thread, so a brief
-    /// can still be made after a relaunch — a stuck or parked chat may never send again. A Client
-    /// app's own compaction request and a tool-less request of under four messages (Harness's
-    /// chat-title request) are not kept: neither is the chat the person is working in.
+    /// Keeps this request's chat for the hand over brief and Hail Mary (<see cref="SavedChats"/>,
+    /// one per Client app). A Client app's own compaction request and a tool-less request of under
+    /// four messages (Harness's chat-title request) are not kept: neither is the chat the person
+    /// is working in.
     /// </summary>
-    public static (JsonArray Messages, string? ClientApp, DateTime SentUtc)? LatestChat()
-    {
-        if (_latestChat is { } held)
-        {
-            return ((JsonArray)held.Messages.DeepClone(), held.ClientApp, held.SentUtc);
-        }
-
-        try
-        {
-            if (_latestChatPath is { } path && File.Exists(path) && JsonNode.Parse(File.ReadAllText(path)) is JsonObject saved
-                && saved["messages"] is JsonArray messages)
-            {
-                var app = saved["clientApp"]?.ToString();
-                var sent = DateTime.TryParse(saved["sentUtc"]?.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var at)
-                    ? at
-                    : File.GetLastWriteTimeUtc(path);
-                return ((JsonArray)messages.DeepClone(), string.IsNullOrWhiteSpace(app) ? null : app, sent);
-            }
-        }
-        catch
-        {
-        }
-
-        return null;
-    }
-
-    private static volatile LatestChatRecord? _latestChat;
-    private static volatile string? _latestChatPath;
-    private static int _latestChatWriteQueued;
-
-    private sealed record LatestChatRecord(JsonArray Messages, string? ClientApp, DateTime SentUtc);
-
     private static void KeepLatestChat(JsonObject payload, string? sender)
     {
         if (payload["messages"] is not JsonArray messages
@@ -119,39 +85,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return;
         }
 
-        _latestChat = new LatestChatRecord((JsonArray)messages.DeepClone(), sender, DateTime.UtcNow);
-        if (_latestChatPath is null || Interlocked.Exchange(ref _latestChatWriteQueued, 1) == 1)
-        {
-            return;
-        }
-
-        // One write in flight at a time, always of the newest chat: a Client app that sends turns
-        // quickly must not queue a multi-megabyte write per turn.
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                Interlocked.Exchange(ref _latestChatWriteQueued, 0);
-                if (_latestChat is not { } latest || _latestChatPath is not { } path)
-                {
-                    return;
-                }
-
-                var record = new JsonObject
-                {
-                    ["clientApp"] = latest.ClientApp ?? string.Empty,
-                    ["sentUtc"] = latest.SentUtc.ToString("o", CultureInfo.InvariantCulture),
-                    ["messages"] = latest.Messages.DeepClone(),
-                };
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                var tmp = path + ".tmp";
-                File.WriteAllText(tmp, record.ToJsonString());
-                File.Move(tmp, path, overwrite: true);
-            }
-            catch
-            {
-            }
-        });
+        SavedChats.Keep(messages, sender);
     }
 
     /// <summary>Name shown for an agent request whose Client app is not recognised.</summary>
@@ -254,7 +188,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         _statePath = statePath;
         _lastChatClientAppPath = Path.Combine(Path.GetDirectoryName(statePath) ?? AppContext.BaseDirectory, "last_chat_client_app.txt");
-        _latestChatPath = Path.Combine(Path.GetDirectoryName(logPath) ?? AppContext.BaseDirectory, "last_chat_for_handover.json");
+        var logFolder = Path.GetDirectoryName(logPath) ?? AppContext.BaseDirectory;
+        SavedChats.Attach(Path.Combine(logFolder, "saved_chats"), Path.Combine(logFolder, "last_chat_for_handover.json"));
         _lastServedPath = lastServedPath;
         _recommendPath = recommendPath;
         _cloudBreakerPath = cloudBreakerPath;
@@ -790,7 +725,25 @@ public sealed class FluxMuxGatewayHost : IDisposable
             return;
         }
 
+        // Name the sender and keep its chat for the hand over brief and Hail Mary before anything
+        // can refuse the request: a turn sent while no model is ready (llama-server crashed or still
+        // loading) is the newest thing the person asked, and it was missing from the brief (26 Nov).
+        var isProbeRequest = context.Request.Headers[CloudEndpointValidationProbe.ProbeRequestHeader]?.Any() ?? false;
+        if (!isProbeRequest)
+        {
+            var sender = ClientAppDetector.FromRequest(payload, context.Request.UserAgent, context.Request.Headers["X-Title"]);
+            if (sender is not null || payload["tools"] is JsonArray { Count: > 0 })
+            {
+                NoteChatClientApp(sender ?? string.Empty);
+                var shown = sender ?? UnrecognisedClientApp;
+                ClientAppLastSeen[shown] = DateTime.UtcNow;
+                ChatClientAppSeen?.Invoke(shown);
+                KeepLatestChat(payload, sender);
+            }
+        }
+
         var state = await WaitForRoutableStateAsync().ConfigureAwait(false);
+        SavedChats.NoteContext(ParseInt(Str(state, "local_context"), 0));
         if (!HasReadyTarget(state))
         {
             var phase = Str(state, "phase", "idle");
@@ -822,7 +775,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
         }
 
         var forceRoute = context.Request.Headers[CloudEndpointValidationProbe.ForceRouteHeader];
-        var isProbeRequest = context.Request.Headers[CloudEndpointValidationProbe.ProbeRequestHeader]?.Any() ?? false;
         var requestId = Guid.NewGuid().ToString("N")[..8];
         string? overlayVariant = null;
 
@@ -834,15 +786,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
         if (!isProbeRequest)
         {
             EnsureVibeConversationScope(payload);
-            var sender = ClientAppDetector.FromPayload(payload);
-            if (sender is not null || payload["tools"] is JsonArray { Count: > 0 })
-            {
-                NoteChatClientApp(sender ?? string.Empty);
-                var shown = sender ?? UnrecognisedClientApp;
-                ClientAppLastSeen[shown] = DateTime.UtcNow;
-                ChatClientAppSeen?.Invoke(shown);
-                KeepLatestChat(payload, sender);
-            }
         }
 
         // If the user's client reinflates the context (forwards the full chat each turn, e.g. Cline),
@@ -4526,7 +4469,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     /// </summary>
     internal const string HailMaryOfferText =
         "This turn is too large for the loaded Context even after AI-FluxMux shortened the chat. "
-        + "Start a new chat with **Create hand over brief for fresh chat**, or use **Hail Mary** to rebuild this chat in the Client app's own files.";
+        + "Start a new chat with **Chat handover brief**, or use **Hail Mary** to rebuild this chat in the Client app's own files.";
 
     /// <summary>Marks the injected text so the model does not read it as the person's words.</summary>
     internal const string VibeBlockHeader = "[AI-FluxMux session note — background, not part of the user's message]";
@@ -6123,8 +6066,12 @@ public sealed class FluxMuxGatewayHost : IDisposable
         string hint = "",
         IDictionary<string, string>? headers = null)
     {
-        _ = errorType;
         _ = hint;
+        if (errorType is FluxMuxGatewayRouting.LocalFillingBlockedType or "exceed_context_size_error")
+        {
+            SavedChats.MarkCurrentOverflowed();
+        }
+
         return SendJsonAsync(response, status, FluxMuxGatewayRouting.EndpointErrorBody(message), headers);
     }
 

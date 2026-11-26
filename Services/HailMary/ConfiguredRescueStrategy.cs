@@ -5,10 +5,12 @@ namespace FluxMux.Avalonia.Services.HailMary;
 
 /// <summary>
 /// The "can't continue" rescue for any Client app described by a <see cref="RescueAdapterDefinition"/>
-/// (Harness, or one a user added in configuration). Prepare builds AI-FluxMux's summary from the
-/// session note (VIBE_STATE + essence) — no model call, which is why it works when the chat is too
-/// large for the model — and finds the stuck chat; Commit runs the adapter's steps. The built-in
-/// Cline rescue keeps <see cref="ExternalRescueStrategy"/>, whose writer must match Cline's hash.
+/// (Harness, or one a user added in configuration). Prepare finds the stuck chat and takes the summary
+/// and keep count from <see cref="CompactionContext.Plan"/> (the chat as the Client app last sent it,
+/// sized by <see cref="RescuePlanner"/>), or without one builds the summary from the session note
+/// (VIBE_STATE + essence) and keeps the adapter's fixed number. No model call either way, which is
+/// why it works when the chat is too large for the model. Commit runs the adapter's steps. The
+/// built-in Cline rescue keeps <see cref="ExternalRescueStrategy"/>, whose writer must match Cline's hash.
 /// </summary>
 public sealed class ConfiguredRescueStrategy : ICompactionStrategy
 {
@@ -17,6 +19,7 @@ public sealed class ConfiguredRescueStrategy : ICompactionStrategy
     private readonly IRescueHost? _host;
     private readonly string? _scriptsFolder;
     private RescueSession? _session;
+    private int? _keepRecent;
 
     public ConfiguredRescueStrategy(
         RescueAdapterDefinition adapter,
@@ -47,6 +50,14 @@ public sealed class ConfiguredRescueStrategy : ICompactionStrategy
                 + " (looked in " + System.Environment.ExpandEnvironmentVariables(_adapter.Find.Root) + ").");
         }
 
+        if (ctx.Plan is { } plan)
+        {
+            _keepRecent = plan.KeepRecent;
+            ctx.LogLine("[HailMary] strategy=" + Name + ": chat " + _session.SessionId + ", summary from the chat as the Client app last sent it (" + plan.Describe() + ")");
+            return new CompactionResult(true, "Ready to rebuild chat " + _session.SessionId + ": " + plan.Describe() + ".", SummaryPreview: plan.Summary);
+        }
+
+        _keepRecent = null;
         var snapshot = await _fidelity.BuildAsync(new CompactionContext
         {
             VibeStatePath = ctx.VibeStatePath,
@@ -77,7 +88,7 @@ public sealed class ConfiguredRescueStrategy : ICompactionStrategy
             return CompactionResult.Fail("Nothing prepared to rebuild.");
         }
 
-        var run = await RescueEngine.RunAsync(_adapter, _session, prepared.SummaryPreview, _host, _scriptsFolder, CancellationToken.None).ConfigureAwait(false);
+        var run = await RescueEngine.RunAsync(_adapter, _session, prepared.SummaryPreview, _host, _scriptsFolder, CancellationToken.None, _keepRecent).ConfigureAwait(false);
         foreach (var line in run.Log)
         {
             ctx.LogLine("[HailMary] " + Name + ": " + line);

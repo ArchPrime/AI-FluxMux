@@ -93,7 +93,8 @@ public static class RescueEngine
         RescueSession session,
         string summary,
         string summaryFile,
-        string? scriptsFolder = null) => new(StringComparer.Ordinal)
+        string? scriptsFolder = null,
+        int? keepRecent = null) => new(StringComparer.Ordinal)
     {
         ["summary"] = summary,
         ["summaryJson"] = JsonSerializer.Serialize(summary),
@@ -101,7 +102,8 @@ public static class RescueEngine
         ["sessionId"] = session.SessionId,
         ["sessionDir"] = session.SessionDir,
         ["sessionFile"] = session.SessionFile,
-        ["keepRecent"] = adapter.KeepRecent.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        // A Hail Mary plan sizes the kept part to the Context; the adapter's number is the fallback.
+        ["keepRecent"] = (keepRecent ?? adapter.KeepRecent).ToString(System.Globalization.CultureInfo.InvariantCulture),
         ["rescueScripts"] = scriptsFolder ?? DefaultScriptsFolder,
         ["nowMs"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture),
     };
@@ -116,7 +118,8 @@ public static class RescueEngine
         string summary,
         IRescueHost? host,
         string? scriptsFolder = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int? keepRecent = null)
     {
         var log = new List<string>();
         var summaryFile = Path.Combine(Path.GetTempPath(), "fluxmux-hailmary-" + Guid.NewGuid().ToString("N") + ".md");
@@ -124,7 +127,7 @@ public static class RescueEngine
         try
         {
             File.WriteAllText(summaryFile, summary, new UTF8Encoding(false));
-            var values = Placeholders(adapter, session, summary, summaryFile, scriptsFolder);
+            var values = Placeholders(adapter, session, summary, summaryFile, scriptsFolder, keepRecent);
 
             if (!adapter.Stop.IsNone)
             {

@@ -48,10 +48,16 @@ public sealed class CompactionContext
     public Action<string>? Log { get; init; }
 
     /// <summary>
-    /// The target free-context fraction (0..1) for the rescue compaction, derived from the user's
-    /// "make headroom" preference. Bounds how large the summary may be. Default 0.40 (Balanced).
+    /// The free share of the Context the session-note summary must leave (used only without a
+    /// <see cref="Plan"/>). With <see cref="PromptTokens"/> 0, as Hail Mary passes, it never cuts the note.
     /// </summary>
     public double TargetFreeFraction { get; init; } = 0.40;
+
+    /// <summary>
+    /// The sized rebuild (<see cref="RescuePlanner"/>) when the stuck chat as the Client app last sent
+    /// it is known; null falls back to the session note, with the whole chat summarised.
+    /// </summary>
+    public RescuePlan? Plan { get; init; }
 
     /// <summary>The current prompt-token count (from the context gauge). 0 if unknown.</summary>
     public int PromptTokens { get; init; }
@@ -66,9 +72,9 @@ public sealed class CompactionContext
 }
 
 /// <summary>
-/// A Hail Mary compaction strategy. Stage 0 ships WaitForClineStrategy (the existing /smol flow);
-/// Stage 1 adds ExternalRescueStrategy (write a .compaction.json ourselves when Cline is stuck).
-/// Later stages add more strategies behind this same seam without touching the prior ones.
+/// A Hail Mary rebuild of a stuck chat in the Client app's own files: ExternalRescueStrategy
+/// (Cline's .compaction.json) or ConfiguredRescueStrategy (a RescueAdapter, such as Harness).
+/// ExecuteAsync prepares the summary; CommitAsync writes it.
 /// </summary>
 public interface ICompactionStrategy
 {

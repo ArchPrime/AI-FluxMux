@@ -24,8 +24,6 @@
 
     <Window.Resources>
         <vm:StringToVisibilityConverter x:Key="StringToVisibility" />
-        <vm:HailMaryStrategyToBoolConverter x:Key="HailMaryStrategyToBool" />
-        <vm:HailMaryHeadroomToBoolConverter x:Key="HailMaryHeadroomToBool" />
         <x:String x:Key="IdleTimeoutTooltip">Set how many idle minutes before AI-FluxMux stops the local model. This saves power, and frees VRAM for other apps. A reply that is still being prepared does not count as idle, even if that turn takes a long time. While a reply is being worked on, AI-FluxMux asks Windows to stay awake so the turn can finish. Note however that if using a laptop, closing the lid can still trigger sleep. Windows can also sleep when no reply is in progress. After the PC wakes, idle time includes the time spent asleep. After an idle timeout, when you send the next chat, the local model must reload and rebuild the context from the chat history, which is slower and risks reduced model understanding of what was most pertinent. Leave the idle timeout setting off to keep the local model loaded and ready in memory.</x:String>
         <DataTemplate x:Key="CloudProviderOptionTemplate" x:DataType="x:String">
             <TextBlock Text="{Binding Converter={x:Static vm:CloudProviderDisplayConverter.Instance}}" />
@@ -3330,19 +3328,57 @@
                                        TextWrapping="Wrap"
                                        FontSize="{DynamicResource FluxFontSizeBody}" />
                             <WrapPanel>
-                                <Button Content="📝 Create hand over brief for fresh chat"
+                                <Button Content="📝 Chat handover brief"
                                         Margin="0,0,8,4"
                                         FontFamily="Segoe UI Emoji, Segoe UI, Arial"
-                                        Command="{Binding CreateHandoverBriefCommand}"
-                                        ToolTip.Tip="Copies a brief of this chat to paste as the first message of a new chat, and saves it in the Hand over briefs folder." />
-                                <Button Content="Hail Mary…"
+                                        Command="{Binding ChatHandoverBriefCommand}"
+                                        ToolTip.Tip="Prepares a brief of this chat to paste as the first message of a new chat: copy it or save it from the notice that appears." />
+                                <Button Content="🙏&#xFE0E; Hail Mary: rebuild this chat"
                                         Margin="0,0,8,4"
-                                        Click="HailMaryBannerOpen_Click"
-                                        ToolTip.Tip="Rebuild this chat in the Client app's own files so it continues in place (Cline, Harness), or ask Cline to compact itself with /smol." />
+                                        FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                        Command="{Binding RunHailMaryCommand}"
+                                        ToolTip.Tip="Rebuilds this chat in the Client app's own files (Cline, Harness): the older part becomes a summary, the newest messages stay word for word, and about 40 % of the Context is left free. A backup of the original is kept. Then type retry." />
                                 <Button Content="Dismiss"
                                         Margin="0,0,8,4"
                                         Command="{Binding DismissHailMaryBannerCommand}"
                                         ToolTip.Tip="Hide this suggestion." />
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                    <Border IsVisible="{Binding HandoverBriefBannerVisible}"
+                            Background="{DynamicResource FluxTintAmberBackground}"
+                            BorderBrush="{DynamicResource FluxTintAmberBorder}"
+                            BorderThickness="1"
+                            CornerRadius="4"
+                            Padding="8,6">
+                        <StackPanel Spacing="8">
+                            <TextBlock Text="{Binding HandoverBriefBannerText}"
+                                       TextWrapping="Wrap"
+                                       FontSize="{DynamicResource FluxFontSizeBody}" />
+                            <WrapPanel>
+                                <Button Content="📋 Copy to clipboard"
+                                        Margin="0,0,8,4"
+                                        FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                        IsVisible="{Binding HandoverBriefCanSave}"
+                                        Command="{Binding CopyHandoverBriefCommand}"
+                                        ToolTip.Tip="Copies the brief, as the Include box shows it, ready to paste as the first message of a new chat." />
+                                <Button Content="💾 Save to file…"
+                                        Margin="0,0,8,4"
+                                        FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                        IsVisible="{Binding HandoverBriefCanSave}"
+                                        Command="{Binding SaveHandoverBriefCommand}"
+                                        ToolTip.Tip="Saves the brief as a Markdown file where you choose (it starts in the Hand over briefs folder beside the AI-FluxMux config): to park a task for later, or for an agent chat to read the file instead of a paste." />
+                                <CheckBox Content="Include your final message"
+                                          Margin="0,0,8,4"
+                                          VerticalAlignment="Center"
+                                          FontSize="{DynamicResource FluxFontSizeBody}"
+                                          IsVisible="{Binding HandoverBriefHasLastMessage}"
+                                          IsChecked="{Binding HandoverBriefIncludeLastMessage}"
+                                          ToolTip.Tip="Your final message may be what killed the chat: if it was huge, or set off runaway context use, sending it again in a new chat may repeat the overflow there. It starts unticked when the chat was refused as too large after it. Copy and Save use what this box shows; the Diagnostics log keeps the full brief, and Save to file saves a left-out message beside the brief so you can review or edit it." />
+                                <Button Content="Dismiss"
+                                        Margin="0,0,8,4"
+                                        Command="{Binding DismissHandoverBriefBannerCommand}"
+                                        ToolTip.Tip="Hide this notice. The brief is kept: press Chat handover brief to copy it or show this notice again." />
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -3463,8 +3499,8 @@
                                 Background="#1A1A1A"
                                 Foreground="White"
                                 BorderBrush="#333333"
-                                Click="HailMaryButton_Click"
-                                ToolTip.Tip="Use when a chat is stuck: refused as too large, or the Client app no longer answers or will not reopen it.&#10;&#10;Rebuild the chat in the Client app&#x27;s own files from the session note, keeping the most recent messages, and reopen it so it continues in place. Built in for Cline and Harness; other Client apps can be added under RescueAdapters in fluxmux_config.json.&#10;&#10;Cline, and Cline forks set to Client app Other, can instead be asked to compact the chat themselves with /smol (VS Code takes focus briefly).&#10;&#10;For any other Client app, or to start over cleanly, use Create hand over brief for fresh chat. A model profile with more Context keeps the whole chat instead." />
+                                Command="{Binding RunHailMaryCommand}"
+                                ToolTip.Tip="Use when a chat is stuck: refused as too large, or the Client app no longer answers or will not reopen it.&#10;&#10;One press rebuilds the chat in the Client app&#x27;s own files: the older part becomes a summary (your opening request and earlier messages, decisions, values found, files changed), the newest messages stay word for word, and about 40 % of the Context is left free for your retried message and the reply. The original is backed up first. Then type retry (for Cline, close and reopen the chat first).&#10;&#10;Built in for Cline and Harness; other Client apps can be added under RescueAdapters in fluxmux_config.json. For any other Client app, the press prepares a hand over brief instead, copied and shown in the Diagnostics log, to paste into a new chat." />
                         <TextBlock Grid.Row="1" Grid.Column="4"
                                    IsVisible="{Binding HailMaryOutcome, Converter={StaticResource StringToVisibility}}"
                                    HorizontalAlignment="Center"
@@ -3492,117 +3528,49 @@
                                 Click="GitCheckpointButton_Click"
                                 ToolTip.Tip="Creates a git checkpoint in the workspace. This is a safety net: if the model goes off the rails, you can reset to this checkpoint.&#10;&#10;The checkpoint is a git commit with a message like 'fluxmux-checkpoint: manual checkpoint' so it's easy to find and reset to later." />
                         <Button Grid.Row="0" Grid.Column="6"
+                                x:Name="HandoverBriefButton"
                                 MinHeight="32"
                                 VerticalAlignment="Center"
                                 VerticalContentAlignment="Center"
                                 FontFamily="Segoe UI Emoji, Segoe UI, Arial"
                                 FontSize="{DynamicResource FluxFontSizeBody}"
-                                Content="📝 Create hand over brief for fresh chat"
+                                Content="📝 Chat handover brief"
                                 Background="#1A1A1A"
                                 Foreground="White"
                                 BorderBrush="#333333"
-                                Command="{Binding CreateHandoverBriefCommand}"
-                                ToolTip.Tip="Writes a brief of the latest chat a Client app sent through Port and copies it, ready to paste as the first message of a new chat: the opening request and the latest turns word for word, and the rest summarised (your messages, decisions, values found, commands run, files changed).&#10;&#10;Use it to carry on after a chat is stuck, to move the task to another Client app or model, or to park a task for later. Each brief is also saved in the Hand over briefs folder beside the AI-FluxMux config.&#10;&#10;File contents are left out: the new chat rereads the files it needs." />
-                        <Popup Grid.Row="0" x:Name="HailMaryPickerPopup"
-                                IsOpen="False"
-                                PlacementTarget="{Binding ElementName=HailMaryButton}"
-                                Placement="Bottom"
-                                ClipToBounds="False">
-                            <Border Background="White"
-                                    BorderBrush="#5B21B6"
+                                Command="{Binding ChatHandoverBriefCommand}"
+                                ToolTip.Tip="Prepares a brief of the stuck or latest chat (from whichever Client app) to paste as the first message of a new chat: the opening request and the latest turns word for word, the rest summarised. It is kept in Hand over briefs\Latest hand over brief.md and shown in full in the Diagnostics log; copy it or save it from the notice that appears.&#10;&#10;The button pulses green while a brief has not been copied yet. Press it again to copy the brief, copy its file location, show the notice again, or brief another chat.&#10;&#10;Use it to carry on after a chat is stuck, to move the task to another Client app or model, or to park a task for later." />
+                        <Popup Grid.Row="0" x:Name="HandoverBriefMenu"
+                               IsOpen="{Binding HandoverBriefMenuOpen, Mode=TwoWay}"
+                               IsLightDismissEnabled="True"
+                               PlacementTarget="{Binding ElementName=HandoverBriefButton}"
+                               Placement="Bottom">
+                            <Border Background="{DynamicResource FluxPaneBackground}"
+                                    BorderBrush="{DynamicResource FluxMutedBorder}"
                                     BorderThickness="1"
                                     CornerRadius="4"
-                                    Padding="0">
-                                <StackPanel Spacing="8" Margin="8" MinWidth="240">
-                                <TextBlock Text="Hail Mary" FontWeight="SemiBold" FontSize="{DynamicResource FluxFontSizeBody}" />
-
-                                <!-- ── Confirmation view (rescue prepared, awaiting confirm) ── -->
-                                <StackPanel Spacing="6" MaxWidth="360" IsVisible="{Binding HailMaryRescuePending}">
-                                    <TextBlock TextWrapping="Wrap" FontSize="{DynamicResource FluxFontSizeCaption}" Opacity="0.9"
-                                               Text="{Binding HailMaryRescueIntro}" />
-                                    <Border Background="#F5F3FF" BorderBrush="#DDD6FE" BorderThickness="1" CornerRadius="3" Padding="6" MaxHeight="220">
-                                        <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
-                                            <TextBlock Text="{Binding HailMaryRescuePreview}" TextWrapping="Wrap" FontSize="{DynamicResource FluxFontSizeSmall}" FontFamily="Consolas, monospace" />
-                                        </ScrollViewer>
-                                    </Border>
-                                    <Border Background="#FEF3C7" BorderBrush="#F59E0B" BorderThickness="1" CornerRadius="3" Padding="6"
-                                            IsVisible="{Binding HailMaryRescueWarning, Converter={StaticResource StringToVisibility}}">
-                                        <TextBlock Text="{Binding HailMaryRescueWarning}" TextWrapping="Wrap" FontSize="{DynamicResource FluxFontSizeSmall}"
-                                                   Foreground="#92400E" FontWeight="SemiBold" />
-                                    </Border>
-                                    <TextBlock Text="{Binding HailMaryRescueHeadroom}" TextWrapping="Wrap" FontSize="{DynamicResource FluxFontSizeSmall}"
-                                               Foreground="#5B21B6" Opacity="0.9"
-                                               IsVisible="{Binding HailMaryRescueHeadroom, Converter={StaticResource StringToVisibility}}" />
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <Button Content="Confirm write"
-                                                Command="{Binding ConfirmHailMaryRescueCommand}"
-                                                Click="HailMaryPickerConfirm_Click"
-                                                FontSize="{DynamicResource FluxFontSizeCaption}" Padding="10,4" />
-                                        <Button Content="Cancel"
-                                                Command="{Binding CancelHailMaryRescueCommand}"
-                                                Click="HailMaryPickerCancelRescue_Click"
-                                                FontSize="{DynamicResource FluxFontSizeCaption}" Padding="10,4" />
-                                    </StackPanel>
+                                    Padding="8">
+                                <StackPanel Spacing="6">
+                                    <Button Content="📋 Copy latest brief to clipboard" HorizontalAlignment="Stretch"
+                                            FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                            Command="{Binding CopyHandoverBriefCommand}" />
+                                    <Button Content="📁 Copy brief file location to clipboard" HorizontalAlignment="Stretch"
+                                            FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                            Command="{Binding CopyHandoverBriefLocationCommand}"
+                                            ToolTip.Tip="{Binding LatestBriefPath}" />
+                                    <Button Content="Show the brief and its options" HorizontalAlignment="Stretch"
+                                            Command="{Binding ShowHandoverBriefOptionsCommand}" />
+                                    <ItemsControl ItemsSource="{Binding HandoverChatChoices}"
+                                                  IsVisible="{Binding HandoverBriefHasNewChats}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate x:DataType="vm:HandoverChatChoice">
+                                                <Button Content="{Binding Label}" HorizontalAlignment="Stretch" Margin="0,2,0,0"
+                                                        Command="{Binding $parent[ItemsControl].((vm:MainViewModel)DataContext).CreateHandoverBriefFromCommand}"
+                                                        CommandParameter="{Binding Key}" />
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
                                 </StackPanel>
-
-                                <!-- ── Strategy / prune view (not yet pending) ── -->
-                                <StackPanel Spacing="6"
-                                           IsVisible="{Binding HailMaryRescuePending, Converter={x:Static vm:InvertedBoolConverter.Instance}}">
-                                <!-- How to revive the chat: the Client app's own /smol (Cline and forks set to Other), or
-                                     rebuilding the chat in its files (built in for Cline and Harness). The AI-FluxMux trim was
-                                     retired on 26 Nov; a Client app with neither is pointed to the hand over brief. -->
-                                <StackPanel Spacing="2">
-                                    <TextBlock Text="Revive this chat by:" FontSize="{DynamicResource FluxFontSizeCaption}" FontWeight="SemiBold" />
-                                    <TextBlock Text="This Client app has no Hail Mary rescue. Use Create hand over brief for fresh chat instead."
-                                               TextWrapping="Wrap" MaxWidth="320"
-                                               FontSize="{DynamicResource FluxFontSizeCaption}"
-                                               IsVisible="{Binding HailMaryHasNoOption}" />
-                                    <RadioButton Content="Ask the Client app to compact itself (/smol)"
-                                     IsVisible="{Binding HailMarySmolAvailable}"
-                                                 GroupName="HailMaryStrategy"
-                                                 IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=WaitForCline}"
-                                                 FontSize="{DynamicResource FluxFontSizeCaption}"
-                                                 ToolTip.Tip="Waits for Cline (or a Cline fork with the same /smol command, with Client app set to Other) to finish its turn, then asks it to compact the chat with /smol. VS Code takes focus briefly. If the chat is too full for the Client app to answer /smol, rebuild it in the Client app's files or start a new chat with a hand over brief." />
-                                    <RadioButton Content="{Binding HailMaryRescueLabel}"
-                                                 GroupName="HailMaryStrategy"
-                                     IsVisible="{Binding HailMaryRescueAvailable}"
-                                                 IsChecked="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}"
-                                                 FontSize="{DynamicResource FluxFontSizeCaption}"
-                                                 ToolTip.Tip="Use when the Client app is stuck and cannot compact itself, even when its chat no longer responds. AI-FluxMux rebuilds the chat in the Client app's own files from this chat's session note, keeping the most recent messages: for Cline it writes a compaction file Cline picks up when the chat reloads; for Harness it stops Harness, rewrites the chat (also repairing a chat Harness will not reopen) and reopens it on the same chat. The original file is backed up first, and you see a preview before anything is written. Other Client apps can be added under RescueAdapters in fluxmux_config.json." />
-                                    <!-- Headroom slider (only when the rescue strategy is selected) -->
-                                    <StackPanel Spacing="2" Margin="0,4,0,0"
-                                               IsVisible="{Binding HailMarySelectedStrategy, Converter={StaticResource HailMaryStrategyToBool}, ConverterParameter=ExternalRescue}">
-                                        <TextBlock Text="Make headroom (how much free context to leave):" FontSize="{DynamicResource FluxFontSizeCaption}" FontWeight="SemiBold" />
-                                        <RadioButton Content="Preserve more nuance (leave ~20% room)"
-                                                     GroupName="HailMaryHeadroom"
-                                                     IsChecked="{Binding HailMaryHeadroom, Converter={StaticResource HailMaryHeadroomToBool}, ConverterParameter=PreserveMore}"
-                                                     FontSize="{DynamicResource FluxFontSizeCaption}"
-                                                     ToolTip.Tip="Keeps more detail in the summary the chat is rebuilt from. Riskier: less free Context to resume the chat." />
-                                        <RadioButton Content="Balanced (~40% free)"
-                                                     GroupName="HailMaryHeadroom"
-                                                     IsChecked="{Binding HailMaryHeadroom, Converter={StaticResource HailMaryHeadroomToBool}, ConverterParameter=Balanced}"
-                                                     FontSize="{DynamicResource FluxFontSizeCaption}"
-                                                     ToolTip.Tip="The 'just enough' default: keeps the essentials and some detail while leaving room to resume." />
-                                        <RadioButton Content="Leave more room (drop nuance first, ~60% free)"
-                                                     GroupName="HailMaryHeadroom"
-                                                     IsChecked="{Binding HailMaryHeadroom, Converter={StaticResource HailMaryHeadroomToBool}, ConverterParameter=LeaveMoreRoom}"
-                                                     FontSize="{DynamicResource FluxFontSizeCaption}"
-                                                     ToolTip.Tip="Safest: leaves the most free context. Drops nuance (recent turns, dead ends) first." />
-                                    </StackPanel>
-                                </StackPanel>
-
-                                <StackPanel Orientation="Horizontal" Spacing="8">
-                                    <Button Content="Start"
-                                            Command="{Binding HailMaryShrinkTurnCommand}"
-                                            IsVisible="{Binding HailMaryHasNoOption, Converter={x:Static vm:InvertedBoolConverter.Instance}}"
-                                            FontSize="{DynamicResource FluxFontSizeCaption}" Padding="10,4"
-                                            Click="HailMaryPickerArm_Click" />
-                                    <Button Content="Cancel"
-                                            Click="HailMaryPickerCancel_Click"
-                                            FontSize="{DynamicResource FluxFontSizeCaption}" Padding="10,4" />
-                                </StackPanel>
-                            </StackPanel>
-                            </StackPanel>
                             </Border>
                         </Popup>
                         </Grid>

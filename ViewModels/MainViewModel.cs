@@ -490,6 +490,8 @@ public partial class MainViewModel : ViewModelBase
         {
             SafeUiInvoke(() => ApplyPortRulesTelemetry(snap));
         };
+        // A brief kept from before a restart: the Chat handover brief button pulses if it was never copied.
+        LoadKeptBrief();
         _runtimeService.HailMaryOffered += line =>
         {
             SafeUiInvoke(() => ApplyHailMaryOffer(line));
@@ -847,9 +849,6 @@ public partial class MainViewModel : ViewModelBase
         OnPropertyChanged(nameof(UserClientReinflatesContext));
         OnPropertyChanged(nameof(HailMaryRescueAvailable));
         OnPropertyChanged(nameof(HailMaryRescueLabel));
-        OnPropertyChanged(nameof(HailMarySmolAvailable));
-        OnPropertyChanged(nameof(HailMaryUsesClientStrategy));
-        OnPropertyChanged(nameof(HailMaryHasNoOption));
     }
 
     /// <summary>
@@ -860,15 +859,10 @@ public partial class MainViewModel : ViewModelBase
     public bool VibeStateControlsEnabled => true;
 
     /// <summary>
-    /// True when the Hail Mary button should be enabled. The button is always visible,
-    /// but greyed out when:
-    /// - There's no context data yet (no turns have been measured).
-    ///
-    /// Note: when the user's client reinflates the context (e.g. Cline), the button is
-    /// still enabled — but it triggers Cline's /smol command instead of a middle-cut,
-    /// because a middle-cut is undone by Cline's reinflation on the next turn.
+    /// True when the Hail Mary button should be enabled: once a turn has been measured, or a chat
+    /// has been saved for it (it needs no model, so it also works after a relaunch).
     /// </summary>
-    public bool HailMaryButtonEnabled => HailMaryButtonVisible;
+    public bool HailMaryButtonEnabled => CanRunHailMary;
 
 
     [ObservableProperty]
@@ -3066,52 +3060,390 @@ public partial class MainViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// "Create hand over brief for fresh chat": builds <see cref="HandoverBrief"/> from the latest
-    /// chat that came through Port, copies it to the clipboard and saves it in a "Hand over briefs"
-    /// folder beside the config, so a task parked for weeks can be picked up from the file. Used to
-    /// recover a stuck chat, to move a task to another Client app or model, or to park it.
+    /// "Chat handover brief" (26 Nov). The first press, or any press with no brief kept, prepares a
+    /// brief (<see cref="HandoverBrief"/>) from the saved chat to act on — the most recently failed,
+    /// else the most recent, from whichever Client app (<see cref="global::FluxMux.Avalonia.Services.SavedChats"/>) —
+    /// writes it to "Latest hand over brief.md" in the Hand over briefs folder, puts the full brief
+    /// in the Diagnostics log, and shows the notice. Nothing reaches the clipboard until the person
+    /// presses Copy: the brief used to be copied at once, before they had decided whether their
+    /// final message belonged in it, and every change of mind overwrote the clipboard again.
+    /// While a kept brief has not been copied the button pulses green. A later press opens a menu:
+    /// copy the kept brief, copy its file's location, show the notice again, or brief another chat.
+    /// The kept brief survives a dismissed notice, an overwritten clipboard, new chats and a
+    /// restart, so a panicked person always has it one click (or one double-click) away.
     /// </summary>
     [RelayCommand]
-    private async Task CreateHandoverBrief()
+    private async Task ChatHandoverBrief()
     {
-        var latest = global::FluxMux.Avalonia.Services.FluxMuxGatewayHost.LatestChat();
-        var brief = latest is { } chat ? HandoverBrief.Build(chat.Messages, chat.ClientApp, chat.SentUtc) : null;
-        if (brief is null)
+        if (_keptBrief is null)
         {
-            StatusMessage = "No chat to brief from yet: a hand over brief is made from the latest chat a Client app sent through Port.";
+            await CreateBriefFromAsync(global::FluxMux.Avalonia.Services.SavedChats.Preferred());
             return;
         }
 
-        string? savedAs = null;
+        RefreshHandoverChatChoices();
+        HandoverBriefMenuOpen = true;
+    }
+
+    [RelayCommand]
+    private async Task CreateHandoverBriefFrom(string? key)
+    {
+        HandoverBriefMenuOpen = false;
+        await CreateBriefFromAsync(key is null ? null : global::FluxMux.Avalonia.Services.SavedChats.Get(key));
+    }
+
+    private async Task CreateBriefFromAsync(global::FluxMux.Avalonia.Services.SavedChat? chat)
+    {
+        var made = await MakeHandoverBriefAsync(chat, include: null);
+        ShowHandoverBriefBanner(BriefNotice(made));
+    }
+
+    /// <summary>The menu's "Create new brief from …" entries: each saved chat the kept brief is not already of.</summary>
+    public System.Collections.ObjectModel.ObservableCollection<HandoverChatChoice> HandoverChatChoices { get; } = new();
+
+    [ObservableProperty]
+    public partial bool HandoverBriefMenuOpen { get; set; }
+
+    private void RefreshHandoverChatChoices()
+    {
+        HandoverChatChoices.Clear();
+        foreach (var (key, label, sentUtc) in global::FluxMux.Avalonia.Services.SavedChats.Summaries())
+        {
+            if (_keptBrief is { } kept && kept.ChatKey.Equals(key, StringComparison.OrdinalIgnoreCase) && kept.ChatSentUtc == sentUtc)
+            {
+                continue;
+            }
+
+            HandoverChatChoices.Add(new HandoverChatChoice(key, "Create new brief from your " + label));
+        }
+
+        OnPropertyChanged(nameof(HandoverBriefHasNewChats));
+    }
+
+    public bool HandoverBriefHasNewChats => HandoverChatChoices.Count > 0;
+
+    /// <summary>"Copy to clipboard" (notice) and "Copy latest brief to clipboard" (menu).</summary>
+    [RelayCommand]
+    private async Task CopyHandoverBrief()
+    {
+        HandoverBriefMenuOpen = false;
+        if (_keptBrief is not { } kept)
+        {
+            return;
+        }
+
+        var copied = await CopyTextAsync(kept.Current);
+        if (copied)
+        {
+            _keptBrief = kept with { Used = true };
+            SaveKeptBrief();
+        }
+
+        ShowHandoverBriefBanner(!copied
+            ? "The clipboard is unavailable in this session. The brief is in " + LatestBriefPath + "."
+            : "Hand over brief is now copied to the clipboard" + (kept.Included || kept.FinalMessage.Length == 0 ? "" : " (without your final message)")
+              + ". You can now paste it as the first message of a new chat, or save it to a file. The Diagnostics log shows the brief in full"
+              + (kept.Included || kept.FinalMessage.Length == 0 ? "" : " (including your final message)") + " if required.");
+    }
+
+    /// <summary>"Copy brief file location to clipboard" (menu): for attaching the file, or telling an agent to read it.</summary>
+    [RelayCommand]
+    private async Task CopyHandoverBriefLocation()
+    {
+        HandoverBriefMenuOpen = false;
+        ShowHandoverBriefBanner(await CopyTextAsync(LatestBriefPath)
+            ? "The brief's file location is now copied to the clipboard: " + LatestBriefPath + ". In an agent chat you can ask it to read that file and carry on from it."
+            : "The clipboard is unavailable in this session. The brief is in " + LatestBriefPath + ".");
+    }
+
+    /// <summary>"Show brief and options" (menu): the notice again, with Copy, Save and the tick box.</summary>
+    [RelayCommand]
+    private void ShowHandoverBriefOptions()
+    {
+        HandoverBriefMenuOpen = false;
+        if (_keptBrief is { } kept)
+        {
+            ShowHandoverBriefBanner(BriefNotice(kept));
+        }
+    }
+
+    private async Task<bool> CopyTextAsync(string text)
+    {
+        var clipboard = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow?.Clipboard;
+        if (clipboard is null)
+        {
+            return false;
+        }
+
         try
         {
-            var folder = Path.Combine(Path.GetDirectoryName(_configService.ConfigPath) ?? AppContext.BaseDirectory, "Hand over briefs");
-            Directory.CreateDirectory(folder);
-            savedAs = Path.Combine(folder, HandoverBrief.FileName(latest!.Value.Messages, latest.Value.SentUtc));
-            await File.WriteAllTextAsync(savedAs, brief);
+            await clipboard.SetTextAsync(text);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// "Include your final message" on the brief notice. Changing it rewrites the kept brief and
+    /// its Latest file; the Diagnostics log keeps the full one. Copy and Save use what it shows.
+    /// </summary>
+    [ObservableProperty]
+    public partial bool HandoverBriefIncludeLastMessage { get; set; } = true;
+
+    private bool _settingIncludeLastMessage;
+
+    partial void OnHandoverBriefIncludeLastMessageChanged(bool value)
+    {
+        if (_settingIncludeLastMessage || _keptBrief is not { } kept || kept.Included == value)
+        {
+            return;
+        }
+
+        _keptBrief = kept with { Included = value, Used = false };
+        SaveKeptBrief();
+        ShowHandoverBriefBanner(BriefNotice(_keptBrief));
+    }
+
+    private static string BriefNotice(KeptBrief kept)
+    {
+        var withoutFinal = !kept.Included && kept.FinalMessage.Length > 0;
+        var head = "Hand over brief prepared from your " + kept.ChatLabel + (withoutFinal ? " (without your final message)" : string.Empty)
+                   + ". Copy it to the clipboard, or save it to a file, then paste it as the first message of a new chat. "
+                   + "The Diagnostics log shows the brief in full" + (withoutFinal ? " (including your final message)" : string.Empty) + " if required.";
+        var about = kept.Included ? kept.AboutIncluded : kept.AboutExcluded;
+        return about.Length == 0 ? head : head + "\n\n" + about;
+    }
+
+    private static string BriefNotice(HandoverBriefOutcome made)
+        => made.Kept is { } kept
+            ? BriefNotice(kept)
+            : "No chat to brief from yet: a hand over brief is made from the latest chat a Client app sent through Port.";
+
+    private sealed record HandoverBriefOutcome(bool Made, KeptBrief? Kept);
+
+    /// <summary>
+    /// The kept brief: both versions (with and without the final message), the final message itself
+    /// (saved beside a brief that leaves it out), which version is chosen, and whether it has been
+    /// copied. Saved as a dot-file in the Hand over briefs folder so it survives a restart.
+    /// </summary>
+    private sealed record KeptBrief(
+        string Full,
+        string WithoutFinal,
+        string FinalMessage,
+        bool Included,
+        bool Used,
+        string ChatKey,
+        DateTime ChatSentUtc,
+        string ChatLabel,
+        string FileName,
+        string AboutIncluded,
+        string AboutExcluded)
+    {
+        public string Current => Included ? Full : WithoutFinal;
+    }
+
+    private KeptBrief? _keptBrief;
+
+    /// <summary>True while a kept brief has not been copied: the Chat handover brief button pulses green.</summary>
+    [ObservableProperty]
+    public partial bool HandoverBriefUnused { get; set; }
+
+    /// <summary>True when the latest brief's chat has a final message of the person's to include or leave out.</summary>
+    [ObservableProperty]
+    public partial bool HandoverBriefHasLastMessage { get; set; }
+
+    [ObservableProperty]
+    public partial bool HandoverBriefBannerVisible { get; set; }
+
+    [ObservableProperty]
+    public partial string HandoverBriefBannerText { get; set; } = string.Empty;
+
+    /// <summary>True once a brief exists to save.</summary>
+    public bool HandoverBriefCanSave => _keptBrief is not null;
+
+    private string HandoverBriefsFolder
+        => Path.Combine(Path.GetDirectoryName(_configService.ConfigPath) ?? AppContext.BaseDirectory, "Hand over briefs");
+
+    /// <summary>The fixed file a panicked person can open without AI-FluxMux: rewritten with each brief.</summary>
+    public string LatestBriefPath => Path.Combine(HandoverBriefsFolder, "Latest hand over brief.md");
+
+    private string KeptBriefStatePath => Path.Combine(HandoverBriefsFolder, ".latest-brief.json");
+
+    private void ShowHandoverBriefBanner(string text)
+    {
+        HandoverBriefBannerText = text;
+        HandoverBriefBannerVisible = true;
+        OnPropertyChanged(nameof(HandoverBriefCanSave));
+        StatusMessage = text;
+    }
+
+    [RelayCommand]
+    private void DismissHandoverBriefBanner() => HandoverBriefBannerVisible = false;
+
+    /// <summary>Writes the Latest file and the kept-brief state, and updates the pulse and tick box.</summary>
+    private void SaveKeptBrief()
+    {
+        if (_keptBrief is not { } kept)
+        {
+            return;
+        }
+
+        HandoverBriefUnused = !kept.Used;
+        HandoverBriefHasLastMessage = kept.FinalMessage.Length > 0;
+        _settingIncludeLastMessage = true;
+        HandoverBriefIncludeLastMessage = kept.Included;
+        _settingIncludeLastMessage = false;
+        try
+        {
+            Directory.CreateDirectory(HandoverBriefsFolder);
+            File.WriteAllText(LatestBriefPath, kept.Current);
+            File.WriteAllText(KeptBriefStatePath, System.Text.Json.JsonSerializer.Serialize(kept));
         }
         catch (Exception ex)
         {
-            StatusMessage = "Could not save the hand over brief (" + ex.Message + "); trying the clipboard.";
-            savedAs = null;
+            AppendDiagnosticEntry("BRIEF", "Could not write " + LatestBriefPath + ": " + ex.Message, "AI-FluxMux");
         }
+    }
 
-        var copied = false;
-        var clipboard = (Application.Current?.ApplicationLifetime as IClassicDesktopStyleApplicationLifetime)?.MainWindow?.Clipboard;
-        if (clipboard is not null)
+    /// <summary>Reads the kept brief back at start-up, so the button pulses for an uncopied one.</summary>
+    private void LoadKeptBrief()
+    {
+        try
         {
-            try
+            if (File.Exists(KeptBriefStatePath)
+                && System.Text.Json.JsonSerializer.Deserialize<KeptBrief>(File.ReadAllText(KeptBriefStatePath)) is { } kept)
             {
-                await clipboard.SetTextAsync(brief);
-                copied = true;
-            }
-            catch
-            {
+                _keptBrief = kept;
+                HandoverBriefUnused = !kept.Used;
+                HandoverBriefHasLastMessage = kept.FinalMessage.Length > 0;
+                _settingIncludeLastMessage = true;
+                HandoverBriefIncludeLastMessage = kept.Included;
+                _settingIncludeLastMessage = false;
             }
         }
+        catch
+        {
+        }
+    }
 
-        StatusMessage = (copied ? "Hand over brief copied: paste it as the first message of a new chat." : "Clipboard unavailable.")
-            + (savedAs is null ? string.Empty : " Saved as " + savedAs);
+    /// <summary>
+    /// Saves the kept brief where the person picks, starting in the Hand over briefs folder. A final
+    /// message left out of it is saved in full beside it ("… - final message.md"), kept apart so an
+    /// agent told to read the brief does not take in that message too.
+    /// </summary>
+    [RelayCommand]
+    private async Task SaveHandoverBrief()
+    {
+        if (_keptBrief is not { } brief)
+        {
+            return;
+        }
+
+        var owner = GetMainWindowStorageProvider();
+        if (owner is null)
+        {
+            ShowHandoverBriefBanner("The save dialog is unavailable in this session; the brief is in " + LatestBriefPath + ".");
+            return;
+        }
+
+        IStorageFolder? startLocation = null;
+        try
+        {
+            Directory.CreateDirectory(HandoverBriefsFolder);
+            startLocation = await owner.TryGetFolderFromPathAsync(HandoverBriefsFolder);
+        }
+        catch
+        {
+        }
+
+        var picked = await owner.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Save hand over brief",
+            SuggestedFileName = brief.FileName,
+            SuggestedStartLocation = startLocation,
+            DefaultExtension = "md",
+            FileTypeChoices = [new FilePickerFileType("Markdown") { Patterns = ["*.md"] }],
+        });
+        if (picked is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var path = picked.Path.LocalPath;
+            await File.WriteAllTextAsync(path, brief.Current);
+            var note = string.Empty;
+            if (!brief.Included && brief.FinalMessage.Length > 0)
+            {
+                var messagePath = Path.Combine(Path.GetDirectoryName(path) ?? string.Empty, Path.GetFileNameWithoutExtension(path) + " - final message.md");
+                await File.WriteAllTextAsync(messagePath, brief.FinalMessage);
+                note = " Your final message is saved in full beside it as " + Path.GetFileName(messagePath) + ", to review or edit before sending it again.";
+            }
+
+            ShowHandoverBriefBanner("Hand over brief saved as " + path + "." + note + " In an agent chat you can also ask it to read the brief file and carry on from it.");
+        }
+        catch (Exception ex)
+        {
+            ShowHandoverBriefBanner("Could not save the hand over brief: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Builds the brief from <paramref name="chat"/> (null: the preferred saved chat) and keeps it.
+    /// <paramref name="include"/> null takes the default from the final message's impact (left out
+    /// when the chat was refused for size after it). Writes the full brief, final message included,
+    /// to the Diagnostics log. Does not touch the clipboard.
+    /// </summary>
+    private Task<HandoverBriefOutcome> MakeHandoverBriefAsync(global::FluxMux.Avalonia.Services.SavedChat? chat = null, bool? include = null)
+    {
+        chat ??= global::FluxMux.Avalonia.Services.SavedChats.Preferred();
+        var full = chat is null ? null : HandoverBrief.Build(chat.Messages, chat.ClientApp, chat.SentUtc, includeLastMessage: true);
+        if (chat is null || full is null)
+        {
+            return Task.FromResult(new HandoverBriefOutcome(false, null));
+        }
+
+        var (contextTokens, ratio) = LatestChatTokenScale(chat);
+        var impact = HandoverBrief.Impact(chat.Messages, contextTokens, ratio, chat.Overflowed, full.Length);
+        var finalMessage = HandoverBrief.LastPersonMessage(chat.Messages);
+        var included = finalMessage.Length == 0 || (include ?? impact?.ExcludeByDefault != true);
+        var withoutFinal = HandoverBrief.Build(chat.Messages, chat.ClientApp, chat.SentUtc, includeLastMessage: false) ?? full;
+        _keptBrief = new KeptBrief(
+            full,
+            withoutFinal,
+            finalMessage,
+            included,
+            Used: false,
+            chat.Key,
+            chat.SentUtc,
+            chat.Label,
+            HandoverBrief.FileName(chat.Messages, chat.SentUtc),
+            impact?.Describe(included: true) ?? string.Empty,
+            impact?.Describe(included: false) ?? string.Empty);
+        SaveKeptBrief();
+        AppendDiagnosticEntry("BRIEF", full, "AI-FluxMux");
+        return Task.FromResult(new HandoverBriefOutcome(true, _keptBrief));
+    }
+
+    /// <summary>
+    /// The loaded Context and the measured tokens / chars-4 ratio of the last prompt, used to size
+    /// the brief and Hail Mary. The Context falls back to the one saved with the chat (the gauge is
+    /// cleared at start-up); the ratio is only meaningful for the chat that was measured, so it is
+    /// used for the chat that sent last and 0 (the 1.5 default) otherwise.
+    /// </summary>
+    private (int ContextTokens, double Ratio) LatestChatTokenScale(global::FluxMux.Avalonia.Services.SavedChat chat)
+    {
+        var (promptTokens, contextLimit, _) = _runtimeService.ReadLocalContextUsage();
+        var newest = global::FluxMux.Avalonia.Services.SavedChats.Summaries().FirstOrDefault();
+        var measuredThisChat = newest.Key is not null && newest.Key.Equals(chat.Key, StringComparison.OrdinalIgnoreCase);
+        var estimate = global::FluxMux.Avalonia.Services.LocalRequestOverlayRouting.EstimatePromptTokens(
+            new System.Text.Json.Nodes.JsonObject { ["messages"] = chat.Messages.DeepClone() });
+        var ratio = measuredThisChat && promptTokens > 0 && estimate > 0 ? (double)promptTokens / estimate : 0;
+        return (contextLimit > 0 ? contextLimit : chat.ContextTokens, ratio);
     }
 
     [RelayCommand]
@@ -4553,16 +4885,7 @@ public partial class MainViewModel : ViewModelBase
     // automatically re-queried when the observable property changes.
     partial void OnHailMaryButtonVisibleChanged(bool value)
     {
-        // Don't reset the picker while a compaction is in flight (queued) or a rescue is awaiting
-        // confirmation. HailMaryQueued is set synchronously on the UI thread before the async
-        // prepare begins, so it is a reliable guard against a gauge tick racing ahead of the
-        // HailMaryRescuePending = true post (which would otherwise reopen the strategy picker and
-        // cause the "click write → dialog reopens" loop).
-        if (value && !HailMaryRescuePending && !HailMaryQueued)
-        {
-            ResetHailMaryPicker();
-        }
-        HailMaryShrinkTurnCommand.NotifyCanExecuteChanged();
+        RunHailMaryCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(HailMaryButtonEnabled));
     }
 
@@ -5160,70 +5483,207 @@ public partial class MainViewModel : ViewModelBase
         RefreshLocalReloadRecommendBanner();
     }
 
-    [RelayCommand(CanExecute = nameof(CanHailMaryShrinkTurn))]
-    private void HailMaryShrinkTurn()
+    /// <summary>
+    /// Hail Mary, one press (26 Nov). It acts on the most recently failed saved chat, else the most
+    /// recent (<see cref="global::FluxMux.Avalonia.Services.SavedChats.Preferred"/>), from whichever
+    /// Client app sent it: several can share Port (pi, Cline, Harness, OpenCode…). Where that app
+    /// has a rescue-in-place (a RescueAdapter: built in for Cline and Harness) it rebuilds the chat
+    /// in the app's own files and says to type "retry": the summary comes from the chat as the app
+    /// last sent it, and the newest messages that fit stay word for word, filling about 60 % of the
+    /// Context (<see cref="global::FluxMux.Avalonia.Services.HailMary.RescuePlanner"/>). Otherwise —
+    /// no rescue for that app, the newest message alone too large to retry, the Context unknown, or
+    /// (Cline) no recent task holding that chat — it prepares the hand over brief instead, so the
+    /// task carries on in a new chat. It never asks for a message in the stuck chat, which cannot
+    /// take one. There is no dialog; the original chat file is backed up first.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanRunHailMary))]
+    private async Task RunHailMary()
     {
-        _runtimeService.Supervisor?.LogLaunchMonitor(
-            "[HailMary] HailMaryShrinkTurn invoked (clientShortens=" + UserClientReinflatesContext +
-            ", clineRescue=" + HailMaryRescueAvailable + ", selectedStrategy=" + HailMarySelectedStrategy + ")");
-        // Every option here works on the Client app's own side: /smol, or rebuilding the chat in
-        // its files. "Trimming it in AI-FluxMux" was retired (26 Nov): it cut only the next
-        // request, the Client app resent the whole chat after it, and the automatic compaction
-        // and 95 % last resort already did the rest. A Client app with neither option is pointed
-        // to the hand over brief.
-        if (HailMaryUsesClientStrategy)
+        var chat = global::FluxMux.Avalonia.Services.SavedChats.Preferred();
+        var clientApp = chat?.ClientApp ?? HailMaryClientApp;
+        var adapter = RescueAdapterFor(clientApp);
+        _runtimeService.Supervisor?.LogLaunchMonitor("[HailMary] pressed (chat=" + (chat?.Label ?? "none") + ", rescue=" + (adapter?.Id ?? "none") + ")");
+        if (chat is null)
         {
-            RunClineCompactionStrategy();
+            HailMaryBannerVisible = false;
+            ShowHandoverBriefBanner("Hail Mary has nothing to work from yet: no chat from any Client app has come through Port since AI-FluxMux began keeping them.");
             return;
         }
 
-        StatusMessage = "Hail Mary has no rescue for " + HailMaryClientApp
-            + ". Use Create hand over brief for fresh chat and paste it into a new chat.";
-        ResetHailMaryPicker();
+        var appName = string.IsNullOrWhiteSpace(chat.ClientApp) ? "this Client app" : chat.ClientApp;
+        if (adapter is null)
+        {
+            await OfferBriefInsteadAsync(chat, "No chat rescue-in-place has been defined yet for " + appName
+                + " in the AI-FluxMux configuration file (" + _configService.ConfigPath + ", under RescueAdapters). "
+                + "However, a task history and continuation brief has been prepared from your " + chat.Label + ".");
+            return;
+        }
+
+        // The newest message alone too large: a rebuild keeps it — it is what "retry" resends — so
+        // the retried turn would overflow again.
+        if (NewestMessageTooLargeToRetry(chat) is { } newestTokens)
+        {
+            await OfferBriefInsteadAsync(chat, "Rebuilding your " + chat.Label + " would not help: its newest message alone is about "
+                + newestTokens.ToString("N0", CultureInfo.InvariantCulture)
+                + " tokens, more than a quarter of the Context, and retry would send it again. A continuation brief has been prepared instead.",
+                include: false);
+            return;
+        }
+
+        HailMaryBannerVisible = false;
+        HailMaryQueued = true;
+        SetHailMaryOutcome("Rebuilding the chat…");
+        try
+        {
+            var (promptTokens, contextLimit, _) = _runtimeService.ReadLocalContextUsage();
+            var plan = PlanHailMary(chat, contextLimit, promptTokens);
+            if (plan is null)
+            {
+                HailMaryQueued = false;
+                await OfferBriefInsteadAsync(chat, "Hail Mary could not size a rebuild of your " + chat.Label
+                    + ": the loaded Context is not known yet. A continuation brief has been prepared instead.");
+                return;
+            }
+
+            // One press and no preview, so only the Cline task that holds this chat is rewritten:
+            // searched among the recent tasks, not assumed to be the newest.
+            string? clineSession = null;
+            if (adapter.IsBuiltInCline)
+            {
+                clineSession = global::FluxMux.Avalonia.Services.ClineCompactionWriter.FindRecentSessionContaining(OpeningProbe(plan));
+                if (clineSession is null)
+                {
+                    _runtimeService.Supervisor?.LogLaunchMonitor("[HailMary] no recent Cline task holds the saved chat; nothing written");
+                    HailMaryQueued = false;
+                    await OfferBriefInsteadAsync(chat, "Hail Mary did not rebuild anything: none of your recent Cline tasks holds the " + chat.Label
+                        + " AI-FluxMux saw, so rewriting one could change the wrong task. A continuation brief has been prepared from that chat instead.");
+                    return;
+                }
+            }
+
+            var ctx = new global::FluxMux.Avalonia.Services.HailMary.CompactionContext
+            {
+                VibeStatePath = _runtimeService.VibeStatePath,
+                EssencePath = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(_runtimeService.VibeStatePath) ?? string.Empty, "essence.json"),
+                ClineSessionId = clineSession,
+                Log = line => _runtimeService.Supervisor?.LogLaunchMonitor(line),
+                PromptTokens = 0,
+                ContextLimit = plan.ContextTokens,
+                Plan = plan,
+            };
+
+            global::FluxMux.Avalonia.Services.HailMary.ICompactionStrategy strategy = adapter.IsBuiltInCline
+                ? new global::FluxMux.Avalonia.Services.HailMary.ExternalRescueStrategy()
+                : new global::FluxMux.Avalonia.Services.HailMary.ConfiguredRescueStrategy(adapter, new HailMaryRescueHost(this));
+            var prepared = await strategy.ExecuteAsync(ctx);
+            var result = prepared.Success && !string.IsNullOrWhiteSpace(prepared.SummaryPreview)
+                ? await strategy.CommitAsync(ctx, prepared)
+                : prepared;
+            global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                HailMaryQueued = false;
+                SetHailMaryOutcome(result.Success ? "Chat rebuilt — type retry" : "Rebuild failed");
+                if (result.Success)
+                {
+                    StatusMessage = result.Message + " Rebuilt as " + plan.Describe() + "."
+                        + (adapter.IsBuiltInCline ? string.Empty : " Type retry in the same chat.");
+                }
+                else
+                {
+                    _ = OfferBriefInsteadAsync(chat, "Hail Mary could not rebuild your " + chat.Label + ": " + result.Message
+                        + " A continuation brief has been prepared instead.");
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                HailMaryQueued = false;
+                SetHailMaryOutcome("Rebuild failed");
+                _ = OfferBriefInsteadAsync(chat, "Hail Mary could not rebuild your " + chat.Label + ": " + ex.Message
+                    + " A continuation brief has been prepared instead.");
+            });
+        }
     }
 
-    private bool CanHailMaryShrinkTurn => HailMaryButtonVisible;
+    /// <summary>Prepares the hand over brief for <paramref name="chat"/> and shows why, above the brief notice.</summary>
+    private async Task OfferBriefInsteadAsync(global::FluxMux.Avalonia.Services.SavedChat chat, string reason, bool? include = null)
+    {
+        var made = await MakeHandoverBriefAsync(chat, include);
+        HailMaryBannerVisible = false;
+        ShowHandoverBriefBanner(made.Made ? reason + "\n\n" + BriefNotice(made) : reason + " A continuation brief could not be prepared from that chat either.");
+        SetHailMaryOutcome(made.Made ? "Brief ready — paste into a new chat" : "Nothing to brief from");
+    }
 
-    // ── Hail Mary Cline compaction strategies (Stage 0 = wait-for-cline, Stage 1 = external rescue) ──
+    // A frozen chat after a relaunch has no measured turn, yet that is when Hail Mary is wanted:
+    // the rebuild needs only a saved chat, not a model (26 Nov).
+    private bool CanRunHailMary => HailMaryButtonVisible || global::FluxMux.Avalonia.Services.SavedChats.Any;
 
     /// <summary>
-    /// The option selected in the Hail Mary picker (see <see cref="DefaultHailMaryStrategy"/>).
-    /// Not persisted — resets each time the picker opens.
+    /// The newest message's estimated tokens when it alone is over
+    /// <see cref="HandoverBrief.OversizedLastMessageShare"/> of the Context; null otherwise (or
+    /// when the Context is unknown).
     /// </summary>
-    [ObservableProperty]
-    public partial global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy HailMarySelectedStrategy { get; set; }
-        = global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue;
+    private int? NewestMessageTooLargeToRetry(global::FluxMux.Avalonia.Services.SavedChat chat)
+    {
+        var (contextTokens, ratio) = LatestChatTokenScale(chat);
+        var newest = chat.Messages.OfType<System.Text.Json.Nodes.JsonObject>().LastOrDefault(m => !"system".Equals(m["role"]?.ToString(), StringComparison.OrdinalIgnoreCase));
+        var tokens = global::FluxMux.Avalonia.Services.HailMary.RescuePlanner.MessageTokens(newest, ratio);
+        return contextTokens > 0 && tokens > contextTokens * HandoverBrief.OversizedLastMessageShare ? tokens : null;
+    }
+
+    /// <summary>The sized rebuild of <paramref name="chat"/>; null when the Context is not known.</summary>
+    private global::FluxMux.Avalonia.Services.HailMary.RescuePlan? PlanHailMary(
+        global::FluxMux.Avalonia.Services.SavedChat chat,
+        int contextLimit,
+        int measuredPromptTokens)
+    {
+        // After a restart the gauge is empty until a turn is measured; use the Context saved with the chat.
+        contextLimit = contextLimit > 0 ? contextLimit : chat.ContextTokens;
+        if (contextLimit <= 0)
+        {
+            return null;
+        }
+
+        var estimate = global::FluxMux.Avalonia.Services.LocalRequestOverlayRouting.EstimatePromptTokens(new System.Text.Json.Nodes.JsonObject { ["messages"] = chat.Messages.DeepClone() });
+        var ratio = measuredPromptTokens > 0 && estimate > 0 ? (double)measuredPromptTokens / estimate : 0;
+        return global::FluxMux.Avalonia.Services.HailMary.RescuePlanner.FromChat(chat.Messages, contextLimit, ratio);
+    }
+
+    /// <summary>The first line of the chat's opening request, up to 80 characters, to find its Cline task by.</summary>
+    private static string OpeningProbe(global::FluxMux.Avalonia.Services.HailMary.RescuePlan plan)
+    {
+        var opening = plan.Summary.Split("## Original request\n", 2) is [_, var rest] ? rest.Split('\n', 2)[0].Trim() : string.Empty;
+        return opening.Length > 80 ? opening[..80] : opening;
+    }
 
     /// <summary>
-    /// The option the picker opens on: rebuilding the chat in the Client app's files when this
-    /// Client app has that rescue (it works even when the chat no longer answers), else /smol.
-    /// </summary>
-    private global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy DefaultHailMaryStrategy
-        => HailMaryRescueAvailable || !HailMarySmolAvailable
-            ? global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue
-            : global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.WaitForCline;
-
-    /// <summary>
-    /// The "can't continue — rebuild from outside" rescue for the selected Client app: a built-in
-    /// (Cline's compaction file, Harness's session log) or one added under RescueAdapters in
+    /// The "can't continue — rebuild from outside" rescue for a Client app: a built-in (Cline's
+    /// compaction file, Harness's session log) or one added under RescueAdapters in
     /// fluxmux_config.json. Null when that Client app has none. Each adapter is tied to named
     /// Client apps because it writes into that app's own chat files; run for another app it would
     /// only find, or overwrite, an unrelated chat.
     /// </summary>
-    private global::FluxMux.Avalonia.Services.HailMary.RescueAdapterDefinition? CurrentRescueAdapter()
+    private global::FluxMux.Avalonia.Services.HailMary.RescueAdapterDefinition? RescueAdapterFor(string? clientApp)
         => global::FluxMux.Avalonia.Services.HailMary.RescueAdapterCatalog.ForClientApp(
             global::FluxMux.Avalonia.Services.HailMary.RescueAdapterCatalog.Resolve(_config?.GetObjectArray(global::FluxMux.Avalonia.Services.HailMary.RescueAdapterCatalog.ConfigKey)),
-            HailMaryClientApp);
+            clientApp);
+
+    private global::FluxMux.Avalonia.Services.HailMary.RescueAdapterDefinition? CurrentRescueAdapter() => RescueAdapterFor(HailMaryClientApp);
 
     /// <summary>
-    /// The Client app Hail Mary acts on: the one whose chat request AI-FluxMux saw last, named by
-    /// its own system prompt (<see cref="global::FluxMux.Avalonia.Services.ClientAppDetector"/>),
-    /// else the Client app dropdown. The dropdown is setup notes and can say Cline while the
-    /// stuck chat is in Harness (25 Nov: the picker then offered /smol and Cline's rescue for a
-    /// Harness chat). An unrecognised client (a Cline fork, Other) falls back to the dropdown.
+    /// The Client app Hail Mary acts on: that of the saved chat it would act on (the most recently
+    /// failed, else the most recent; <see cref="global::FluxMux.Avalonia.Services.SavedChats"/>), else
+    /// the one whose chat request AI-FluxMux saw last (named by its own system prompt,
+    /// <see cref="global::FluxMux.Avalonia.Services.ClientAppDetector"/>), else the Client app
+    /// dropdown. The dropdown is setup notes and can say Cline while the stuck chat is in Harness
+    /// (25 Nov: the picker then offered /smol and Cline's rescue for a Harness chat).
     /// </summary>
     private string HailMaryClientApp
-        => global::FluxMux.Avalonia.Services.FluxMuxGatewayHost.LastChatClientApp ?? SelectedEndpointApp;
+        => global::FluxMux.Avalonia.Services.SavedChats.PreferredClientApp()
+           ?? global::FluxMux.Avalonia.Services.FluxMuxGatewayHost.LastChatClientApp
+           ?? SelectedEndpointApp;
 
     /// <summary>
     /// Status-row text naming the Client app whose chat requests AI-FluxMux is serving now, as
@@ -5251,6 +5711,9 @@ public partial class MainViewModel : ViewModelBase
                     : ".")
                 + "\n\nSeen since AI-FluxMux started:\n" + string.Join("\n", lines);
             RefreshClientShorteningState();
+            // A chat was just saved, so Hail Mary can act even before a turn is measured.
+            OnPropertyChanged(nameof(HailMaryButtonEnabled));
+            RunHailMaryCommand.NotifyCanExecuteChanged();
         });
 
     /// <summary>True when the selected Client app has a "can't continue" rescue.</summary>
@@ -5258,359 +5721,6 @@ public partial class MainViewModel : ViewModelBase
 
     /// <summary>Picker text for that rescue.</summary>
     public string HailMaryRescueLabel => CurrentRescueAdapter()?.Label ?? string.Empty;
-
-    /// <summary>First line of the rescue confirmation, for the Client app being rescued.</summary>
-    [ObservableProperty]
-    public partial string HailMaryRescueIntro { get; set; } = string.Empty;
-
-    private const string ClineRescueIntro =
-        "This will write an external Cline compaction (.compaction.json) seeded from VIBE_STATE + the recent Cline history. Cline will read it on its next turn and resume compacted. Review the preview:";
-
-    private const string ConfiguredRescueIntro =
-        "This rebuilds the stuck chat in the Client app's own files: the older part of the chat becomes the summary below, the most recent messages are kept, and the original file is backed up first. If the Client app has the chat open, it is stopped first and reopened on the same chat. Review the preview:";
-
-    /// <summary>The configured rescue being prepared or confirmed; null for the built-in Cline one.</summary>
-    private global::FluxMux.Avalonia.Services.HailMary.ConfiguredRescueStrategy? _pendingConfiguredRescue;
-
-    /// <summary>
-    /// True when "Ask the Client app to compact (/smol)" is offered: Cline, or Other, which is
-    /// what a Cline fork with the same /smol command and send button would be set to. Never for
-    /// Harness, which has neither.
-    /// </summary>
-    public bool HailMarySmolAvailable =>
-        !string.Equals(HailMaryClientApp, "DeepSeek Harness", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>
-    /// True when the chosen Hail Mary option can run for the current Client app (/smol, or its
-    /// "can't continue" rescue). False when that Client app has neither.
-    /// </summary>
-    public bool HailMaryUsesClientStrategy =>
-        (HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.WaitForCline && HailMarySmolAvailable)
-        || (HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue && HailMaryRescueAvailable);
-
-    /// <summary>True when the current Client app has neither /smol nor a rescue: the picker then points to the hand over brief.</summary>
-    public bool HailMaryHasNoOption => !HailMarySmolAvailable && !HailMaryRescueAvailable;
-
-    /// <summary>
-    /// True when a rescue compaction has been prepared and is awaiting user confirmation. While
-    /// true, the picker shows the summary preview + Confirm/Cancel instead of the strategy radios.
-    /// </summary>
-    [ObservableProperty]
-    public partial bool HailMaryRescuePending { get; set; }
-
-    /// <summary>The prepared rescue summary, shown in the confirmation preview. Null when not pending.</summary>
-    [ObservableProperty]
-    public partial string HailMaryRescuePreview { get; set; } = string.Empty;
-
-    /// <summary>The prepared rescue result (carries the summary + session), held until commit or cancel.</summary>
-    private global::FluxMux.Avalonia.Services.HailMary.CompactionResult? _pendingRescue;
-
-    /// <summary>
-    /// The Hail Mary rescue "make headroom" preference (default Balanced). Controls how much free
-    /// context the external compaction leaves. Not persisted — resets each time the picker opens.
-    /// </summary>
-    [ObservableProperty]
-    public partial global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroom HailMaryHeadroom { get; set; }
-        = global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroomPolicy.Default;
-
-    /// <summary>The headroom estimate text shown in the rescue confirmation preview.</summary>
-    [ObservableProperty]
-    public partial string HailMaryRescueHeadroom { get; set; } = string.Empty;
-
-    /// <summary>
-    /// A non-fatal warning shown in the rescue confirmation preview (e.g. "you already have the
-    /// requested free headroom, so compaction may be counterproductive"). Empty when there is none.
-    /// </summary>
-    [ObservableProperty]
-    public partial string HailMaryRescueWarning { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Dispatches the selected Cline compaction strategy. WaitForCline runs to completion
-    /// (fire-and-forget, like the old /smol path). ExternalRescue PREPARES a summary and shows a
-    /// confirmation; the user then calls ConfirmHailMaryRescue to actually write the file.
-    /// </summary>
-    private async void RunClineCompactionStrategy()
-    {
-        var strategy = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Resolve(HailMarySelectedStrategy);
-        _pendingConfiguredRescue = null;
-        var rescueAdapter = CurrentRescueAdapter();
-        if (HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue
-            && rescueAdapter is { IsBuiltInCline: false })
-        {
-            _pendingConfiguredRescue = new global::FluxMux.Avalonia.Services.HailMary.ConfiguredRescueStrategy(rescueAdapter, new HailMaryRescueHost(this));
-            strategy = _pendingConfiguredRescue;
-        }
-
-        // Read the live context fill so the rescue path can bound the summary to the chosen headroom.
-        var (promptTokens, contextLimit, _) = _runtimeService.ReadLocalContextUsage();
-
-        var ctx = new global::FluxMux.Avalonia.Services.HailMary.CompactionContext
-        {
-            VibeStatePath = _runtimeService.VibeStatePath,
-            // The essence.json lives next to VIBE_STATE.md (same session-artifact directory). It
-            // carries the "wider mission" context (goal evolution, decisions, dead ends) that the
-            // VIBE_STATE current block and the (possibly compacted) .messages.json do not. The
-            // fidelity source prefers it when present so the compaction reflects the whole mission,
-            // not just the most recent side quest.
-            EssencePath = System.IO.Path.Combine(
-                System.IO.Path.GetDirectoryName(_runtimeService.VibeStatePath) ?? string.Empty,
-                "essence.json"),
-            Log = line => _runtimeService.Supervisor?.LogLaunchMonitor(line),
-            TargetFreeFraction = global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroomPolicy.TargetFreeFraction(HailMaryHeadroom),
-            PromptTokens = promptTokens,
-            ContextLimit = contextLimit,
-        };
-
-        HailMaryBannerVisible = false;
-        HailMaryQueued = true;
-
-        if (strategy is global::FluxMux.Avalonia.Services.HailMary.ExternalRescueStrategy or global::FluxMux.Avalonia.Services.HailMary.ConfiguredRescueStrategy)
-        {
-            // Rescue path: prepare first, then ask for confirmation before writing anything.
-            var isCline = strategy is global::FluxMux.Avalonia.Services.HailMary.ExternalRescueStrategy;
-            SetHailMaryOutcome("Preparing external compaction…");
-            StatusMessage = isCline
-                ? "Hail Mary: preparing an external Cline compaction (from VIBE_STATE + Cline history). Review the preview, then confirm."
-                : "Hail Mary: preparing to rebuild this chat from AI-FluxMux's session note. Review the preview, then confirm.";
-            var prepared = await strategy.ExecuteAsync(ctx);
-            if (!prepared.Success || string.IsNullOrWhiteSpace(prepared.SummaryPreview))
-            {
-                global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                {
-                    SetHailMaryOutcome("External compaction failed");
-                    StatusMessage = prepared.Message;
-                    HailMaryQueued = false;
-                    ResetHailMaryPicker();
-                });
-                return;
-            }
-
-            // ExecuteAsync uses ConfigureAwait(false), so we are now on a background thread.
-            // All UI-observable state must be marshaled to the UI thread, otherwise the binding
-            // for HailMaryRescuePending may not update (or a concurrent gauge tick's
-            // OnHailMaryButtonVisibleChanged can read a stale value and reset the picker,
-            // causing the "click write → dialog reopens" loop).
-            //
-            // CRITICAL: Set _pendingRescue synchronously BEFORE the Dispatcher.UIThread.Post
-            // callback, so that when the user clicks "Confirm write", the _pendingRescue is
-            // already set. If we set it inside the callback, the callback might not have
-            // executed yet when the user clicks, causing ConfirmHailMaryRescue to see
-            // _pendingRescue as null and reset the picker.
-            _pendingRescue = prepared;
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                HailMaryRescueIntro = isCline ? ClineRescueIntro : ConfiguredRescueIntro;
-                HailMaryRescuePreview = prepared.SummaryPreview;
-                HailMaryRescueHeadroom = prepared.Message;
-
-                // Surface a non-fatal warning (e.g. "you already have the requested headroom") in a
-                // distinct style so the user sees it before confirming.
-                HailMaryRescueWarning = prepared.Warning ?? string.Empty;
-                HailMaryRescuePending = true;
-                _runtimeService.Supervisor?.LogLaunchMonitor(
-                    "[HailMary] rescue prepared -> HailMaryRescuePending=true (queued=" + HailMaryQueued + ")");
-                SetHailMaryOutcome("Review & confirm");
-                StatusMessage = !isCline
-                    ? "Hail Mary: review the preview, then confirm. " + prepared.Message
-                    : string.IsNullOrWhiteSpace(prepared.Warning)
-                        ? "Hail Mary: review the external compaction preview, then confirm to write it. After confirming, close & reopen the chat (or restart Cline) to apply it."
-                        : "Hail Mary: review the preview — note the warning above — then confirm to write it. After confirming, close & reopen the chat (or restart Cline) to apply it.";
-            });
-            return;
-        }
-
-        // Wait-for-cline path (default): run to completion, as before.
-        // BUT: if the context is already over 80% full, /smol is useless — Cline can't process
-        // the command because its own context is too full. Skip straight to ExternalRescue.
-        //
-        // IMPORTANT: This override only applies when the user has NOT explicitly chosen a strategy
-        // (i.e., when using the default). If the user explicitly chose WaitForCline, respect that
-        // choice even if the context is >80% full. The user may have a reason for choosing it
-        // (e.g., they know Cline is about to become idle, or they want to test the /smol path).
-        var contextFillFraction = contextLimit > 0 ? (double)promptTokens / contextLimit : 0.0;
-        var userExplicitlyChoseWaitForCline = HailMarySelectedStrategy == global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.WaitForCline;
-        // Only Cline has the compaction file this fallback writes; a fork keeps /smol.
-        if (contextFillFraction > 0.80 && !userExplicitlyChoseWaitForCline && CurrentRescueAdapter()?.IsBuiltInCline == true)
-        {
-            SetHailMaryOutcome("Context too full for /smol — writing external compaction…");
-            StatusMessage = "Context is already " + (contextFillFraction * 100).ToString("0") + "% full. Cline can't process /smol at this fill level. Writing an external compaction file instead — close & reopen the chat (or restart Cline) after confirming to apply it.";
-            var directRescue = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Resolve(
-                global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue);
-            var directPrepared = await directRescue.ExecuteAsync(ctx);
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                if (!directPrepared.Success || string.IsNullOrWhiteSpace(directPrepared.SummaryPreview))
-                {
-                    SetHailMaryOutcome("Compaction failed — type /smol manually");
-                    StatusMessage = "External compaction failed. Please type /smol manually in Cline's chat input, or start a new chat.";
-                    HailMaryQueued = false;
-                    ResetHailMaryPicker();
-                    return;
-                }
-
-                _pendingRescue = directPrepared;
-                HailMaryRescueIntro = ClineRescueIntro;
-                HailMaryRescuePreview = directPrepared.SummaryPreview;
-                HailMaryRescueHeadroom = directPrepared.Message;
-                HailMaryRescueWarning = directPrepared.Warning ?? string.Empty;
-                HailMaryRescuePending = true;
-                SetHailMaryOutcome("Review & confirm");
-                StatusMessage = "Hail Mary: context too full for /smol. Review the external compaction preview, then confirm to write it. After confirming, close & reopen the chat (or restart Cline) to apply it.";
-            });
-            return;
-        }
-
-        SetHailMaryOutcome("Waiting for the Client app to be idle…");
-        StatusMessage = "Hail Mary: waiting for the Client app to finish its current turn, then it will send /smol automatically (up to 90s). Focus will shift to VS Code briefly.";
-        var result = await strategy.ExecuteAsync(ctx);
-        if (result.Success)
-        {
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                SetHailMaryOutcome("/smol sent — compacting");
-                StatusMessage = "The Client app's /smol command was triggered, so it should now be compacting the chat. If nothing happens, type /smol in its chat input.";
-                HailMaryQueued = false;
-                ResetHailMaryPicker();
-            });
-            return;
-        }
-
-        // Cline never became idle (stuck mid-turn after a context-overflow 400).
-        //
-        // IMPORTANT: Do NOT automatically fall back to ExternalRescue. The user explicitly chose
-        // WaitForCline, so respect that choice. If it failed, show an error and let the user decide
-        // what to do next (e.g., try ExternalRescue manually, type /smol manually, or start a new
-        // chat). Automatically falling back to ExternalRescue would override the user's choice and
-        // could lead to double-compaction or compacting the wrong chat.
-        global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-        {
-            SetHailMaryOutcome("Client app not idle — /smol failed");
-            StatusMessage = "The Client app didn't become idle in time (likely stuck after the failed turn). The /smol command was not sent. You can try the \"can't continue\" option, type /smol in its chat input, or start a new chat.";
-            HailMaryQueued = false;
-            ResetHailMaryPicker();
-        });
-    }
-
-    /// <summary>
-    /// Confirms a prepared external-rescue compaction: writes the .compaction.json and reports the
-    /// outcome. Called from the picker's "Confirm write" button.
-    /// </summary>
-    [RelayCommand]
-    private async Task ConfirmHailMaryRescue()
-    {
-        _runtimeService.Supervisor?.LogLaunchMonitor(
-            "[HailMary] ConfirmHailMaryRescue invoked (hasPending=" + _pendingRescue.HasValue +
-            ", success=" + (_pendingRescue.HasValue ? _pendingRescue.Value.Success.ToString() : "n/a") + ")");
-        try
-        {
-            if (!_pendingRescue.HasValue || !_pendingRescue.Value.Success)
-            {
-                HailMaryRescuePending = false;
-                HailMaryQueued = false;
-                ResetHailMaryPicker();
-                return;
-            }
-
-            if (_pendingConfiguredRescue is { } configured)
-            {
-                SetHailMaryOutcome("Rebuilding the chat…");
-                var rebuilt = await configured.CommitAsync(
-                    new global::FluxMux.Avalonia.Services.HailMary.CompactionContext { Log = line => _runtimeService.Supervisor?.LogLaunchMonitor(line) },
-                    _pendingRescue.Value);
-                global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                {
-                    HailMaryRescuePending = false;
-                    SetHailMaryOutcome(rebuilt.Success ? "Chat rebuilt — carry on" : "Rebuild failed");
-                    StatusMessage = rebuilt.Message;
-                    HailMaryQueued = false;
-                    _pendingConfiguredRescue = null;
-                    ResetHailMaryPicker();
-                });
-                return;
-            }
-
-            var strategy = global::FluxMux.Avalonia.Services.HailMary.CompactionStrategyResolver.Resolve(
-                global::FluxMux.Avalonia.Services.HailMary.HailMaryStrategy.ExternalRescue);
-            // Resolve the Cline session id so CommitAsync can write the .compaction.json to the
-            // correct session directory. ExecuteAsync resolved it during prepare, but the
-            // CompactionResult does not carry it forward, so re-resolve here. Without this,
-            // CommitAsync fails immediately with "No Cline session id available" and the flow
-            // loops back to the strategy view.
-            var sessionId = global::FluxMux.Avalonia.Services.ClineCompactionWriter.GetMostRecentSessionId();
-            var ctx = new global::FluxMux.Avalonia.Services.HailMary.CompactionContext
-            {
-                VibeStatePath = _runtimeService.VibeStatePath,
-                ClineSessionId = sessionId,
-                Log = line => _runtimeService.Supervisor?.LogLaunchMonitor(line),
-            };
-
-            SetHailMaryOutcome("Writing compaction…");
-            var committed = await strategy.CommitAsync(ctx, _pendingRescue.Value);
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                HailMaryRescuePending = false;
-                if (committed.Success)
-                {
-                    SetHailMaryOutcome("Compaction written — reload to apply");
-                    StatusMessage = "External Cline compaction written. To apply it, close and reopen this Cline chat (or restart Cline) so the session reloads with the compacted context.";
-                }
-                else
-                {
-                    SetHailMaryOutcome("Compaction failed — type /smol manually");
-                    StatusMessage = committed.Message;
-                }
-                HailMaryQueued = false;
-                ResetHailMaryPicker();
-            });
-        }
-        catch (Exception ex)
-        {
-            global::Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                SetHailMaryOutcome("Compaction error");
-                StatusMessage = "Error writing compaction: " + ex.Message;
-                HailMaryRescuePending = false;
-                HailMaryQueued = false;
-                ResetHailMaryPicker();
-            });
-        }
-    }
-
-    /// <summary>
-    /// Cancels a prepared external-rescue compaction without writing anything.
-    /// </summary>
-    [RelayCommand]
-    private void CancelHailMaryRescue()
-    {
-        _pendingConfiguredRescue = null;
-        HailMaryRescuePending = false;
-        HailMaryRescuePreview = string.Empty;
-        SetHailMaryOutcome("Cancelled");
-        StatusMessage = "Hail Mary rescue cancelled. Nothing was written.";
-        HailMaryQueued = false;
-        ResetHailMaryPicker();
-    }
-
-    /// <summary>
-    /// Resets the one-off Hail Mary picker to its defaults. Called
-    /// when the button/banner becomes visible so each emergency choice starts fresh.
-    /// </summary>
-    private void ResetHailMaryPicker()
-    {
-        // Diagnostic: log every reset so we can see what is clearing the confirmation preview
-        // (HailMaryRescuePending) and causing the "Hail Mary Context Trim" popup to loop back to
-        // the strategy view. The stack trace identifies the caller.
-        _runtimeService.Supervisor?.LogLaunchMonitor(
-            "[HailMary] ResetHailMaryPicker (wasPending=" + HailMaryRescuePending +
-            ", queued=" + HailMaryQueued + ") caller=" +
-            System.Environment.StackTrace.Split('\n').SkipWhile(l => !l.Contains("MainViewModel")).FirstOrDefault()?.Trim());
-        HailMarySelectedStrategy = DefaultHailMaryStrategy;
-        HailMaryHeadroom = global::FluxMux.Avalonia.Services.HailMary.HailMaryHeadroomPolicy.Default;
-        HailMaryRescuePending = false;
-        HailMaryRescuePreview = string.Empty;
-        HailMaryRescueHeadroom = string.Empty;
-        HailMaryRescueWarning = string.Empty;
-    }
 
     /// <summary>
     /// Shows a one-shot result message next to the Hail Mary button and auto-clears it after a few
@@ -16586,20 +16696,11 @@ public partial class MainViewModel : ViewModelBase
 
         HailMaryBannerText = text;
         HailMaryBannerTooltip = "AI-FluxMux already shortened the chat it forwards, and this turn still does not fit.\n\n"
-            + "Create hand over brief for fresh chat copies a brief of this chat (the opening request and latest turns word for word, the rest summarised) to paste as the first message of a new chat.\n\n"
-            + "Hail Mary rebuilds this chat in the Client app's own files, where AI-FluxMux knows how (Cline, Harness), so it continues in place.\n\n"
+            + "Chat handover brief copies a brief of this chat (the opening request and latest turns word for word, the rest summarised) to paste as the first message of a new chat.\n\n"
+            + "Hail Mary rebuilds this chat in the Client app's own files, where AI-FluxMux knows how (Cline, Harness): the older part becomes a summary, the newest messages stay word for word, and about 40 % of the Context is left free. Then type retry.\n\n"
             + "A model profile with more Context, or a cloud model, keeps the whole chat instead.";
         HailMaryBannerUrgency = 0; // red — this is a failure state
         HailMaryBannerVisible = true;
-        // Do NOT reset the picker or clear the queued flag while a rescue is awaiting confirmation
-        // (HailMaryRescuePending) or a compaction is in flight (HailMaryQueued). Resetting here would
-        // wipe the confirmation preview the user is about to confirm, causing the "banner → picker →
-        // banner" loop with no exit. A fresh offer only starts a new one-off choice when idle.
-        if (!HailMaryRescuePending && !HailMaryQueued)
-        {
-            ResetHailMaryPicker(); // one-off: each emergency choice starts fresh
-            HailMaryQueued = false; // the queued attempt is over; show the result instead
-        }
         SetHailMaryOutcome("Hail Mary offered");
         AppendDiagnosticEntry("HAIL-MARY", text, "AI-FluxMux");
     }

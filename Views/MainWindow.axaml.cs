@@ -44,6 +44,8 @@ public partial class MainWindow : Window
     private double _stressBarPulsePhase;
     private DispatcherTimer? _hailMaryPulseTimer;
     private double _hailMaryPulsePhase;
+    private DispatcherTimer? _briefPulseTimer;
+    private double _briefPulsePhase;
     private DispatcherTimer? _generationTextPulseTimer;
     private double _generationTextPulsePhase;
 
@@ -181,6 +183,8 @@ public partial class MainWindow : Window
         ApplyScale(vm.UiScaleFactor);
         vm.PropertyChanged += OnVmPropertyChanged;
         vm.ProfileExpanderRevealRequested += OnProfileExpanderRevealRequested;
+        // A brief kept from before a restart and never copied pulses from the start.
+        UpdateBriefPulse(vm.HandoverBriefUnused);
 
         PositionChanged += (_, _) => SaveGeometry(vm);
         SizeChanged   += (_, _) => SaveGeometry(vm);
@@ -296,6 +300,47 @@ public partial class MainWindow : Window
         _hailMaryPulseTimer.Start();
     }
 
+    /// <summary>
+    /// The Chat handover brief button pulses green while a kept brief has not been copied, so a
+    /// brief prepared in a hurry (or before a restart) is not forgotten. Its usual dark fill comes
+    /// back once the brief is copied.
+    /// </summary>
+    private void UpdateBriefPulse(bool unused)
+    {
+        if (!unused)
+        {
+            _briefPulseTimer?.Stop();
+            _briefPulseTimer = null;
+            if (HandoverBriefButton is not null)
+            {
+                HandoverBriefButton.Background = new SolidColorBrush(Color.Parse("#1A1A1A"));
+            }
+
+            return;
+        }
+
+        if (_briefPulseTimer is not null)
+        {
+            return;
+        }
+
+        _briefPulseTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
+        _briefPulseTimer.Tick += (_, _) =>
+        {
+            _briefPulsePhase = (_briefPulsePhase + 0.08) % (Math.PI * 2.0);
+            if (HandoverBriefButton is null)
+            {
+                return;
+            }
+
+            // Between the button's dark fill (#1A1A1A) and green (#16A34A).
+            var t = 0.5 + 0.5 * Math.Sin(_briefPulsePhase);
+            byte Mix(byte from, byte to) => (byte)(from + (to - from) * t);
+            HandoverBriefButton.Background = new SolidColorBrush(Color.FromRgb(Mix(0x1A, 0x16), Mix(0x1A, 0xA3), Mix(0x1A, 0x4A)));
+        };
+        _briefPulseTimer.Start();
+    }
+
     private void StopHailMaryPulse()
     {
         _hailMaryPulseTimer?.Stop();
@@ -320,96 +365,11 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>
-    /// The banner's "Hail Mary…" button opens the picker, where the rescue is chosen and its
-    /// confirmation preview lives. Before the trim was retired (26 Nov) the banner ran the trim
-    /// directly; the rescues need the popup, or there is no way to reach "Confirm write".
-    /// </summary>
-    private void HailMaryBannerOpen_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        (DataContext as MainViewModel)?.RefreshClientShorteningState();
-        if (HailMaryPickerPopup is not null)
-        {
-            HailMaryPickerPopup.IsOpen = true;
-        }
-    }
-
-    /// <summary>
-    /// Toggles the Hail Mary picker popup on the Diagnostics bar. Clicking the button opens
-    /// the picker (if closed) or closes it (if open). The picker's radio buttons / checkbox
-    /// update the ViewModel bindings; nothing runs until "Start".
-    /// </summary>
-    private void HailMaryButton_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        // The running profile decides whether the Cline rescue options apply; refresh before showing.
-        (DataContext as MainViewModel)?.RefreshClientShorteningState();
-        if (HailMaryPickerPopup is not null)
-        {
-            HailMaryPickerPopup.IsOpen = !HailMaryPickerPopup.IsOpen;
-        }
-    }
-
     private void GitCheckpointButton_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is MainViewModel vm)
         {
             _ = vm.RunGitCheckpointCommand.ExecuteAsync(null);
-        }
-    }
-
-    /// <summary>
-    /// After "Start": the rescue shows its confirmation preview inside the popup, so the popup
-    /// stays open whenever an option ran; it closes only when there was nothing to run.
-    /// </summary>
-    private void HailMaryPickerArm_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (HailMaryPickerPopup is null)
-        {
-            return;
-        }
-
-        var vm = DataContext as MainViewModel;
-
-        if (vm is not null && vm.HailMaryUsesClientStrategy)
-        {
-            return;
-        }
-
-        HailMaryPickerPopup.IsOpen = false;
-    }
-
-    /// <summary>
-    /// Closes the Hail Mary picker popup after the user confirms the external-rescue compaction.
-    /// The ConfirmHailMaryRescueCommand is async (writes the .compaction.json), so we close the
-    /// popup immediately — the outcome is shown in the HailMaryOutcome tooltip.
-    /// </summary>
-    private void HailMaryPickerConfirm_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (HailMaryPickerPopup is not null)
-        {
-            HailMaryPickerPopup.IsOpen = false;
-        }
-    }
-
-    /// <summary>
-    /// Closes the Hail Mary picker popup when the user cancels the external-rescue confirmation.
-    /// </summary>
-    private void HailMaryPickerCancelRescue_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (HailMaryPickerPopup is not null)
-        {
-            HailMaryPickerPopup.IsOpen = false;
-        }
-    }
-
-    /// <summary>
-    /// Closes the Hail Mary picker popup without running anything.
-    /// </summary>
-    private void HailMaryPickerCancel_Click(object? sender, global::Avalonia.Interactivity.RoutedEventArgs e)
-    {
-        if (HailMaryPickerPopup is not null)
-        {
-            HailMaryPickerPopup.IsOpen = false;
         }
     }
 
@@ -933,6 +893,11 @@ public partial class MainWindow : Window
         if (e.PropertyName == nameof(MainViewModel.SelectedMainTabIndex) && IsHelpTabSelected())
         {
             ReloadHelpFromFile(force: false);
+        }
+
+        if (e.PropertyName == nameof(MainViewModel.HandoverBriefUnused) && sender is MainViewModel briefVm)
+        {
+            UpdateBriefPulse(briefVm.HandoverBriefUnused);
         }
 
         if (e.PropertyName == nameof(MainViewModel.HailMaryQueued) && sender is MainViewModel hailVm)
