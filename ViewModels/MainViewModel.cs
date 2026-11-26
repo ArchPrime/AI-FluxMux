@@ -8817,7 +8817,10 @@ public partial class MainViewModel : ViewModelBase
     [
         new LocalAutoCompactModeOption { Value = "port-rules", Display = "AI-FluxMux, Port rules settings" },
         new LocalAutoCompactModeOption { Value = "per-profile", Display = "AI-FluxMux, this profile's settings" },
-        new LocalAutoCompactModeOption { Value = "none", Display = "The Client app (e.g. Cline Auto compact)" }
+        // Kept as a choice for a Client app AI-FluxMux cannot usefully shorten for, but not the default
+        // and labelled as the exception: in the 27 Nov comparison it was the slowest setting and left
+        // the least room whenever the Client app's own shortening was off (AGENTS.md).
+        new LocalAutoCompactModeOption { Value = "none", Display = "The Client app (special cases only, see note)" }
     ];
 
     [ObservableProperty]
