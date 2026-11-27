@@ -639,7 +639,7 @@
                                                                                         <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
                                                                                     </Grid.ColumnDefinitions>
                                                                                     <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="SWA full" />
-                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantSwaFull}" ToolTip.Tip="Keeps extra chat memory on some models. Try On if long chats forget what you just said." />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantSwaFull}" ToolTip.Tip="Keeps extra chat memory on some models. Try On if long chats forget what you just said. On a model that uses a sliding window on most layers (such as Inkling) it keeps the whole Context on every layer, which takes far more graphics memory at long Context; off, the window layers stay small." />
                                                                                 </Grid>
                                                                                 <Grid ColumnSpacing="8" Margin="0,0,16,6">
                                                                                     <Grid.ColumnDefinitions>

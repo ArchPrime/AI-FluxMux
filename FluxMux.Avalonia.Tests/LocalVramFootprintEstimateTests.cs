@@ -27,6 +27,15 @@ public sealed class LocalVramFootprintEstimateTests
     }
 
     [Fact]
+    public void A_longer_trained_window_is_offered_in_full()
+    {
+        // Inkling 2 Mini: 1M native, no YaRN (28 Nov). It was capped at 262,144.
+        Assert.Equal(1048576, LocalVramFootprintEstimate.AdviseModelMaxContext(1048576));
+        Assert.Equal(32768, LocalVramFootprintEstimate.AdviseModelMaxContext(32768));
+        Assert.Equal(524288, LocalVramFootprintEstimate.AdviseModelMaxContext(1048576, maxContextWindow: 524288));
+    }
+
+    [Fact]
     public void Saturated_editor_max_uses_leftover_vram_not_a_percent_of_262k()
     {
         var on32 = LocalVramFootprintEstimate.SoftenSaturatedContext(

@@ -163,7 +163,8 @@ public static class LocalPrioritySettingsCalculator
         var ctx = KeepHandTunedContext(
             wizardContext,
             currentContext,
-            imagesOn ? advice.ContextPriorityFirst : 0);
+            imagesOn ? advice.ContextPriorityFirst : 0,
+            Math.Max(advice.ModelMaxCtx, extendedCeiling));
 
         var gpuMode = context == 0
             ? advice.OffloadModeAtMaxContext

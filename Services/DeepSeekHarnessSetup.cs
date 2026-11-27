@@ -30,7 +30,8 @@ public readonly record struct DeepSeekHarnessSetupOptions(
         int maxContextWindow = 0)
     {
         var port = Math.Clamp(fluxMuxPort, 1, 65535);
-        var cap = maxContextWindow > 0 ? maxContextWindow : DeepSeekHarnessSetup.MaxLocalContextWindow;
+        // No 262,144 ceiling (28 Nov): a 1M-native model's Context is passed on as set.
+        var cap = maxContextWindow > 0 ? maxContextWindow : int.MaxValue;
         var context = Math.Clamp(contextWindow, 1024, cap);
         var max = Math.Clamp(maxTokens, 256, 131072);
         var name = string.IsNullOrWhiteSpace(modelDisplayName) ? "local" : modelDisplayName.Trim();

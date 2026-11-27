@@ -36,20 +36,28 @@ public static class LocalVramFootprintEstimate
 
     public const double TextWorkingLeftoverGiB = 12.0;
 
+    /// <summary>
+    /// The Context a model can be offered: its own trained window from the GGUF (28 Nov: this was
+    /// capped at 262,144, so a 1M-native model such as Inkling 2 Mini was never offered more),
+    /// limited only by <paramref name="maxContextWindow"/> when given. Unknown models get the
+    /// long-context floor.
+    /// </summary>
     public static int AdviseModelMaxContext(int reportedCtx, int maxContextWindow = 0)
     {
-        var cap = maxContextWindow > 0 ? maxContextWindow : DeepSeekHarnessSetup.MaxLocalContextWindow;
         if (reportedCtx <= 0)
         {
             return LongContextMetadataFloor;
         }
 
+        var cap = maxContextWindow > 0 ? maxContextWindow : int.MaxValue;
         if (reportedCtx < LongContextMetadataFloor)
         {
             return Math.Clamp(reportedCtx, 4096, cap);
         }
 
-        return cap;
+        // A long trained window is not a hard ceiling, so such models are offered at least the
+        // editor's 262,144, as before; a longer window is offered in full.
+        return Math.Min(Math.Max(reportedCtx, DeepSeekHarnessSetup.MaxLocalContextWindow), cap);
     }
 
     public static int SnapContextTokens(double tokens, int maxContextWindow = 0)
@@ -61,7 +69,9 @@ public static class LocalVramFootprintEstimate
 
     public static int SoftenSaturatedContext(int contextTokens, int modelMaxCtx, double leftoverGpuGiB)
     {
-        if (modelMaxCtx < DeepSeekHarnessSetup.MaxLocalContextWindow
+        // Written for 256K-window models whose estimate saturated at the window; a longer-window
+        // model is sized by its own estimate (28 Nov).
+        if (modelMaxCtx != DeepSeekHarnessSetup.MaxLocalContextWindow
             || contextTokens < DeepSeekHarnessSetup.MaxLocalContextWindow)
         {
             return contextTokens;
@@ -85,7 +95,7 @@ public static class LocalVramFootprintEstimate
         return projector + VisionActivationGiBAtReferenceEdge * scale;
     }
 
-    public static int ApplyVisionContextHaircut(int textContextTokens, double leftoverGpuGiB, double visionReserveGiB)
+    public static int ApplyVisionContextHaircut(int textContextTokens, double leftoverGpuGiB, double visionReserveGiB, int maxContextWindow = 0)
     {
         if (textContextTokens <= 4096 || visionReserveGiB <= 0)
         {
@@ -98,7 +108,7 @@ public static class LocalVramFootprintEstimate
         return (int)Math.Clamp(
             Math.Round(raw / 1024.0, MidpointRounding.AwayFromZero) * 1024.0,
             4096.0,
-            DeepSeekHarnessSetup.MaxLocalContextWindow);
+            maxContextWindow > 0 ? maxContextWindow : DeepSeekHarnessSetup.MaxLocalContextWindow);
     }
 
     public static string FormatImagesHeadroomNote(

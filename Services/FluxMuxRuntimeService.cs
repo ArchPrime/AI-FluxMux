@@ -158,6 +158,20 @@ public sealed class FluxMuxRuntimeService
 
 		public int SlidingWindow { get; init; }
 
+		/// <summary>Per-layer "uses the sliding window" flags (attention.sliding_window_pattern), when the GGUF has them.</summary>
+		public bool[] SlidingWindowLayers { get; init; } = Array.Empty<bool>();
+
+		public int KeyLength { get; init; }
+
+		public int ValueLength { get; init; }
+
+		/// <summary>Looped layers (loop.count / loop.start / loop.end), as in Inkling 2: layers start..end-1 run count times.</summary>
+		public int LoopCount { get; init; }
+
+		public int LoopStart { get; init; }
+
+		public int LoopEnd { get; init; }
+
 		public long FileLength { get; init; }
 
 		public DateTime LastWriteUtc { get; init; }
@@ -7670,9 +7684,7 @@ public sealed class FluxMuxRuntimeService
 		// The model's TRUE native trained window (from the GGUF), used for YaRN extension
 		// comparisons. AdviseModelMaxContext caps at the editor max, which would make
 		// "extension" impossible when the native window already equals the editor max.
-		int nativeTrainedCtx = reportedCtx > 0
-			? Math.Min(reportedCtx, DeepSeekHarnessSetup.MaxLocalContextWindow)
-			: modelMaxCtx;
+		int nativeTrainedCtx = reportedCtx > 0 ? reportedCtx : modelMaxCtx;
 		double gbPer8k = EstimateKvGigabytesPer8k(ggufModelShape, fileGb, hybridKv);
 		double overheadBaseGb = (nvidia ? Math.Max(0.7, 0.45 + gpuGb * 0.035 + Math.Max(0.0, fileGb) * 0.02) : 0.6);
 		double projectorGb = (visionEnabled ? ResolveVisionProjectorGigabytes(visionProjectorPath, modelPath) : 0.0);
@@ -7697,12 +7709,13 @@ public sealed class FluxMuxRuntimeService
 			contextPriorityFirst = LocalVramFootprintEstimate.ApplyVisionContextHaircut(
 				contextPriorityFirst,
 				leftoverGb,
-				visionReserveGb);
+				visionReserveGb,
+				modelMaxCtx);
 		}
 		int contextQuarterCap = Math.Min(modelMaxCtx, Math.Max(16384, modelMaxCtx / 4));
-		int contextSafeDefault = ((nvidia && weightFitContext >= contextQuarterCap) ? SnapContextTokens(Math.Min(contextPriorityFirst, weightFitContext)) : SnapContextTokens(Math.Min(contextPriorityFirst, (double)contextPriorityFirst * 0.86)));
-		int contextPrioritySecond = SnapContextTokens(Math.Min(contextPriorityFirst, Math.Max(contextSafeDefault, (double)contextPriorityFirst * 0.72)));
-		int contextPriorityLower = SnapContextTokens(Math.Min(contextSafeDefault, Math.Max(8192.0, (double)contextSafeDefault * 0.42)));
+		int contextSafeDefault = ((nvidia && weightFitContext >= contextQuarterCap) ? SnapCtx(Math.Min(contextPriorityFirst, weightFitContext)) : SnapCtx(Math.Min(contextPriorityFirst, (double)contextPriorityFirst * 0.86)));
+		int contextPrioritySecond = SnapCtx(Math.Min(contextPriorityFirst, Math.Max(contextSafeDefault, (double)contextPriorityFirst * 0.72)));
+		int contextPriorityLower = SnapCtx(Math.Min(contextSafeDefault, Math.Max(8192.0, (double)contextSafeDefault * 0.42)));
 		if (contextPrioritySecond > contextPriorityFirst)
 		{
 			contextPrioritySecond = contextPriorityFirst;
@@ -7751,7 +7764,11 @@ public sealed class FluxMuxRuntimeService
 			FlashAttention = (nvidia && nvidiaGpuInventory.Any(row => row.Backend.Equals("CUDA", StringComparison.OrdinalIgnoreCase)) ? "Enabled" : "Auto"),
 			PreferFitEnabled = (preferFit || offloadMode.Equals("GPU + CPU", StringComparison.OrdinalIgnoreCase)),
 			SpecType = ((isQwen38 || LooksLikeMultiTokenPrediction(modelPath)) ? "draft-mtp" : "ngram-simple"),
-			EnableSwaFull = hybridKv,
+			// Not for a model with a per-layer sliding-window pattern (28 Nov): SWA full keeps the
+			// whole Context on every windowed layer too (Inkling 2 Mini: 20 of 24 layers), which put
+			// its 1M window out of reach; llama.cpp reuses such a cache through the context
+			// checkpoints AI-FluxMux already sets.
+			EnableSwaFull = hybridKv && (ggufModelShape == null || FullAttentionLayerPasses(ggufModelShape) == 0),
 			MaxTokens = maxTokens.ToString(CultureInfo.InvariantCulture),
 			CacheRam = cacheRam
 		};
@@ -7763,18 +7780,22 @@ public sealed class FluxMuxRuntimeService
 		{
 			return mode.Equals("GPU only", StringComparison.OrdinalIgnoreCase) ? "999" : (mode.Equals("CPU only", StringComparison.OrdinalIgnoreCase) ? "0" : "Auto");
 		}
+		int SnapCtx(double tokens)
+		{
+			return LocalVramFootprintEstimate.SnapContextTokens(tokens, modelMaxCtx);
+		}
 		int MaxContextForWeights(double weightsOnGpuGb)
 		{
 			if (!nvidia || gbPer8k <= 0.0)
 			{
-				return SnapContextTokens(Math.Min(modelMaxCtx, 8192));
+				return SnapCtx(Math.Min(modelMaxCtx, 8192));
 			}
 			double offloadBudgetGb = gpuGb - weightsOnGpuGb - overheadGb;
 			if (offloadBudgetGb < 0.15)
 			{
 				return 4096;
 			}
-			return SnapContextTokens(Math.Min(modelMaxCtx, 8192.0 * (offloadBudgetGb / gbPer8k) * 0.92));
+			return SnapCtx(Math.Min(modelMaxCtx, 8192.0 * (offloadBudgetGb / gbPer8k) * 0.92));
 		}
 		string OffloadAt(int tokens)
 		{
@@ -7802,9 +7823,50 @@ public sealed class FluxMuxRuntimeService
 		return architecture.Contains("delta", StringComparison.OrdinalIgnoreCase) || architecture.Contains("linear", StringComparison.OrdinalIgnoreCase) || architecture.Contains("gated", StringComparison.OrdinalIgnoreCase) || (shape.SlidingWindow > 0 && shape.ContextLength > 0 && shape.SlidingWindow < shape.ContextLength);
 	}
 
+	/// <summary>
+	/// Layers whose KV cache grows with the Context in a model that declares a per-layer sliding-window
+	/// pattern: the layers not on the window, each looped layer counted once per pass (whether
+	/// llama.cpp keeps separate KV per pass is not known, so the larger figure is used). 0 when
+	/// the model has no such pattern. Inkling 2 Mini: 4 of 24 layers are full attention, 2 of them
+	/// inside the 3-pass loop, so 8. Sliding-window layers hold a fixed window (1,024 tokens there)
+	/// unless SWA full is on.
+	/// </summary>
+	private static int FullAttentionLayerPasses(GgufModelShape shape)
+	{
+		if (shape.SlidingWindow <= 0 || shape.SlidingWindowLayers.Length == 0 || shape.BlockCount <= 0)
+		{
+			return 0;
+		}
+
+		var passes = 0;
+		for (var layer = 0; layer < shape.BlockCount; layer++)
+		{
+			var windowed = layer < shape.SlidingWindowLayers.Length && shape.SlidingWindowLayers[layer];
+			if (windowed)
+			{
+				continue;
+			}
+
+			var looped = shape.LoopCount > 1 && layer >= shape.LoopStart && layer < shape.LoopEnd;
+			passes += looped ? shape.LoopCount : 1;
+		}
+		return passes;
+	}
+
 	private static double EstimateKvGigabytesPer8k(GgufModelShape? shape, double fileGb, bool hybridKv)
 	{
 		double hybridKvScale = (hybridKv ? 0.38 : 1.0);
+		// A model with a per-layer sliding-window pattern (28 Nov, Inkling 2 Mini, 1M native): only
+		// its full-attention layers grow with the Context, at the declared key and value lengths.
+		// Counting every layer at the full Context made 1M look like ~60 GB, so it was never offered.
+		// Other models (Qwen's hybrid scale was calibrated on the formula below) are unchanged.
+		if (shape != null && shape.HeadCountKv > 0 && FullAttentionLayerPasses(shape) is var fullLayers and > 0)
+		{
+			int keyDim = shape.KeyLength > 0 ? shape.KeyLength : Math.Max(1, shape.EmbeddingLength / Math.Max(1, shape.HeadCount));
+			int valueDim = shape.ValueLength > 0 ? shape.ValueLength : keyDim;
+			double windowedBytesPer8k = (double)fullLayers * shape.HeadCountKv * (keyDim + valueDim) * 8192.0;
+			return Math.Max(0.02, windowedBytesPer8k / 1073741824.0);
+		}
 		if (shape != null && shape.BlockCount > 0 && shape.EmbeddingLength > 0 && shape.HeadCount > 0)
 		{
 			int headCountKv = ((shape.HeadCountKv > 0) ? shape.HeadCountKv : shape.HeadCount);
@@ -7866,6 +7928,12 @@ public sealed class FluxMuxRuntimeService
 			int headCountKv = 0;
 			int contextLength = 0;
 			int slidingWindow = 0;
+			int keyLength = 0;
+			int valueLength = 0;
+			int loopCount = 0;
+			int loopStart = 0;
+			int loopEnd = 0;
+			bool[] slidingWindowLayers = Array.Empty<bool>();
 			for (ulong metadataIndex = 0uL; metadataIndex < metadataCount; metadataIndex++)
 			{
 				string keyName = ReadGgufString(binaryReader);
@@ -7874,6 +7942,27 @@ public sealed class FluxMuxRuntimeService
 				if (keyName.Equals("general.architecture", StringComparison.Ordinal))
 				{
 					architecture = ReadGgufValueAsString(binaryReader, type);
+				}
+				// Per-layer arrays (28 Nov): Inkling 2 gives head counts per layer and a sliding-window
+				// flag per layer. Read as scalars they were skipped, the head count stayed 0, and the
+				// KV estimate fell back to a guess from the file size.
+				else if (type == 9u && (keyName.EndsWith(".attention.head_count", StringComparison.Ordinal)
+					|| keyName.EndsWith(".attention.head_count_kv", StringComparison.Ordinal)
+					|| keyName.EndsWith(".attention.sliding_window_pattern", StringComparison.Ordinal)))
+				{
+					List<int> items = ReadGgufIntArray(binaryReader);
+					if (keyName.EndsWith(".attention.sliding_window_pattern", StringComparison.Ordinal))
+					{
+						slidingWindowLayers = items.Select(item => item != 0).ToArray();
+					}
+					else if (items.Count > 0 && keyName.EndsWith(".attention.head_count_kv", StringComparison.Ordinal))
+					{
+						headCountKv = items.Max();
+					}
+					else if (items.Count > 0)
+					{
+						headCount = items.Max();
+					}
 				}
 				else if (!TryReadGgufValueAsInt(binaryReader, type, out value2))
 				{
@@ -7903,6 +7992,26 @@ public sealed class FluxMuxRuntimeService
 				{
 					slidingWindow = value2;
 				}
+				else if (keyName.EndsWith(".attention.key_length", StringComparison.Ordinal))
+				{
+					keyLength = value2;
+				}
+				else if (keyName.EndsWith(".attention.value_length", StringComparison.Ordinal))
+				{
+					valueLength = value2;
+				}
+				else if (keyName.EndsWith(".loop.count", StringComparison.Ordinal))
+				{
+					loopCount = value2;
+				}
+				else if (keyName.EndsWith(".loop.start", StringComparison.Ordinal))
+				{
+					loopStart = value2;
+				}
+				else if (keyName.EndsWith(".loop.end", StringComparison.Ordinal))
+				{
+					loopEnd = value2;
+				}
 			}
 			GgufModelShape ggufModelShape = new GgufModelShape
 			{
@@ -7913,6 +8022,12 @@ public sealed class FluxMuxRuntimeService
 				HeadCountKv = headCountKv,
 				ContextLength = contextLength,
 				SlidingWindow = slidingWindow,
+				SlidingWindowLayers = slidingWindowLayers,
+				KeyLength = keyLength,
+				ValueLength = valueLength,
+				LoopCount = loopCount,
+				LoopStart = loopStart,
+				LoopEnd = loopEnd,
 				FileLength = fileInfo.Length,
 				LastWriteUtc = fileInfo.LastWriteTimeUtc
 			};
@@ -7947,6 +8062,34 @@ public sealed class FluxMuxRuntimeService
 		}
 		SkipGgufValue(reader, type);
 		return string.Empty;
+	}
+
+	/// <summary>Reads a GGUF array of numbers or booleans (true = 1); other element types are skipped and give an empty list.</summary>
+	private static List<int> ReadGgufIntArray(BinaryReader reader)
+	{
+		uint elementType = reader.ReadUInt32();
+		ulong count = reader.ReadUInt64();
+		if (count > 1000000)
+		{
+			throw new InvalidDataException("GGUF array too large.");
+		}
+		var items = new List<int>((int)count);
+		for (ulong index = 0uL; index < count; index++)
+		{
+			if (elementType == 7u)
+			{
+				items.Add(reader.ReadByte());
+			}
+			else if (TryReadGgufValueAsInt(reader, elementType, out int item))
+			{
+				items.Add(item);
+			}
+			else
+			{
+				SkipGgufValue(reader, elementType);
+			}
+		}
+		return elementType == 7u || items.Count == (int)count ? items : new List<int>();
 	}
 
 	private static bool TryReadGgufValueAsInt(BinaryReader reader, uint type, out int value)

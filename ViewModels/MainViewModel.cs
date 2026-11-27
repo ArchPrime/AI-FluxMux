@@ -2567,9 +2567,32 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial decimal LocalVariantContext { get; set; } = 32768;
 
-    /// <summary>Maximum context the NumericUpDown allows. Raised to ~1M when YaRN extension is enabled.</summary>
-    public int LocalVariantContextMax =>
-        LocalVariantExtendContextIntoRam ? 1048576 : 262144;
+    /// <summary>
+    /// Maximum context the NumericUpDown allows: the model's own trained window from its GGUF
+    /// (28 Nov: it was 262,144 for every model, so a 1M-native model could not be given more
+    /// without YaRN), and with YaRN at least the YaRN ceiling. 262,144 only when the window is unknown.
+    /// </summary>
+    public int LocalVariantContextMax
+    {
+        get
+        {
+            var native = SafeModelNativeContext();
+            var standard = native > 0 ? native : DeepSeekHarnessSetup.MaxLocalContextWindow;
+            return LocalVariantExtendContextIntoRam ? Math.Max(standard, DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn) : standard;
+        }
+    }
+
+    private int SafeModelNativeContext()
+    {
+        try
+        {
+            return string.IsNullOrWhiteSpace(SelectedLocalProfile) ? 0 : CurrentLocalHardwareAdvice().ModelMaxCtx;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
 
     [ObservableProperty]
     public partial string LocalVariantOverrideThreads { get; set; } = DefaultLocalThreadCount();
@@ -14285,7 +14308,7 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        var maxCtx = LocalVariantExtendContextIntoRam ? DeepSeekHarnessSetup.MaxLocalContextWindowWithYarn : DeepSeekHarnessSetup.MaxLocalContextWindow;
+        var maxCtx = LocalVariantContextMax;
         if (LocalVariantContext < 1024 || LocalVariantContext > maxCtx || LocalVariantTemperature is < 0 or > 2)
         {
             StatusMessage = "Local profile validation failed: context or temperature is outside the supported editor range.";
@@ -19294,6 +19317,8 @@ public partial class MainViewModel : ViewModelBase
 
     partial void OnSelectedLocalProfileChanged(string value)
     {
+        // The Context box's maximum is the selected model's own window.
+        OnPropertyChanged(nameof(LocalVariantContextMax));
         RefreshLocalVariantsForSelection(rebuildTree: false);
         EnsureSelection1LocalDefaults();
         if (!_isValidatingLocalProfile)
