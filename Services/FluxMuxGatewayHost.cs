@@ -4521,10 +4521,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 }
 
                 key = FluxMux.Avalonia.Services.ContextEngine.VibeConversationScope.KeyFor("chat-", humanMessages[0]);
-                var isNewChat = humanMessages.Count <= NewConversationMaxUserMessages;
-                if (!isNewChat && scope.CurrentKey is not null && !scope.HasArchive(key))
+                if (KeepsCurrentConversation(messages, humanMessages.Count, scope.CurrentKey is not null, scope.HasArchive(key)))
                 {
-                    return; // long chat with an unfamiliar opening = this chat after compaction
+                    return; // this chat after a compaction replaced its opening
                 }
             }
 
@@ -4537,6 +4536,58 @@ public sealed class FluxMuxGatewayHost : IDisposable
         {
             // Scoping must never break a turn.
         }
+    }
+
+    /// <summary>
+    /// True when a request whose first human message is not the current conversation's key is still
+    /// the current conversation: only a long chat (more than <see cref="NewConversationMaxUserMessages"/>
+    /// of the person's messages) never seen before, and only when it shows that it was compacted —
+    /// its opening replaced by a summary (<see cref="LooksCompacted"/>). Any other long chat with an
+    /// unfamiliar opening is another chat. Before 27 Nov every long chat with an unfamiliar opening
+    /// was taken for this chat after a compaction, so reopening an older Cline task after working in
+    /// another gave it the other task's session note and essence; that showed up once the 26 Nov
+    /// change to <c>ConversationText.HumanPart</c> (unwrapping Cline's &lt;user_input&gt;) changed
+    /// every Cline chat's key, so every reopened chat looked unfamiliar.
+    /// </summary>
+    internal static bool KeepsCurrentConversation(JsonArray messages, int humanMessageCount, bool hasCurrent, bool keySeenBefore)
+        => hasCurrent
+           && !keySeenBefore
+           && humanMessageCount > NewConversationMaxUserMessages
+           && LooksCompacted(messages);
+
+    /// <summary>Openings a compacted chat starts with, from each Client app's and AI-FluxMux's own compaction.</summary>
+    internal static readonly string[] CompactionOpenings =
+    [
+        "Context summary:", // Cline's own compaction, and Hail Mary's rebuild as Cline sends it
+        HandoverBrief.RescueSummaryHeading,
+        HandoverBrief.ClientRecordHeading,
+        "Compressed prior conversation context",
+    ];
+
+    /// <summary>True when one of the first few user messages carries a compaction summary.</summary>
+    internal static bool LooksCompacted(JsonArray messages)
+    {
+        var seen = 0;
+        foreach (var node in messages)
+        {
+            if (node is not JsonObject msg || !Str(msg, "role").Trim().Equals("user", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var text = MessageText(msg);
+            if (CompactionOpenings.Any(opening => text.Contains(opening, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+
+            if (++seen >= 3)
+            {
+                break;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>True when any of the last three messages has an "id" (as Cline's stored messages do).</summary>
