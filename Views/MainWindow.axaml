@@ -3555,6 +3555,15 @@
                                     CornerRadius="4"
                                     Padding="8">
                                 <StackPanel Spacing="6">
+                                    <!-- Width follows the widest button, so the notes wrap instead of widening the menu. -->
+                                    <TextBlock Text="{Binding HandoverKeptBriefCaption}" TextWrapping="Wrap"
+                                               Width="{Binding #ShowBriefButton.Bounds.Width}" HorizontalAlignment="Left" />
+                                    <Border Padding="8,6" CornerRadius="5" BorderThickness="1"
+                                            BorderBrush="{DynamicResource FluxTintAmberBorder}" Background="{DynamicResource FluxTintAmberBackground}"
+                                            Width="{Binding #ShowBriefButton.Bounds.Width}" HorizontalAlignment="Left"
+                                            IsVisible="{Binding HandoverKeptBriefNewerNote, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                        <TextBlock Text="{Binding HandoverKeptBriefNewerNote}" TextWrapping="Wrap" />
+                                    </Border>
                                     <Button Content="📋 Copy latest brief to clipboard" HorizontalAlignment="Stretch"
                                             FontFamily="Segoe UI Emoji, Segoe UI, Arial"
                                             Command="{Binding CopyHandoverBriefCommand}" />
@@ -3562,8 +3571,10 @@
                                             FontFamily="Segoe UI Emoji, Segoe UI, Arial"
                                             Command="{Binding CopyHandoverBriefLocationCommand}"
                                             ToolTip.Tip="{Binding LatestBriefPath}" />
-                                    <Button Content="Show the brief and its options" HorizontalAlignment="Stretch"
-                                            Command="{Binding ShowHandoverBriefOptionsCommand}" />
+                                    <Button x:Name="ShowBriefButton" Content="📄 Show the brief in the Diagnostics log, with its options" HorizontalAlignment="Stretch"
+                                            FontFamily="Segoe UI Emoji, Segoe UI, Arial"
+                                            Command="{Binding ShowHandoverBriefOptionsCommand}"
+                                            ToolTip.Tip="Writes the brief into the Diagnostics log, as it would be copied (with or without your final message, as the tick box says), and shows Copy, Save and the tick box again." />
                                     <ItemsControl ItemsSource="{Binding HandoverChatChoices}"
                                                   IsVisible="{Binding HandoverBriefHasNewChats}">
                                         <ItemsControl.ItemTemplate>

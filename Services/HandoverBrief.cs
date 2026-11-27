@@ -38,9 +38,12 @@ public static class HandoverBrief
     /// </summary>
     public const double OversizedLastMessageShare = 0.25;
 
-    public const int RecentMessageChars = 1500;
-    public const int RecentToolResultChars = 800;
-    public const int RecentTotalChars = 10000;
+    // A brief is read once, so the model's own replies in the tail are quoted at length: they hold
+    // the latest reasoning and plan, and at 1,500 characters two of three were cut off (27 Nov).
+    // Tool output is held shorter; the work's values are also in the facts.
+    public const int RecentMessageChars = 3000;
+    public const int RecentToolResultChars = 600;
+    public const int RecentTotalChars = 16000;
     public const int MaxFilesChanged = 40;
 
     // A brief is read once by a fresh chat, so it can list more of the person's messages than the
@@ -96,7 +99,7 @@ public static class HandoverBrief
             return null;
         }
 
-        var last = LocalHistoryCompaction.IndexOfLastRealUser(messages);
+        var last = LocalHistoryCompaction.IndexOfLastPersonMessage(messages);
         var opening = HumanText(messages[first] as JsonObject);
         if (string.IsNullOrWhiteSpace(opening))
         {
@@ -106,9 +109,7 @@ public static class HandoverBrief
         var earlier = EarlierBrief.Parse(opening);
 
         // The quoted tail; everything between the opening and it is condensed. A short chat is quoted whole.
-        var keepStart = messages.Count - RecentMessages <= first + 1
-            ? first + 1
-            : LocalHistoryCompaction.AlignKeepStart(messages, messages.Count - RecentMessages);
+        var keepStart = TailStart(messages, first);
         var lastIndex = last > first ? last : -1;
 
         var text = new StringBuilder();
@@ -119,22 +120,28 @@ public static class HandoverBrief
             .Append(LatestWinsRule)
             .Append(" File contents are not in it; the files are on disk, so reread any you need before changing them.\n");
 
+        // What the task is now, first (27 Nov): a chat that began with "the dGPU vs iGPU apps listing
+        // has stopped working" was, 60 messages later, about the context gauges after a model
+        // change, and the brief said so nowhere; the new chat had to dig it out of the history.
+        // The person's latest messages say it in their own words, so they lead.
         text.Append("\n## Where things stand now\n");
-        var recent = RecentLines(messages, keepStart, lastIndex);
-        if (recent.Count > 0)
+        var (nowLines, nowFrom) = NowLines(messages, first, lastIndex);
+        if (nowLines.Count > 0)
         {
-            text.Append("### Latest turns (word for word)\n");
-            foreach (var line in recent)
+            text.Append("### What you are working on now (your latest messages, oldest first)\n");
+            foreach (var line in nowLines)
             {
                 text.Append(line).Append('\n');
             }
         }
 
+        // The final message comes before the turns that answer it, so the model's work on it reads
+        // as a reply rather than as something that happened before it.
         var current = lastIndex >= 0 ? HumanText(messages[lastIndex] as JsonObject) : string.Empty;
         if (!string.IsNullOrWhiteSpace(current))
         {
             var answered = messages.Skip(lastIndex + 1).OfType<JsonObject>().Any(m => LocalHistoryCompaction.RoleOf(m) == "assistant");
-            text.Append(answered ? "### Your final message\n" : "### Your final message (not answered yet)\n");
+            text.Append(answered ? "### Your final message (the latest turns below are the work on it)\n" : "### Your final message (not answered yet)\n");
             if (!includeLastMessage)
             {
                 text.Append("Left out of this brief on purpose (" + current.Length.ToString("N0", CultureInfo.InvariantCulture)
@@ -146,7 +153,17 @@ public static class HandoverBrief
             }
         }
 
-        var timeline = Timeline(messages, first + 1, keepStart, earlier?.History);
+        var recent = RecentLines(messages, keepStart, lastIndex);
+        if (recent.Count > 0)
+        {
+            text.Append("### Latest turns (word for word)\n");
+            foreach (var line in recent)
+            {
+                text.Append(line).Append('\n');
+            }
+        }
+
+        var timeline = Timeline(messages, first + 1, nowLines.Count > 0 ? Math.Min(keepStart, nowFrom) : keepStart, earlier?.History);
         if (timeline.Count > 0)
         {
             text.Append("\n## How we got here (your messages, oldest first; later ones override earlier ones)\n");
@@ -174,8 +191,9 @@ public static class HandoverBrief
             .Append(Cap(earlier?.Started ?? opening, OpeningChars)).Append('\n');
 
         text.Append("\n## Continue\n")
-            .Append("Carry on from where the latest turns stop, in the most recent direction. Treat the facts above as settled "
-                    + "unless a later message or the files on disk say otherwise, and do not redo work already done.\n");
+            .Append("Carry on from where the latest turns stop, with what you are working on now. The facts gathered are notes taken "
+                    + "along the way, and the model's conclusions among them may be out of date or wrong: your messages win over them, "
+                    + "and check a fact against the files on disk before building on it. Do not redo work shown as done.\n");
         return text.ToString();
     }
 
@@ -364,17 +382,13 @@ public static class HandoverBrief
 
         string? lastShape = null;
         var repeats = 0;
-        for (var i = Math.Max(0, from); i < Math.Min(to, messages.Count); i++)
+        foreach (var (i, text, question) in LocalHistoryCompaction.PersonMessages(messages, from, to))
         {
-            if (messages[i] is not JsonObject message || !LocalHistoryCompaction.IsRealUserTask(message))
+            var message = messages[i] as JsonObject;
+            var said = LocalHistoryCompaction.CollapseWhitespace(text);
+            if (question is not null)
             {
-                continue;
-            }
-
-            var said = LocalHistoryCompaction.CollapseWhitespace(HumanText(message));
-            if (said.Length == 0 || ConversationText.IsAiFluxMuxNotice(said))
-            {
-                continue;
+                said = Answering(question) + said;
             }
 
             var shape = Digits.Replace(said.ToLowerInvariant(), "#");
@@ -483,7 +497,7 @@ public static class HandoverBrief
             if (sections.TryGetValue("now", out var now)
                 && now.Split("### Your final message", 2) is [_, var final]
                 && final.Split('\n', 2) is [_, var finalText]
-                && finalText.Trim() is { Length: > 0 } said
+                && ("\n" + finalText).Split("\n### ", 2)[0].Trim() is { Length: > 0 } said
                 && !said.StartsWith("Left out of this brief", StringComparison.Ordinal))
             {
                 history.Add("- " + Cap(LocalHistoryCompaction.CollapseWhitespace(said), TimelineEntryChars));
@@ -521,7 +535,7 @@ public static class HandoverBrief
         }
 
         var first = LocalHistoryCompaction.IndexOfFirstRealUser(messages);
-        var last = LocalHistoryCompaction.IndexOfLastRealUser(messages);
+        var last = LocalHistoryCompaction.IndexOfLastPersonMessage(messages);
         return last > first ? HumanText(messages[last] as JsonObject) : string.Empty;
     }
 
@@ -605,7 +619,7 @@ public static class HandoverBrief
         }
 
         var first = LocalHistoryCompaction.IndexOfFirstRealUser(messages);
-        var last = LocalHistoryCompaction.IndexOfLastRealUser(messages);
+        var last = LocalHistoryCompaction.IndexOfLastPersonMessage(messages);
         if (last <= first)
         {
             return null;
@@ -668,6 +682,9 @@ public static class HandoverBrief
             ? string.Empty
             : ConversationText.HumanPart(LocalHistoryCompaction.ExtractText(message["content"])).Trim();
 
+    private static string Answering(string question)
+        => question.Length == 0 ? "(answering a question) " : "(answering \"" + LocalHistoryCompaction.Shorten(question, 100) + "\") ";
+
     private static string Cap(string text, int max)
         => text.Length <= max ? text : text[..max].TrimEnd() + " …";
 
@@ -721,11 +738,90 @@ public static class HandoverBrief
             : PathFields.Select(f => args[f]?.ToString()).FirstOrDefault(p => !string.IsNullOrWhiteSpace(p))?.Trim();
     }
 
+    /// <summary>The person's latest messages before the final one, for "What you are working on now".</summary>
+    public const int NowMessages = 8;
+
+    private const int NowEntryChars = 600;
+
+    /// <summary>
+    /// Up to <see cref="NowMessages"/> of the person's latest messages and answers after the opening
+    /// and before <paramref name="lastIndex"/> (the final message, which has its own section), and
+    /// the index of the oldest one. A message repeated with only its numbers changed is shown once.
+    /// </summary>
+    private static (List<string> Lines, int From) NowLines(JsonArray messages, int first, int lastIndex)
+    {
+        if (lastIndex <= first)
+        {
+            return ([], messages.Count);
+        }
+
+        var picked = new List<(int Index, string Line, int More)>();
+        string? newerShape = null;
+        foreach (var (i, text, question) in LocalHistoryCompaction.PersonMessages(messages, first + 1, lastIndex).Reverse())
+        {
+            var said = LocalHistoryCompaction.CollapseWhitespace(text);
+            var shape = Digits.Replace(said.ToLowerInvariant(), "#");
+            if (shape == newerShape)
+            {
+                picked[0] = picked[0] with { More = picked[0].More + 1 };
+                continue;
+            }
+
+            if (picked.Count == NowMessages)
+            {
+                break;
+            }
+
+            newerShape = shape;
+            picked.Insert(0, (i, "- " + (question is null ? string.Empty : Answering(question)) + Cap(said, NowEntryChars), 0));
+        }
+
+        return picked.Count == 0
+            ? ([], messages.Count)
+            : (picked.Select(p => p.More > 0 ? p.Line + " (and " + p.More + " more like it)" : p.Line).ToList(), picked[0].Index);
+    }
+
+    /// <summary>Assistant replies the quoted tail holds at least, when the chat has them.</summary>
+    public const int RecentReplies = 4;
+
+    /// <summary>The most messages the quoted tail reaches back over to find them.</summary>
+    public const int MaxRecentMessages = 60;
+
+    /// <summary>
+    /// Where the quoted tail starts: at least <see cref="RecentMessages"/> messages back and far
+    /// enough to hold <see cref="RecentReplies"/> of the model's replies (27 Nov: in a tool-heavy
+    /// chat the last 12 messages were mostly calls and results and held two cut-off replies).
+    /// </summary>
+    private static int TailStart(JsonArray messages, int first)
+    {
+        var replies = 0;
+        var i = messages.Count;
+        while (i - 1 > first)
+        {
+            i--;
+            if (messages[i] is JsonObject m && LocalHistoryCompaction.RoleOf(m) == "assistant"
+                && LocalHistoryCompaction.ExtractText(m["content"]).Trim().Length > 0)
+            {
+                replies++;
+            }
+
+            var span = messages.Count - i;
+            if ((span >= RecentMessages && replies >= RecentReplies) || span >= MaxRecentMessages)
+            {
+                break;
+            }
+        }
+
+        return i <= first + 1 ? first + 1 : LocalHistoryCompaction.AlignKeepStart(messages, i);
+    }
+
     /// <summary>The quoted tail, oldest first, trimmed from the oldest end to fit the cap.</summary>
     private static List<string> RecentLines(JsonArray messages, int keepStart, int skipIndex = -1)
     {
         var callNames = new Dictionary<string, string>(StringComparer.Ordinal);
+        var questions = LocalHistoryCompaction.QuestionCalls(messages);
         var lines = new List<string>();
+        string? lastRanId = null;
         for (var i = keepStart; i < messages.Count; i++)
         {
             if (messages[i] is not JsonObject message)
@@ -742,20 +838,37 @@ public static class HandoverBrief
 
             if (LocalHistoryCompaction.IsToolFollowUp(message))
             {
-                var result = LocalHistoryCompaction.ExtractText(message["content"]).Trim();
-                var source = callNames.TryGetValue(message["tool_call_id"]?.ToString() ?? string.Empty, out var named) ? named : "tool";
-                if (result.Length > 0)
+                var callId = message["tool_call_id"]?.ToString() ?? string.Empty;
+                // Cline 4.x returns a command's output as JSON that repeats the command
+                // ({"query": …, "result": …}) with escaped line breaks and colour codes; the output
+                // text is what matters.
+                var result = LocalHistoryCompaction.ToolResultBody(LocalHistoryCompaction.ExtractText(message["content"])).Trim();
+                var source = callNames.TryGetValue(callId, out var named) ? named : "tool";
+                if (questions.TryGetValue(callId, out var question))
+                {
+                    var answer = ConversationText.HumanPart(result) is { Length: > 0 } human ? human : result;
+                    if (answer.Length > 0)
+                    {
+                        lines.Add("- person " + Answering(question).Trim() + ": " + Cap(answer, RecentMessageChars));
+                    }
+                }
+                else if (result.Length > 0)
                 {
                     // A file's contents are left out even here: the new chat rereads the file, and a
                     // quoted copy may already be out of date. Command output (a test run, an error)
-                    // is what the work found, so it is quoted.
+                    // is what the work found, so it is quoted. Straight after its call it is just
+                    // "result": the call line above already names it.
+                    var label = lastRanId == callId && callId.Length > 0 ? "- result: " : "- result of " + source + ": ";
                     lines.Add(FileReadCall.IsMatch(source)
-                        ? "- result of " + source + ": (file contents left out; reread the file if needed)"
-                        : "- result of " + source + ": " + Cap(result, RecentToolResultChars));
+                        ? label + "(file contents left out; reread the file if needed)"
+                        : label + Cap(result, RecentToolResultChars));
                 }
 
+                lastRanId = null;
                 continue;
             }
+
+            lastRanId = null;
 
             if (role == "user")
             {
@@ -784,10 +897,16 @@ public static class HandoverBrief
                         callNames[id] = described;
                     }
 
-                    if (described.Length > 0)
+                    if (questions.TryGetValue(call["id"]?.ToString() ?? string.Empty, out var asked))
+                    {
+                        lines.Add("- assistant asked: " + (asked.Length > 0 ? asked : described));
+                    }
+                    else if (described.Length > 0)
                     {
                         lines.Add("- assistant ran " + described);
                     }
+
+                    lastRanId = calls.Count == 1 ? call["id"]?.ToString() : null;
                 }
             }
         }

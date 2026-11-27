@@ -236,7 +236,7 @@ public static class LocalToolResultClearing
             ReadArgField(args, "path", "file_path", "file", "target", "target_file", "paths"));
         if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(detail))
         {
-            return name + ": " + Truncate(CollapseWhitespace(detail), 80);
+            return name + ": " + Truncate(CommandGist(CollapseWhitespace(detail)), 80);
         }
 
         if (!string.IsNullOrWhiteSpace(name))
@@ -245,6 +245,30 @@ public static class LocalToolResultClearing
         }
 
         return string.IsNullOrWhiteSpace(detail) ? string.Empty : CollapseWhitespace(detail);
+    }
+
+    // A command that opens by printing what it is for: Write-Host '=== Find where X is set ===';
+    // echo "--- build ---".
+    private static readonly System.Text.RegularExpressions.Regex EchoHeading = new(
+        // The closing quote is the one before ";" or the end, so "model's" inside it does not end it.
+        @"^(?:Write-Host|Write-Output|echo)\s+(['""])\W*(.+?)\W*\1\s*(?:;|$)\s*(.*)$",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// The command, or for one that opens by echoing a heading, the heading and then the command
+    /// (27 Nov): every entry of a brief's "Already ran" list read "run_commands: Write-Host '=== …",
+    /// the first 80 characters spent on the echo's syntax.
+    /// </summary>
+    internal static string CommandGist(string command)
+    {
+        var m = EchoHeading.Match(command);
+        if (!m.Success || m.Groups[2].Value.Length == 0)
+        {
+            return command;
+        }
+
+        var rest = m.Groups[3].Value.Trim();
+        return rest.Length == 0 ? m.Groups[2].Value : m.Groups[2].Value + " — " + rest;
     }
 
     public static bool IsToolResult(JsonObject? message)

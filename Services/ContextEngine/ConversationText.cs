@@ -42,6 +42,10 @@ public static class ConversationText
         // Harness sends its session and skill notes as user messages wrapped in <system-reminder>;
         // read as the person's words, they led the brief's history (Harness lab, 26 Nov).
         "<system-reminder>",
+        // Cline's hook notes ("<hook_context source=\"ToolSuccess\" tool_name=\"ask__question\"> The
+        // user has answered the question…"): nine of them led a brief's list of the person's
+        // messages while the answers themselves, in the question tool's result, were lost (27 Nov).
+        "<hook_context",
         // AI-FluxMux's own inserted text: the compaction summary, the essence summary written
         // into Cline's compaction file, and the notes added to a tool result. None is a person's
         // words, and reading the summary as one made a compacted chat look like a new chat.

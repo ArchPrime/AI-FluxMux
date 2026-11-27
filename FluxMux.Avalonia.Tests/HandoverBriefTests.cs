@@ -74,7 +74,9 @@ public sealed class HandoverBriefTests
         }
 
         var brief = HandoverBrief.Build(messages, null, DateTime.UtcNow)!;
-        var history = brief[brief.IndexOf("## How we got here", StringComparison.Ordinal)..];
+        // A short chat's messages all fit "What you are working on now"; a long one's older
+        // messages are under "How we got here". Either way, in order.
+        var history = brief[brief.IndexOf("## Where things stand now", StringComparison.Ordinal)..];
         var save = history.IndexOf("Save the brief automatically.", StringComparison.Ordinal);
         var reverse = history.IndexOf("Actually, do not save automatically", StringComparison.Ordinal);
         Assert.True(save >= 0 && reverse > save, "the reversal must follow what it reverses");

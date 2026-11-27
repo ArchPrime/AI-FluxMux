@@ -102,7 +102,8 @@ public sealed class CompactionKeepsFactsTests
         Assert.True(LocalHistoryCompaction.TryCompactPayload(payload, PortForwardingRules.Defaults, force: true));
         var summary = payload["messages"]!.AsArray().OfType<JsonObject>()
             .First(m => m["content"]?.ToString().StartsWith("Compressed prior conversation context", StringComparison.Ordinal) == true)["content"]!.ToString();
-        Assert.Contains("run_commands Get-Content config/service.toml: metrics_port = 47193", summary, StringComparison.Ordinal);
+        // Values are labelled as "Already ran" names the call (27 Nov).
+        Assert.Contains("run_commands: Get-Content config/service.toml: metrics_port = 47193", summary, StringComparison.Ordinal);
         Assert.Contains("- run_commands: Get-Content config/service.toml", summary, StringComparison.Ordinal);
         Assert.DoesNotContain("\\n", summary, StringComparison.Ordinal);
     }

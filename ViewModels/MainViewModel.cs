@@ -3137,20 +3137,48 @@ public partial class MainViewModel : ViewModelBase
     private void RefreshHandoverChatChoices()
     {
         HandoverChatChoices.Clear();
+        HandoverKeptBriefCaption = _keptBrief is { } shown ? "Latest brief: from your " + shown.ChatLabel + "." : string.Empty;
+        HandoverKeptBriefNewerNote = _keptBrief is { } current ? NewerChatNote(current) ?? string.Empty : string.Empty;
         foreach (var (key, label, sentUtc) in global::FluxMux.Avalonia.Services.SavedChats.Summaries())
         {
-            if (_keptBrief is { } kept && kept.ChatKey.Equals(key, StringComparison.OrdinalIgnoreCase) && kept.ChatSentUtc == sentUtc)
-            {
-                continue;
-            }
-
-            HandoverChatChoices.Add(new HandoverChatChoice(key, "Create new brief from your " + label));
+            // The chat the kept brief is already of is offered too, to make it again (27 Nov): it
+            // used to be left out, so after an update to how briefs are written there was no way
+            // to rewrite the brief of the same chat.
+            var same = _keptBrief is { } kept && kept.ChatKey.Equals(key, StringComparison.OrdinalIgnoreCase) && kept.ChatSentUtc == sentUtc;
+            HandoverChatChoices.Add(new HandoverChatChoice(key, (same ? "Make the brief again from your " : "Create new brief from your ") + label));
         }
 
         OnPropertyChanged(nameof(HandoverBriefHasNewChats));
     }
 
     public bool HandoverBriefHasNewChats => HandoverChatChoices.Count > 0;
+
+    /// <summary>The menu's first line: which chat the kept brief is of, and whether that chat has moved on.</summary>
+    [ObservableProperty]
+    public partial string HandoverKeptBriefCaption { get; set; } = string.Empty;
+
+    /// <summary>Empty, or the amber note that the Client app the kept brief is of has sent a newer chat since.</summary>
+    [ObservableProperty]
+    public partial string HandoverKeptBriefNewerNote { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The kept brief survives new chats (27 Nov): a brief made from a test chat at 00:57 was still
+    /// what Copy and Show gave at 13:30, when the person's Cline chat was on another task, and
+    /// nothing said so. When the same Client app has sent a newer chat, this says so and points
+    /// to the menu's Create new brief; null otherwise.
+    /// </summary>
+    private static string? NewerChatNote(KeptBrief kept)
+    {
+        foreach (var (key, label, sentUtc) in global::FluxMux.Avalonia.Services.SavedChats.Summaries())
+        {
+            if (key.Equals(kept.ChatKey, StringComparison.OrdinalIgnoreCase) && sentUtc > kept.ChatSentUtc)
+            {
+                return "Newer: your " + label + ". This brief may not cover your current task; for that, use Create new brief from your " + label + ".";
+            }
+        }
+
+        return null;
+    }
 
     /// <summary>"Copy to clipboard" (notice) and "Copy latest brief to clipboard" (menu).</summary>
     [RelayCommand]
@@ -3193,6 +3221,11 @@ public partial class MainViewModel : ViewModelBase
         HandoverBriefMenuOpen = false;
         if (_keptBrief is { } kept)
         {
+            // "Show the brief" shows the brief itself, in the Diagnostics log where the person reads
+            // output: as it would be copied, with or without the final message as the tick box says.
+            // It was written there only once, when made, so this showed only the notice (27 Nov).
+            var newer = NewerChatNote(kept);
+            AppendDiagnosticEntry("BRIEF", (newer is null ? string.Empty : newer + "\n\n") + kept.Current, "AI-FluxMux");
             ShowHandoverBriefBanner(BriefNotice(kept));
         }
     }
@@ -3244,7 +3277,8 @@ public partial class MainViewModel : ViewModelBase
                    + ". Copy it to the clipboard, or save it to a file, then paste it as the first message of a new chat. "
                    + "The Diagnostics log shows the brief in full" + (withoutFinal ? " (including your final message)" : string.Empty) + " if required.";
         var about = kept.Included ? kept.AboutIncluded : kept.AboutExcluded;
-        return about.Length == 0 ? head : head + "\n\n" + about;
+        var text = about.Length == 0 ? head : head + "\n\n" + about;
+        return NewerChatNote(kept) is { } newer ? newer + "\n\n" + text : text;
     }
 
     private static string BriefNotice(HandoverBriefOutcome made)

@@ -459,6 +459,114 @@ public static class LocalHistoryCompaction
         return -1;
     }
 
+    /// <summary>The newest message with words the person wrote (not a Client app's hook or reminder text).</summary>
+    internal static int IndexOfLastPersonMessage(JsonArray messages)
+    {
+        for (var i = messages.Count - 1; i >= 0; i--)
+        {
+            if (messages[i] is JsonObject message && IsRealUserTask(message)
+                && ContextEngine.ConversationText.HumanPart(ExtractText(message["content"])).Length > 0)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    // A tool the model calls to ask the person something: Cline's ask_question and
+    // ask_followup_question, and the like in other Client apps (ask_user, question, request_input).
+    private static readonly Regex QuestionToolName = new(
+        @"(^|_)ask($|_)|question|follow_?up|request_?input|ask_?user", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// The questions the model asked the person through a question tool, by call id. The person's
+    /// answer comes back as that tool's result, not as a user message (27 Nov: a brief listed only
+    /// the hook note Cline adds after it, "The user has answered the question", and lost the
+    /// answer, "this took something like 10 minutes").
+    /// </summary>
+    internal static Dictionary<string, string> QuestionCalls(JsonArray messages)
+    {
+        var questions = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var message in messages.OfType<JsonObject>())
+        {
+            if (message["tool_calls"] is not JsonArray calls)
+            {
+                continue;
+            }
+
+            foreach (var call in calls.OfType<JsonObject>())
+            {
+                var name = call["function"]?["name"]?.ToString() ?? call["name"]?.ToString() ?? string.Empty;
+                if (call["id"]?.ToString() is not { Length: > 0 } id || !QuestionToolName.IsMatch(name))
+                {
+                    continue;
+                }
+
+                var args = call["function"]?["arguments"] ?? call["arguments"];
+                JsonNode? parsed = args;
+                if (args is JsonValue raw && raw.TryGetValue<string>(out var json))
+                {
+                    try
+                    {
+                        parsed = JsonNode.Parse(json);
+                    }
+                    catch (System.Text.Json.JsonException)
+                    {
+                        parsed = null;
+                    }
+                }
+
+                questions[id] = CollapseWhitespace((parsed as JsonObject)?["question"]?.ToString() ?? string.Empty);
+            }
+        }
+
+        return questions;
+    }
+
+    /// <summary>
+    /// What the person said in [<paramref name="from"/>, <paramref name="to"/>), oldest first: their
+    /// own messages (Client-app text removed) and their answers to the model's questions, with the
+    /// question asked. Shared by compaction's summary and the hand over brief.
+    /// </summary>
+    internal static IEnumerable<(int Index, string Text, string? Question)> PersonMessages(JsonArray messages, int from, int to)
+    {
+        var questions = QuestionCalls(messages);
+        for (var i = Math.Max(0, from); i < Math.Min(to, messages.Count); i++)
+        {
+            if (messages[i] is not JsonObject message)
+            {
+                continue;
+            }
+
+            if (IsToolFollowUp(message))
+            {
+                if (message["tool_call_id"]?.ToString() is { Length: > 0 } id && questions.TryGetValue(id, out var question))
+                {
+                    var answer = ToolResultBody(ExtractText(message["content"])).Trim();
+                    var human = ContextEngine.ConversationText.HumanPart(answer);
+                    if ((human.Length > 0 ? human : answer) is { Length: > 0 } said)
+                    {
+                        yield return (i, said, question);
+                    }
+                }
+
+                continue;
+            }
+
+            if (!IsRealUserTask(message))
+            {
+                continue;
+            }
+
+            var text = ContextEngine.ConversationText.HumanPart(ExtractText(message["content"])).Trim();
+            if (text.Length > 0 && !ContextEngine.ConversationText.IsAiFluxMuxNotice(text))
+            {
+                yield return (i, text, null);
+            }
+        }
+    }
+
     internal static string? BuildForwardSummary(JsonArray messages, int keepStart, int maxNotes = MaxDroppedNotes, int maxChars = MaxSummaryChars)
     {
         var lines = new List<string>
@@ -482,7 +590,7 @@ public static class LocalHistoryCompaction
         var facts = CollectToolResultFacts(messages, keepStart);
         if (facts.Count > 0)
         {
-            lines.Add("Values found in older tool output:");
+            lines.Add("Values found in older tool output (oldest first; a later value replaces an earlier one):");
             lines.AddRange(facts);
         }
 
@@ -504,7 +612,10 @@ public static class LocalHistoryCompaction
         var decisions = CollectAssistantDecisions(messages, keepStart);
         if (decisions.Count > 0)
         {
-            lines.Add("Key decisions:");
+            // The model's conclusions are notes, not facts: a brief once listed "a brand-new NVIDIA
+            // driver" as the cause the person had already ruled out, then said to treat it as settled
+            // (27 Nov). An objection the person made straight after is attached to the conclusion.
+            lines.Add("What the model concluded (oldest first; it may have been wrong, and the person's messages override it):");
             lines.AddRange(decisions);
         }
 
@@ -545,7 +656,26 @@ public static class LocalHistoryCompaction
         var kept = found.Count <= MaxDecisions
             ? found
             : found.OrderByDescending(d => d.Score).ThenByDescending(d => d.Index).Take(MaxDecisions).OrderBy(d => d.Index).ToList();
-        return kept.Select(d => d.Line).ToList();
+        var person = PersonMessages(messages, 0, messages.Count).ToList();
+        return kept.Select(d => d.Line + Objection(person, d.Index)).ToList();
+    }
+
+    // The person disagreeing: "no the slowdown predates the driver update", "that's not it", "stop".
+    private static readonly Regex Disagreement = new(
+        @"^\W*(no|nope|not|wrong|incorrect|stop|don'?t|isn'?t|it'?s not|that'?s not|that is not|you'?re wrong|you are wrong)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>The person's next words after the conclusion at <paramref name="index"/>, when they disagree.</summary>
+    private static string Objection(List<(int Index, string Text, string? Question)> person, int index)
+    {
+        var next = person.FirstOrDefault(p => p.Index > index);
+        if (next.Text is null || !Disagreement.IsMatch(next.Text))
+        {
+            return string.Empty;
+        }
+
+        var said = CollapseWhitespace(next.Text);
+        return " (the person replied: \"" + (said.Length > 200 ? said[..200].TrimEnd() + "…" : said) + "\")";
     }
 
     private static IEnumerable<(int Index, string Line)> AssistantDecisionLines(JsonArray messages, int keepStart)
@@ -576,7 +706,9 @@ public static class LocalHistoryCompaction
             }
 
             // Extract the first meaningful sentence or two — this is where
-            // the conclusion/decision lives. The rest is reasoning.
+            // the conclusion/decision lives. The rest is reasoning. Markdown bold and code blocks
+            // are left out: cut into sentences they left stray "**" and half a C# block (27 Nov).
+            text = CodeBlock.Replace(text, "(code)").Replace("**", string.Empty, StringComparison.Ordinal);
             var extracted = ExtractDecision(text);
             if (!string.IsNullOrWhiteSpace(extracted))
             {
@@ -606,39 +738,82 @@ public static class LocalHistoryCompaction
             "The change", "The update", "The modification"
         };
 
+        // Whole sentences only (27 Nov): a marker matched in the middle of a sentence ("…is the key.
+        // Let me…") and the cut at 250 characters gave fragments such as "the key. Let me analyze it
+        // and check the" that said nothing. The decision now starts at the start of the sentence
+        // holding the marker and ends at the end of a sentence.
         foreach (var marker in markers)
         {
             var idx = text.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-            if (idx >= 0)
+            while (idx >= 0)
             {
-                // Take from the marker to the next paragraph break or 250 chars
-                var start = idx;
-                var end = Math.Min(text.Length, start + 250);
-                // Try to find a natural break (period + space, or newline)
-                // Search from 50 chars before the cap, but never before the marker: a short
-                // message ("I'll read it.") used to make this start index negative and throw.
-                var periodIdx = text.IndexOf(". ", Math.Max(start, end - 50), StringComparison.Ordinal);
-                if (periodIdx > start && periodIdx < end)
+                var start = SentenceStart(text, idx);
+                // A marker inside a sentence counts only when the sentence begins with it.
+                if (start == idx || string.Equals(marker, "Decision:", StringComparison.OrdinalIgnoreCase))
                 {
-                    end = periodIdx + 1;
+                    return Sentences(text, start, DecisionChars);
                 }
-                return text[start..end].Trim();
+
+                idx = text.IndexOf(marker, idx + marker.Length, StringComparison.OrdinalIgnoreCase);
             }
         }
 
-        // No marker found — take the first 200 chars as a rough summary
-        if (text.Length > 200)
+        // No marker: the opening sentences.
+        return Sentences(text, 0, DecisionChars);
+    }
+
+    private const int DecisionChars = 300;
+
+    private static readonly Regex CodeBlock = new("```.*?(```|$)", RegexOptions.Compiled | RegexOptions.Singleline);
+
+    private static readonly Regex SentenceEnd = new(@"[.!?](?=\s|$)", RegexOptions.Compiled);
+
+    /// <summary>Where the sentence holding <paramref name="index"/> starts (after ". ", ": ", "## ", "**" and the like).</summary>
+    private static int SentenceStart(string text, int index)
+    {
+        // The text is whitespace-collapsed, so a sentence starts after "<end mark> " or at 0.
+        var i = index;
+        while (i > 0 && !(text[i - 1] == ' ' && i >= 2 && text[i - 2] is '.' or '!' or '?' or ':'))
         {
-            // Try to break at a sentence boundary
-            var periodIdx = text.IndexOf(". ", 100, StringComparison.Ordinal);
-            if (periodIdx > 0 && periodIdx < 250)
-            {
-                return text[..(periodIdx + 1)].Trim();
-            }
-            return text[..200].Trim() + "…";
+            i--;
         }
 
-        return text.Trim();
+        // Markdown that opened the line ("## Root cause", "**Fix**", "- item") is not the sentence.
+        while (i < index && text[i] is ' ' or '#' or '*' or '-' or '>')
+        {
+            i++;
+        }
+
+        return i;
+    }
+
+    /// <summary>Whole sentences from <paramref name="start"/>, up to about <paramref name="max"/> characters; one long sentence is cut at a word, marked with "…".</summary>
+    private static string Sentences(string text, int start, int max)
+    {
+        var end = start;
+        foreach (Match m in SentenceEnd.Matches(text, start))
+        {
+            if (m.Index + 1 - start > max)
+            {
+                break;
+            }
+
+            end = m.Index + 1;
+        }
+
+        if (end > start)
+        {
+            return text[start..end].Trim().TrimStart('#', '*', ' ');
+        }
+
+        var rest = text[start..];
+        if (rest.Length <= max)
+        {
+            return rest.Trim();
+        }
+
+        var cut = rest.LastIndexOf(' ', max);
+        return rest[..(cut > max / 2 ? cut : max)].Trim() + "…";
     }
 
     /// <summary>The summary's length cap: small next to the room the fill-based cut leaves.</summary>
@@ -662,28 +837,20 @@ public static class LocalHistoryCompaction
     private static List<string> CollectDroppedNotes(JsonArray messages, int keepStart, int maxNotes = MaxDroppedNotes)
     {
         var candidates = new List<(int Index, int Score, string Text, string Shape)>();
-        for (var i = 0; i < keepStart; i++)
+        // Only what the person wrote: a Client app's own text in a user message (Cline's
+        // environment_details file lists, tool results, resume prompts) would otherwise score
+        // as "informative" for its paths and crowd out the person's own words. Their answers to
+        // the model's questions are their words too.
+        foreach (var (i, said, question) in PersonMessages(messages, 0, keepStart))
         {
-            if (messages[i] is not JsonObject message || !IsRealUserTask(message))
-            {
-                continue;
-            }
-
-            // Only what the person wrote: a Client app's own text in a user message (Cline's
-            // environment_details file lists, tool results, resume prompts) would otherwise score
-            // as "informative" for its paths and crowd out the person's own words.
-            var text = CollapseWhitespace(ContextEngine.ConversationText.HumanPart(ExtractText(message["content"])));
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                continue;
-            }
-
+            var text = CollapseWhitespace(said);
             if (text.Length > 200)
             {
                 text = text[..200] + "…";
             }
 
-            candidates.Add((i, InformationScore(text), text, Digits.Replace(text.ToLowerInvariant(), "#")));
+            var shown = question is null ? text : "(answering \"" + Shorten(question, 100) + "\") " + text;
+            candidates.Add((i, InformationScore(text), shown, Digits.Replace(text.ToLowerInvariant(), "#")));
         }
 
         var repeated = candidates.GroupBy(c => c.Shape).Where(g => g.Count() > 1).Select(g => g.Key).ToHashSet(StringComparer.Ordinal);
@@ -738,6 +905,8 @@ public static class LocalHistoryCompaction
     // kept a setting from matching (Harness lab, 26 Nov: "4: metrics_port = 47193" was not a value).
     private static readonly Regex LineNumberPrefix = new(@"^\s*\d{1,6}(?::\s?|\t|→)", RegexOptions.Compiled);
 
+    private static readonly Regex EchoedHeading = new(@"^\s*(={3,}|-{3,}|#{2,}|\*{3,}).*?(={3,}|-{3,}|\*{3,})?\s*$", RegexOptions.Compiled);
+
     // A line of git log output: a hash, then the subject.
     private static readonly Regex CommitLine = new("^\\s*[0-9a-f]{7,40}\\s+\\S", RegexOptions.Compiled);
 
@@ -749,7 +918,9 @@ public static class LocalHistoryCompaction
     // The call's target: a path or command, or the first entry of Cline 4.x's lists
     // (run_commands {"commands": ["…"]}, read_files {"paths": ["…"]}).
     private static readonly Regex CallTarget = new(
-        "\"(?:path|file_path|command|target|commands|paths)\"\\s*:\\s*\\[?\\s*\"([^\"]{1,80})\"", RegexOptions.Compiled);
+        // The first 80 characters, whatever the length: requiring the closing quote within 80 left
+        // every longer command unnamed ("run_commands: cache-reuse: False", 27 Nov).
+        "\"(?:path|file_path|command|target|commands|paths)\"\\s*:\\s*\\[?\\s*\"((?:[^\"\\\\]|\\\\.){1,80})", RegexOptions.Compiled);
 
     /// <summary>
     /// The output text of a tool result. Cline 4.x sends a command's output as the JSON of its
@@ -767,13 +938,22 @@ public static class LocalHistoryCompaction
         => ToolResultBody(toolResultText).Split('\n')
             .Select(l => LineNumberPrefix.Replace(l, string.Empty).TrimEnd())
             .Where(l => l.Length is > 0 and <= 160)
+            // A heading the command printed for itself ("=== Check for any warning about … ===") is
+            // not a value, though "warning" in it matched as an outcome.
+            .Where(l => !EchoedHeading.IsMatch(l))
             .Where(l => SettingLine.IsMatch(l) || CommitLine.IsMatch(l) || OutcomeLine.IsMatch(l))
             .Select(l => l.Trim())
             .Distinct()
             .Take(max)
             .ToList();
 
+    // Terminal colour codes in command output (PowerShell's "\e[32;1mLineNumber\e[0m").
+    private static readonly Regex AnsiCode = new(@"\x1B\[[0-9;?]*[A-Za-z]", RegexOptions.Compiled);
+
     internal static string ToolResultBody(string text)
+        => AnsiCode.Replace(ToolResultJsonBody(text), string.Empty);
+
+    private static string ToolResultJsonBody(string text)
     {
         var trimmed = text.TrimStart();
         if (!trimmed.StartsWith('[') && !trimmed.StartsWith('{'))
@@ -823,13 +1003,22 @@ public static class LocalHistoryCompaction
                     continue;
                 }
 
-                var name = call["function"]?["name"]?.ToString() ?? "tool";
-                var target = CallTarget.Match(call["function"]?["arguments"]?.ToString() ?? string.Empty).Groups[1].Value;
-                callNames[id] = string.IsNullOrWhiteSpace(target) ? name : name + " " + target;
+                // Named as "Already ran" names it (a command by its echoed heading, unescaped), so
+                // the two lists read alike; the raw JSON target gave labels such as
+                // "run_commands Write-Host '=== Most recent launch args ==='; $lines = Get-Content C:\\AI_Workben".
+                var described = LocalToolResultClearing.DescribeToolCall(call);
+                if (described.Length == 0)
+                {
+                    var name = call["function"]?["name"]?.ToString() ?? "tool";
+                    var target = CallTarget.Match(call["function"]?["arguments"]?.ToString() ?? string.Empty).Groups[1].Value;
+                    described = string.IsNullOrWhiteSpace(target) ? name : name + " " + target;
+                }
+
+                callNames[id] = described;
             }
         }
 
-        var perResult = new List<List<string>>();
+        var perResult = new List<(string Source, List<string> Lines)>();
         for (var i = 0; i < keepStart; i++)
         {
             if (messages[i] is not JsonObject message || !IsToolFollowUp(message))
@@ -844,21 +1033,50 @@ public static class LocalHistoryCompaction
             }
 
             var source = callNames.TryGetValue(message["tool_call_id"]?.ToString() ?? string.Empty, out var named) ? named : "tool";
-            var found = ValueLines(text).Select(l => "- " + source + ": " + l).ToList();
+            var found = ValueLines(text);
             if (found.Count > 0)
             {
-                perResult.Add(found);
+                perResult.Add((source, found));
             }
         }
 
+        // Newest first, a value is kept once (27 Nov: a brief listed "cache-reuse: False" three
+        // times, and "spec-type: False" above a later "spec-type: True" with nothing to say which
+        // was current). A setting read again replaces the earlier reading of the same setting; a
+        // call run again (the same command or path) replaces what its earlier run reported, so
+        // an old build failure does not outlive the build that fixed it.
         var facts = new List<string>();
+        var seenLines = new HashSet<string>(StringComparer.Ordinal);
+        var seenSettings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenSources = new HashSet<string>(StringComparer.Ordinal);
         for (var r = perResult.Count - 1; r >= 0 && facts.Count < MaxToolFacts; r--)
         {
-            facts.InsertRange(0, perResult[r].Take(MaxToolFacts - facts.Count));
+            var (source, lines) = perResult[r];
+            if ((source.Contains(": ", StringComparison.Ordinal) || source.Contains(' ', StringComparison.Ordinal)) && !seenSources.Add(source))
+            {
+                continue;
+            }
+
+            var kept = new List<string>();
+            foreach (var line in lines)
+            {
+                var setting = SettingLine.IsMatch(line) ? line.Split(['=', ':'], 2)[0].Trim() : null;
+                if (!seenLines.Add(line) || (setting is not null && !seenSettings.Add(setting)))
+                {
+                    continue;
+                }
+
+                kept.Add("- " + source + ": " + line);
+            }
+
+            facts.InsertRange(0, kept.Take(MaxToolFacts - facts.Count));
         }
 
         return facts;
     }
+
+    internal static string Shorten(string text, int max)
+        => text.Length <= max ? text : text[..max].TrimEnd() + "…";
 
     internal static string CollapseWhitespace(string text)
         => string.Join(" ", (text ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
