@@ -9852,14 +9852,6 @@ public partial class MainViewModel : ViewModelBase
     }
 
     [RelayCommand]
-    private async Task LaunchCloudAsync()
-        => await LaunchCloudRouteAsync("Selection 1", SelectedCloudProvider, SelectedCloudProfile, SelectedCloudVariant);
-
-    [RelayCommand]
-    private async Task LaunchSelection1CloudAsync()
-        => await LaunchCloudRouteAsync("Selection 1", SelectedCloudProvider, SelectedCloudProfile, SelectedCloudVariant);
-
-    [RelayCommand]
     private async Task LaunchSelection2CloudAsync()
         => await LaunchCloudRouteAsync("Selection 2", SelectedSelection2CloudProvider, SelectedSelection2CloudProfile, SelectedSelection2CloudVariant);
 
@@ -15137,13 +15129,9 @@ public partial class MainViewModel : ViewModelBase
         {
             var routeType = NormalizeSelectionRouteType(selection1Slot["routeType"]?.ToString());
             SelectedSelection1RouteType = routeType;
-            if (routeType.Equals("Cloud", StringComparison.Ordinal))
-            {
-                SelectedCloudProvider = FirstNonEmpty(selection1Slot["provider"]?.ToString() ?? string.Empty, SelectedCloudProvider);
-                SelectedCloudProfile = FirstNonEmpty(selection1Slot["cloudModel"]?.ToString() ?? string.Empty, SelectedCloudProfile);
-                SelectedCloudVariant = FirstNonEmpty(selection1Slot["cloudVariant"]?.ToString() ?? string.Empty, BaseVariantDisplayName);
-            }
-            else
+            // A cloud slot is not copied into the cloud editor's selection (see
+            // MirrorQuickSelectSlotsToLegacySelections): the editor keeps what was last open.
+            if (!routeType.Equals("Cloud", StringComparison.Ordinal))
             {
                 SelectedSelection1LocalProfile = FirstNonEmpty(selection1Slot["localModel"]?.ToString() ?? string.Empty, SelectedSelection1LocalProfile);
                 SelectedSelection1LocalVariant = FirstNonEmpty(selection1Slot["localVariant"]?.ToString() ?? string.Empty, BaseVariantDisplayName);
@@ -15159,16 +15147,13 @@ public partial class MainViewModel : ViewModelBase
             {
                 var routeType = NormalizeSelectionRouteType(rawRouteType);
                 SelectedSelection2RouteType = routeType;
+                // A local slot is not copied into the local editor's selection (see
+                // MirrorQuickSelectSlotsToLegacySelections).
                 if (routeType.Equals("Cloud", StringComparison.Ordinal))
                 {
                     SelectedSelection2CloudProvider = FirstNonEmpty(selection2Slot["provider"]?.ToString() ?? string.Empty, SelectedCloudProvider);
                     SelectedSelection2CloudProfile = FirstNonEmpty(selection2Slot["cloudModel"]?.ToString() ?? string.Empty, SelectedSelection2CloudProfile);
                     SelectedSelection2CloudVariant = FirstNonEmpty(selection2Slot["cloudVariant"]?.ToString() ?? string.Empty, SelectedSelection2CloudVariant);
-                }
-                else
-                {
-                    SelectedLocalProfile = FirstNonEmpty(selection2Slot["localModel"]?.ToString() ?? string.Empty, SelectedLocalProfile);
-                    SelectedLocalVariant = FirstNonEmpty(selection2Slot["localVariant"]?.ToString() ?? string.Empty, BaseVariantDisplayName);
                 }
             }
             else
@@ -15594,8 +15579,13 @@ public partial class MainViewModel : ViewModelBase
         _lastLocalDetailedSnapshot = after;
         var oldOrder = LocalPriorityOrder.ToList();
         var scores = ComputeLocalPriorityScores();
+        var scoresBefore = _lastLocalPriorityScores ?? scores;
+        _lastLocalPriorityScores = scores;
         var inferred = RankPrioritiesByScore(LocalPriorityNames, scores);
-        if (ShouldAdoptInferredPriorityOrder(oldOrder, inferred, scores, margin: 3))
+        // The edit's direction decides which way a priority may move (28 Nov): lowering Context
+        // moved "Context length" to the top, because the scores are absolute and Context was still
+        // near the card's maximum, so it out-scored the current top whatever the edit did.
+        if (ShouldAdoptInferredPriorityOrder(oldOrder, inferred, scores, margin: 3, scoresBefore))
         {
             SetLocalPriorityOrder(inferred, persistToConfig: false);
         }
@@ -15607,7 +15597,14 @@ public partial class MainViewModel : ViewModelBase
     /// <summary>Settings as last loaded or last written by the wizard; compared with each manual edit.</summary>
     private Dictionary<string, string>? _lastLocalDetailedSnapshot;
 
-    private void RememberLocalDetailedSnapshot() => _lastLocalDetailedSnapshot = CaptureLocalDetailedSettings();
+    private void RememberLocalDetailedSnapshot()
+    {
+        _lastLocalDetailedSnapshot = CaptureLocalDetailedSettings();
+        _lastLocalPriorityScores = ComputeLocalPriorityScores();
+    }
+
+    /// <summary>The priority scores as last loaded, written by the wizard or after the last manual edit.</summary>
+    private Dictionary<string, int>? _lastLocalPriorityScores;
 
     /// <summary>What each setting trades, in plain words, for the manual-edit consequence line.</summary>
     internal static readonly IReadOnlyDictionary<string, string> LocalSettingTradeOffs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -19191,11 +19188,12 @@ public partial class MainViewModel : ViewModelBase
             var first = QuickSelectSlots.ElementAtOrDefault(0);
             if (first is not null)
             {
+                // The slots are the Quick Select record; the Model profiles editors' own selections
+                // (SelectedCloud*, SelectedLocal*) are not written from them (28 Nov): they used to
+                // be, so saving the slots (after Validate, a slot change, or a selection saved in
+                // the editor) switched the open editor to slot 1's cloud or slot 2's local profile.
                 SelectedSelection1RouteType = first.RouteType;
                 IsSelection1TemplateChosen = first.HasSavedAssignment;
-                SelectedCloudProvider = first.CloudProvider;
-                SelectedCloudProfile = first.CloudModel;
-                SelectedCloudVariant = first.CloudVariant;
                 SelectedSelection1LocalProfile = first.LocalModel;
                 SelectedSelection1LocalVariant = first.LocalVariant;
             }
@@ -19209,8 +19207,6 @@ public partial class MainViewModel : ViewModelBase
                 SelectedSelection2CloudProvider = second.CloudProvider;
                 SelectedSelection2CloudProfile = second.CloudModel;
                 SelectedSelection2CloudVariant = second.CloudVariant;
-                SelectedLocalProfile = second.LocalModel;
-                SelectedLocalVariant = second.LocalVariant;
             }
         }
         finally
@@ -23861,11 +23857,18 @@ public partial class MainViewModel : ViewModelBase
             .ThenBy(priority => Array.IndexOf(baseOrder.ToArray(), priority))
             .ToList();
 
-    private static bool ShouldAdoptInferredPriorityOrder(
+    /// <summary>
+    /// Whether to adopt the order the settings now suggest. The leader (or a displaced priority)
+    /// must be beaten by <paramref name="margin"/>. With <paramref name="scoresBefore"/> (a manual
+    /// edit), a priority may move up only if this edit raised its score, or the one it passes only
+    /// if the edit lowered that one's: an edit moves priorities the way it moved the settings.
+    /// </summary>
+    internal static bool ShouldAdoptInferredPriorityOrder(
         IReadOnlyList<string> current,
         IReadOnlyList<string> inferred,
         IReadOnlyDictionary<string, int> scores,
-        int margin)
+        int margin,
+        IReadOnlyDictionary<string, int>? scoresBefore = null)
     {
         if (inferred.Count == 0 || current.SequenceEqual(inferred, StringComparer.OrdinalIgnoreCase))
         {
@@ -23873,10 +23876,15 @@ public partial class MainViewModel : ViewModelBase
         }
 
         int Score(string name) => scores.TryGetValue(name, out var value) ? value : 0;
+        int Delta(string name) => scoresBefore is null
+            ? 0
+            : Score(name) - (scoresBefore.TryGetValue(name, out var was) ? was : 0);
+        bool EditAllows(string rising, string falling)
+            => scoresBefore is null || Delta(rising) > 0 || Delta(falling) < 0;
 
         if (!inferred[0].Equals(current[0], StringComparison.OrdinalIgnoreCase))
         {
-            return Score(inferred[0]) >= Score(current[0]) + margin;
+            return Score(inferred[0]) >= Score(current[0]) + margin && EditAllows(inferred[0], current[0]);
         }
 
         for (var i = 0; i < current.Count; i++)
@@ -23889,7 +23897,7 @@ public partial class MainViewModel : ViewModelBase
 
             var displaced = current[i];
             var occupant = inferred[i];
-            if (Score(occupant) >= Score(displaced) + margin)
+            if (Score(occupant) >= Score(displaced) + margin && EditAllows(occupant, displaced))
             {
                 return true;
             }

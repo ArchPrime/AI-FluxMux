@@ -70,6 +70,10 @@ public partial class PortForwardingRulesViewModel : ObservableObject
     [ObservableProperty]
     public partial bool RepeatedCommandEnabled { get; set; } = true;
 
+    /// <summary>Auto steer, independent of the Port rules tick box (see <see cref="PortForwardingRules.AutoSteerEnabled"/>).</summary>
+    [ObservableProperty]
+    public partial bool AutoSteerEnabled { get; set; } = true;
+
     [ObservableProperty]
     public partial bool DiagnosticDumpEnabled { get; set; } = true;
 
@@ -221,6 +225,7 @@ public partial class PortForwardingRulesViewModel : ObservableObject
             HangEnabled = HangEnabled,
             Loading503Enabled = Loading503Enabled,
             RepeatedCommandEnabled = RepeatedCommandEnabled,
+            AutoSteerEnabled = AutoSteerEnabled,
             DiagnosticDumpEnabled = DiagnosticDumpEnabled,
             CompactWatermarkPercent = (int)CompactWatermarkPercent,
             CompactKeepTurns = (int)CompactKeepTurns,
@@ -274,7 +279,24 @@ public partial class PortForwardingRulesViewModel : ObservableObject
         _apply(rules);
         StatusText = value
             ? "Port rules on. They apply to the next Client-app turn."
-            : "Port rules off. Client-app turns go to llama-server without intervention.";
+            : "Port rules off. Client-app turns go to llama-server without pauses or shortening"
+              + (AutoSteerEnabled ? "; Auto steer still adds notes when the model loops or keeps failing." : ".");
+    }
+
+    /// <summary>Saved at once, like the Port rules tick box it sits beside.</summary>
+    partial void OnAutoSteerEnabledChanged(bool value)
+    {
+        if (_hydrating)
+        {
+            return;
+        }
+
+        var rules = ToRules();
+        _store.Save(rules);
+        _apply(rules);
+        StatusText = value
+            ? "Auto steer on. When the model loops or keeps failing, it is told so before any pause."
+            : "Auto steer off. Only the Port rules pauses act on loops.";
     }
 
     [RelayCommand]
@@ -327,6 +349,7 @@ public partial class PortForwardingRulesViewModel : ObservableObject
         HangEnabled = live.HangEnabled;
         Loading503Enabled = live.Loading503Enabled;
         RepeatedCommandEnabled = live.RepeatedCommandEnabled;
+        AutoSteerEnabled = live.AutoSteerEnabled;
         DiagnosticDumpEnabled = live.DiagnosticDumpEnabled;
         CompactWatermarkPercent = live.CompactWatermarkPercent;
         CompactKeepTurns = live.CompactKeepTurns;

@@ -561,24 +561,29 @@
                                                                                 <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Max image edge" />
                                                                                 <NumericUpDown Grid.Column="3" Minimum="256" Maximum="4096" Increment="64" Value="{Binding LocalVariantVisionMaxImageEdge}" ToolTip.Tip="Largest picture size (longest side, in pixels) this model will accept. Bigger reserves more graphics memory, so AutoTune and Context have less headroom." />
                                                                             </Grid>
-                                                                            <!-- The file list takes its file name's width and the path box the rest: as "*,2*" the name was cut off ("mmproj-F16.g", 27 Nov). -->
-                                                                            <Grid ColumnDefinitions="Auto,Auto,*,Auto" ColumnSpacing="8">
+                                                                            <!-- Projector file: the list and Browse on one line, the path box under it at full width.
+                                                                                 A long file name ("mmproj-Qwen3.8-27B-NVFP4-BF16.gguf (same folder)") left no room for the path
+                                                                                 box between them, and "*,2*" columns cut the name off instead (28 Nov). -->
+                                                                            <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6">
                                                                                 <TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Projector file" />
                                                                                 <ComboBox Grid.Column="1"
+                                                                                          HorizontalAlignment="Stretch"
                                                                                           VerticalAlignment="Center"
                                                                                           ItemsSource="{Binding LocalVariantVisionProjectorChoices}"
                                                                                           SelectedItem="{Binding SelectedLocalVariantVisionProjectorChoice}"
                                                                                           ToolTip.Tip="Picture helper files in the models folder that look like they belong to this model. Unrelated files are hidden. Browse if yours is missing." />
-                                                                                <TextBox Grid.Column="2"
-                                                                                         VerticalAlignment="Center"
-                                                                                         Text="{Binding LocalVariantVisionProjectorPath}"
-                                                                                         PlaceholderText="Or paste a projector path"
-                                                                                         ToolTip.Tip="Usually filled from the list. Browse only if the matching picture-helper file was not found." />
-                                                                                <Button Grid.Column="3"
+                                                                                <Button Grid.Column="2"
                                                                                         VerticalAlignment="Center"
                                                                                         Content="Browse"
                                                                                         Command="{Binding BrowseVisionProjectorCommand}"
                                                                                         ToolTip.Tip="Pick the picture-helper file if it was not found automatically." />
+                                                                                <TextBox Grid.Row="1"
+                                                                                         Grid.Column="1"
+                                                                                         Grid.ColumnSpan="2"
+                                                                                         VerticalAlignment="Center"
+                                                                                         Text="{Binding LocalVariantVisionProjectorPath}"
+                                                                                         PlaceholderText="Or paste a projector path"
+                                                                                         ToolTip.Tip="Usually filled from the list. Browse only if the matching picture-helper file was not found." />
                                                                             </Grid>
                                                                             <TextBlock FontSize="{DynamicResource FluxFontSizeCaption}" TextWrapping="Wrap" Opacity="0.9" Text="{Binding LocalVariantImagesHeadroomNote}" />
                                                                         </StackPanel>
@@ -1745,6 +1750,12 @@
                                                               IsChecked="{Binding PortRules.Enabled}"
                                                               ToolTip.Tip="Detailed control over how a local Client-app chat is sent on to llama-server, affecting management of context compaction, tool loops and hangs. Uncheck for default settings (recommended). Cloud models do not use these rules." />
                                                     <TextBlock VerticalAlignment="Center" Opacity="0.75" Text="Advanced settings" />
+                                                    <!-- Auto steer works whether Port rules are on or off, so it sits beside their
+                                                         tick box rather than inside the group they switch off (28 Nov). -->
+                                                    <CheckBox VerticalAlignment="Center"
+                                                              Content="Auto steer"
+                                                              IsChecked="{Binding PortRules.AutoSteerEnabled}"
+                                                              ToolTip.Tip="When the model in the Client app loops or keeps failing, AI-FluxMux adds a note to its next request saying what it saw and what to do instead: a failed call's likely fix (too large, text not found, path not found, too slow...), a command that keeps repeating, or a long run of tool calls since your last message, where it asks the model to stop and report to you. Port rules pause the turn only if that does not work. Works with Port rules on or off; the notes carry only what AI-FluxMux observed." />
                                                 </StackPanel>
                                             </Expander.Header>
                                             <Expander.Resources>
@@ -2158,7 +2169,7 @@
                                         <TextBlock TextWrapping="Wrap"
                                                    FontSize="{DynamicResource FluxFontSizeCaption}"
                                                    Opacity="0.85"
-                                                   Text="When Port rules are on, they watch for conditions that can derail a Client-app turn on local models, and can pause runaway looping. Turn them off to simply forward turns to llama-server without intervention. Cloud models do not use Port rules." />
+                                                   Text="When Port rules are on, they watch for conditions that can derail a Client-app turn on local models, and can pause runaway looping. Turn them off to simply forward turns to llama-server without intervention, apart from Auto steer's notes while it is ticked. Cloud models do not use Port rules." />
                                     </StackPanel>
                                 </Border>
 

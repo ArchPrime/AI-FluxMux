@@ -67,7 +67,9 @@ public sealed class PortRulesTelemetryTests
         vm.MillAtOmittedEnabled = true;
         vm.Enabled = false;
         Assert.Equal(string.Empty, vm.MillCheckTally);
-        Assert.Contains("without intervention", vm.StatusText, StringComparison.Ordinal);
+        // With Auto steer on (the default) its notes still apply, so the status says so (28 Nov).
+        Assert.Contains("without pauses or shortening", vm.StatusText, StringComparison.Ordinal);
+        Assert.Contains("Auto steer still adds notes", vm.StatusText, StringComparison.Ordinal);
         Directory.Delete(dir, recursive: true);
     }
 

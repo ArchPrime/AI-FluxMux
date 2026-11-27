@@ -152,6 +152,7 @@ public sealed class FluxMuxGatewayHost : IDisposable
     private GenerationSpeedTracker? _generationSpeed;
     private readonly object _portRulesLock = new();
     private PortForwardingRules _portRules = PortForwardingRules.Defaults;
+    private readonly AutoSteer _autoSteer = new();
     private PortRulesTelemetry _lastPortRulesTelemetry = PortRulesTelemetry.Empty;
     private string _lastPortRulesDiagnostic = string.Empty;
     private DateTime _lastHangTallyUtc;
@@ -1487,8 +1488,9 @@ public sealed class FluxMuxGatewayHost : IDisposable
             // A repeated command: the first repeat is the model's to fix, so tell it rather than
             // the operator — a note on the newest tool result saying the same command will give
             // the same answer. Only when it repeats again after that note is the turn paused.
+            // The note goes with Auto steer or the Repeated command rule; only the rule pauses.
             var repeatedCommand = string.Empty;
-            var repeatRun = routeKind == "local" && portRules.RepeatedCommandEnabled
+            var repeatRun = routeKind == "local" && (portRules.RepeatedCommandEnabled || portRules.AutoSteerEnabled)
                 ? LocalChatPayloadSignals.CountRepeatedToolCommand(payload, out repeatedCommand)
                 : 0;
             if (repeatRun >= 2)
@@ -1507,21 +1509,62 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 }
             }
 
-            // Several failed tool calls in a row, even with different commands: tell the model to
-            // read the errors and change approach. Never pauses — it is the model's to fix, and
-            // Cline itself stops a task after six errors in a row.
-            if (routeKind == "local")
+            // Failed tool calls in a row, even with different commands: tell the model what the
+            // errors mean and what to do instead (Auto steer). Never pauses — it is the model's to
+            // fix, and Cline itself stops a task after six errors in a row. Three in a row, or two
+            // of the same known kind (text not found, too large...), get the note.
+            if (routeKind == "local" && portRules.AutoSteerEnabled)
             {
-                var failedRun = LocalChatPayloadSignals.CountTrailingFailedToolResults(payload);
-                if (failedRun >= LocalChatPayloadSignals.FailedToolRunNoteAt
-                    && LocalChatPayloadSignals.AppendNoteToNewestMessage(payload, LocalChatPayloadSignals.FailedToolRunNote(failedRun)))
+                var failures = LocalChatPayloadSignals.TrailingFailedToolResults(payload);
+                if (LocalChatPayloadSignals.FailuresNeedNote(failures)
+                    && LocalChatPayloadSignals.AppendNoteToNewestMessage(payload, LocalChatPayloadSignals.FailedToolRunNote(failures)))
                 {
-                    Log("local chat: the last " + failedRun.ToString(CultureInfo.InvariantCulture)
-                        + " tool calls failed; told the model to read the errors and change approach");
+                    Log("local chat: the last " + failures.Count.ToString(CultureInfo.InvariantCulture)
+                        + " tool calls failed (" + LocalChatPayloadSignals.ClassifyToolFailure(failures[0])
+                        + "); told the model what the errors mean and what to do instead");
                 }
             }
 
-            if (repeatRun >= 3
+            // A long or unproductive run of tool calls since the person's last message (what Mill
+            // check and the Closed-loop ceiling pause): Auto steer first asks the model to stop and
+            // report to the person, and lets the run go on for MillGrace more calls before the
+            // Port rules pause. With Port rules off it only asks. The detectors run with the
+            // configured thresholds whether Port rules are on or off.
+            if (routeKind == "local" && portRules.AutoSteerEnabled && !isProbeRequest)
+            {
+                var steerRules = portRules with
+                {
+                    Enabled = true,
+                    MillAtOmittedEnabled = true,
+                    ClosedLoopLookbackEnabled = true,
+                    ClosedLoopCeilingEnabled = true,
+                    ObserveOnlyMillEnabled = true,
+                };
+                if (LocalToolResultClearing.ShouldHaltAsToolMill(payload, steerRules))
+                {
+                    var steerKey = ClientAppDetector.FromRequest(payload, context.Request.UserAgent, context.Request.Headers["X-Title"]) ?? "Client app";
+                    var steeredAt = _autoSteer.MillSteeredAt(steerKey, toolsThisTurn);
+                    var withinGrace = AutoSteer.WithinMillGrace(steeredAt, toolsThisTurn);
+                    var overCeiling = toolsThisTurn >= steerRules.Clamp().ClosedLoopRunawayOmittedResults;
+                    if (LocalChatPayloadSignals.AppendNoteToNewestMessage(
+                            payload,
+                            AutoSteer.StopAndReportNote(toolsThisTurn, overCeiling, firmer: toolsThisTurn > steeredAt)))
+                    {
+                        Log("auto steer: " + toolsThisTurn.ToString(CultureInfo.InvariantCulture)
+                            + " tool calls since the person's last message" + (overCeiling ? "" : ", not looking like progress")
+                            + "; asked the model to stop and report"
+                            + (withinGrace ? " (pause held for " + (AutoSteer.MillGrace - (toolsThisTurn - steeredAt)).ToString(CultureInfo.InvariantCulture) + " more calls)" : " again"));
+                    }
+
+                    if (withinGrace)
+                    {
+                        haltAsToolMill = false;
+                    }
+                }
+            }
+
+            if (repeatRun >= (portRules.AutoSteerEnabled ? AutoSteer.RepeatPauseWithSteer : AutoSteer.RepeatPauseWithoutSteer)
+                && portRules.RepeatedCommandEnabled
                 && FluxMuxGatewayRouting.AllowsOperatorRouting(forceRoute))
             {
                 Log("local chat: Client app repeated the same command: " + Truncate(repeatedCommand, 80));

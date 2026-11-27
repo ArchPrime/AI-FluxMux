@@ -4030,13 +4030,19 @@ the shell, such as cat, type, dir, ls or git status, counts as reading.</p>
 <td><strong>Repeated command</strong></td>
 <td>Latest shell commands</td>
 <td>The same command again</td>
-<td>Tells the model first that the result will not change. Pauses this Client-app turn only if it runs the command a third time.</td>
+<td>Tells the model first that the result will not change. Pauses this Client-app turn only if it runs the command a third time, or a fourth with <strong>Auto steer</strong> ticked.</td>
 </tr>
 <tr>
-<td><strong>Failed calls</strong></td>
+<td><strong>Failed calls</strong> (Auto steer)</td>
 <td>Latest tool results</td>
-<td>Three or more failed in a row, even with different commands</td>
-<td>Tells the model to read the errors and change approach. Does not pause.</td>
+<td>Three or more failed in a row, even with different commands, or two in a row that failed the same known way</td>
+<td>Tells the model what the errors mean and what to do instead: write in smaller pieces when a call was too large, reread the file when the text to replace was not found, check the path, narrow a search that took too long. Does not pause.</td>
+</tr>
+<tr>
+<td><strong>Long run</strong> (Auto steer)</td>
+<td>Tools since your last message</td>
+<td>What Mill check or the Closed-loop ceiling would pause</td>
+<td>Asks the model to stop and tell you what it has done, what is blocking it and what it proposes. The Port rules pause follows only if it makes 16 more tool calls.</td>
 </tr>
 <tr>
 <td><strong>Diagnostic dump</strong></td>

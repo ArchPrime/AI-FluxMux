@@ -269,15 +269,31 @@ public static class LocalChatPayloadSignals
     /// not catch it; what helps is telling the model to read the errors and change approach.
     /// </summary>
     public static string FailedToolRunNote(int failed)
-        => "Note from AI-FluxMux: your last "
-           + failed.ToString(System.Globalization.CultureInfo.InvariantCulture)
-           + " tool calls all failed. "
-           + (failed >= 5
-               ? "Stop and read the error messages above before doing anything else. "
-               : "Read the error messages above before the next step. ")
-           + "Trying the same thing again, or a small variation of it, is unlikely to work. "
-           + "Change approach: check that the path, command or tool you are using exists and is "
-           + "spelled correctly, or take a smaller step that you can confirm works.";
+        => FailedToolRunNote(Enumerable.Repeat(string.Empty, failed).ToList());
+
+    /// <summary>
+    /// The note for the trailing failures (newest first): the count, what the latest failure means
+    /// and what to do instead where its kind is known, and the general advice otherwise. Only what
+    /// AI-FluxMux observed (counts and error kinds), none of the model's words.
+    /// </summary>
+    public static string FailedToolRunNote(IReadOnlyList<string> failures)
+    {
+        var failed = failures.Count;
+        var kind = failed > 0 ? ClassifyToolFailure(failures[0]) : ToolFailureKind.Other;
+        var sameKind = kind != ToolFailureKind.Other && failures.All(f => ClassifyToolFailure(f) == kind);
+        var advice = FailureAdvice(kind);
+        return "Note from AI-FluxMux: your last "
+               + failed.ToString(System.Globalization.CultureInfo.InvariantCulture)
+               + " tool calls all failed" + (sameKind ? " the same way" : string.Empty) + ". "
+               + (failed >= 5
+                   ? "Stop and read the error messages above before doing anything else. "
+                   : "Read the error messages above before the next step. ")
+               + (advice.Length > 0
+                   ? advice + " Trying the same thing again, or a small variation of it, is unlikely to work."
+                   : "Trying the same thing again, or a small variation of it, is unlikely to work. "
+                     + "Change approach: check that the path, command or tool you are using exists and is "
+                     + "spelled correctly, or take a smaller step that you can confirm works.");
+    }
 
     /// <summary>
     /// Tool results since the latest message the person wrote: how long the model has been
@@ -324,13 +340,17 @@ public static class LocalChatPayloadSignals
     /// succeeded, or at a message the person wrote (new guidance resets the run).
     /// </summary>
     public static int CountTrailingFailedToolResults(JsonObject payload)
+        => TrailingFailedToolResults(payload).Count;
+
+    /// <summary>The texts of the newest tool results that failed in a row, newest first (see <see cref="CountTrailingFailedToolResults"/>).</summary>
+    public static List<string> TrailingFailedToolResults(JsonObject payload)
     {
+        var failures = new List<string>();
         if (payload["messages"] is not JsonArray messages)
         {
-            return 0;
+            return failures;
         }
 
-        var failed = 0;
         for (var i = messages.Count - 1; i >= 0; i--)
         {
             if (messages[i] is not JsonObject message)
@@ -340,12 +360,13 @@ public static class LocalChatPayloadSignals
 
             if (LocalToolResultClearing.IsToolResult(message))
             {
-                if (!IsFailedToolResult(MessageText(message)))
+                var text = MessageText(message);
+                if (!IsFailedToolResult(text))
                 {
                     break;
                 }
 
-                failed++;
+                failures.Add(text);
                 continue;
             }
 
@@ -356,7 +377,84 @@ public static class LocalChatPayloadSignals
             }
         }
 
-        return failed;
+        return failures;
+    }
+
+    /// <summary>What kind of failure a tool result reports, where the fix is known (28 Nov).</summary>
+    public enum ToolFailureKind
+    {
+        Other,
+        TooLarge,
+        TextNotFound,
+        TextNotUnique,
+        FileExists,
+        PathNotFound,
+        TooSlow,
+        PlanMode,
+    }
+
+    // Matched against the error texts Client apps return. Taken from the operator's 108 Cline chats
+    // (28 Nov): search timed out or aborted 751, edit text not found 309, command timed out or
+    // aborted 272, editor input too large 208, file exists but old_text missing 102, file not
+    // found 45, text found more than once 44, blocked in plan mode 21; plus "emitted invalid JSON
+    // arguments", which is a too-large call cut off mid-way. Order matters: the first match wins.
+    private static readonly (ToolFailureKind Kind, Regex Pattern)[] FailurePatterns =
+    [
+        (ToolFailureKind.PlanMode, new Regex(@"plan mode", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        (ToolFailureKind.TooLarge, new Regex(@"input too large|exceeding the recommended limit|invalid JSON arguments|could not be parsed as JSON|unterminated string|unexpected end of (JSON|input)", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        (ToolFailureKind.TextNotUnique, new Regex(@"multiple occurrences|more than one (match|occurrence)|found \d+ (matches|occurrences)", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        (ToolFailureKind.TextNotFound, new Regex(@"text not found|no replacement performed|old_text (was )?not found|could not find the text|search string not found", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        (ToolFailureKind.FileExists, new Regex(@"already exists", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        (ToolFailureKind.PathNotFound, new Regex(@"ENOENT|no such file or directory|cannot find path|could not find (a part of )?the path|does not exist", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+        (ToolFailureKind.TooSlow, new Regex(@"timed out|timeout|was aborted|execution aborted|operation aborted", RegexOptions.IgnoreCase | RegexOptions.Compiled)),
+    ];
+
+    public static ToolFailureKind ClassifyToolFailure(string? text)
+    {
+        var value = text ?? string.Empty;
+        foreach (var (kind, pattern) in FailurePatterns)
+        {
+            if (pattern.IsMatch(value))
+            {
+                return kind;
+            }
+        }
+
+        return ToolFailureKind.Other;
+    }
+
+    /// <summary>What to do instead, for a failure of <paramref name="kind"/>; empty for <see cref="ToolFailureKind.Other"/>.</summary>
+    public static string FailureAdvice(ToolFailureKind kind)
+        => kind switch
+        {
+            ToolFailureKind.TooLarge => "The tool call was too large, or its arguments were cut off and are not valid JSON. Do not send a whole file in one call: make the change in several smaller calls, a few dozen lines each, or create the file in parts.",
+            ToolFailureKind.TextNotFound => "The text to replace is not in the file exactly as you wrote it. Read the file again, since it may have changed, and copy the text to replace exactly, including spaces and line breaks.",
+            ToolFailureKind.TextNotUnique => "The text to replace occurs more than once in the file. Include a few more surrounding lines so it matches only once.",
+            ToolFailureKind.FileExists => "That file already exists. To change part of it, give the exact text to replace; to rewrite it, edit it in parts.",
+            ToolFailureKind.PathNotFound => "That path does not exist. List the folder first and check the exact path and spelling before using it.",
+            ToolFailureKind.TooSlow => "The command or search took too long and was stopped. Narrow it: search one folder or one file pattern rather than everything, or split the command into shorter steps.",
+            ToolFailureKind.PlanMode => "You are in plan mode, where changes are blocked. Do not retry: tell the person what you would change and ask them to switch to act mode.",
+            _ => string.Empty,
+        };
+
+    /// <summary>Two failures in a row of the same known kind get a note, before the general three.</summary>
+    public const int SameKindFailureNoteAt = 2;
+
+    /// <summary>True when the trailing failures (newest first) call for a note.</summary>
+    public static bool FailuresNeedNote(IReadOnlyList<string> failures)
+    {
+        if (failures.Count >= FailedToolRunNoteAt)
+        {
+            return true;
+        }
+
+        if (failures.Count < SameKindFailureNoteAt)
+        {
+            return false;
+        }
+
+        var kind = ClassifyToolFailure(failures[0]);
+        return kind != ToolFailureKind.Other && failures.Take(SameKindFailureNoteAt).All(f => ClassifyToolFailure(f) == kind);
     }
 
     /// <summary>

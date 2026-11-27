@@ -48,6 +48,13 @@ public sealed record PortForwardingRules
     public bool RepeatedCommandEnabled { get; init; } = true;
     public bool DiagnosticDumpEnabled { get; init; } = true;
 
+    /// <summary>
+    /// Auto steer: notes to the model when it loops or keeps failing, before any pause (28 Nov).
+    /// Independent of Port rules, so it also works when they are off: the Port rules master
+    /// switch means "forward without pausing", and steering adds only a note.
+    /// </summary>
+    public bool AutoSteerEnabled { get; init; } = true;
+
     /// <summary>Wizard-controlled auto-compaction. Independent of Port rules.</summary>
     public bool AutoCompactEnabled { get; init; } = true;
     /// <summary>Trigger as a fraction of the model's native context window (0.6-0.95).</summary>
