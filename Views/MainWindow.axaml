@@ -456,7 +456,7 @@
                                                                                   <CheckBox IsChecked="{Binding LocalVibeStateEnabled}" IsEnabled="{Binding VibeStateControlsEnabled}"
                                                                                             VerticalAlignment="Center"
                                                                                             Content="Keep session vibe (VIBE_STATE.md)"
-                                                                                            ToolTip.Tip="Keeps a short note of this chat's task, progress and next step, and passes it to the model each turn so it keeps its place after the chat is trimmed or the model restarts. Each chat keeps its own note. Hail Mary uses it to rescue a chat that ran out of room. Applies from the next message." />
+                                                                                            ToolTip.Tip="Keeps a short note of this chat's task and your latest messages, in your own words, and passes it to the model each turn so it keeps its place after the chat is trimmed or the model restarts. Each chat keeps its own note. Hail Mary uses it to rescue a chat that ran out of room. Applies from the next message." />
                                                                               </StackPanel>
 
                                                                               <TextBlock Text="Context compaction controlled by:" FontSize="{DynamicResource FluxFontSizeCaption}" Margin="0,4,0,0" />

@@ -139,22 +139,17 @@ public sealed class AutoTunePromptReadingAndRescueTests
     }
 
     [Fact]
-    public void Rescue_block_includes_decisions_and_dead_ends_and_stays_bounded()
+    public void Rescue_block_carries_the_task_and_stays_bounded()
     {
+        // The rescue block no longer carries the model's decisions or dead ends (27 Nov).
         var log = new EssenceLog(new FakeContextIo(), "/tmp/essence.json");
-        log.UpdateCurrent("Speed up prompt reading", "benchmarked ub sizes", "commit", "");
-        log.RecordDecision("Micro-batch = Batch, capped at 1024");
-        log.RecordDeadEnd("ub 2048 was no faster");
-        for (var i = 0; i < 200; i++)
-        {
-            log.RecordDecision("filler decision number " + i + " " + new string('x', 200));
-        }
-
+        log.UpdateCurrent("Speed up prompt reading", "the person's latest messages, oldest first: \"try ub 1024\"", "", "");
         var block = log.Load().ToRescueBlock();
 
-        Assert.Contains("Key decisions:", block);
-        Assert.Contains("Dead ends (do not retry):", block);
-        Assert.Contains("ub 2048 was no faster", block);
+        Assert.Contains("Speed up prompt reading", block);
+        Assert.Contains("try ub 1024", block);
+        Assert.DoesNotContain("Key decisions:", block);
+        Assert.DoesNotContain("Dead ends", block);
         Assert.True(block.Length <= 3_001, "length " + block.Length);
     }
 }

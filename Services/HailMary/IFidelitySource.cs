@@ -92,20 +92,17 @@ public sealed class FidelitySnapshot
         sb.AppendLine("## State");
         sb.AppendLine(Dash(State));
         sb.AppendLine();
-        sb.AppendLine("## Next");
-        sb.AppendLine(Dash(Next));
-        sb.AppendLine();
-
         if (!string.IsNullOrWhiteSpace(KeyDecisions))
         {
-            sb.AppendLine("## Key decisions & findings");
+            // The model's own words (27 Nov): labelled, so a mistaken conclusion is not read as settled.
+            sb.AppendLine("## What the model concluded (it may have been wrong; the person's messages override it)");
             sb.AppendLine(KeyDecisions.Trim());
             sb.AppendLine();
         }
 
         if (!string.IsNullOrWhiteSpace(DeadEnds))
         {
-            sb.AppendLine("## Dead ends (do not retry)");
+            sb.AppendLine("## Tool calls that failed");
             sb.AppendLine(DeadEnds.Trim());
             sb.AppendLine();
         }

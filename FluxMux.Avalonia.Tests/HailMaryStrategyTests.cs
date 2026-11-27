@@ -29,8 +29,8 @@ public sealed class HailMaryStrategyTests
         Assert.Contains("Fix the bug", summary);
         Assert.Contains("## State", summary);
         Assert.Contains("Done: read the code", summary);
-        Assert.Contains("## Next", summary);
-        Assert.Contains("Run the tests", summary);
+        // Next came from the model's reply and is left out (27 Nov).
+        Assert.DoesNotContain("## Next", summary);
         Assert.Contains("## Files", summary);
         Assert.Contains("src/Foo.cs", summary);
         Assert.Contains("## Recent turns", summary);
@@ -231,8 +231,10 @@ public sealed class HailMaryStrategyTests
             Assert.Equal("Wider mission next", snapshot.Next);
             // The essence's durable history wins over .messages.json extraction.
             Assert.Contains("pivoted to wider mission", snapshot.GoalEvolution, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("chose approach X over Y", snapshot.KeyDecisions, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("approach Z failed", snapshot.DeadEnds, StringComparison.OrdinalIgnoreCase);
+            // Decisions and dead ends an old essence file still holds were the model's words and
+            // are not carried (27 Nov); with no messages there are none.
+            Assert.DoesNotContain("chose approach X over Y", snapshot.KeyDecisions, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("approach Z failed", snapshot.DeadEnds, StringComparison.OrdinalIgnoreCase);
             // The essence's Files list wins.
             Assert.Contains("MainViewModel.cs", snapshot.Files, StringComparison.OrdinalIgnoreCase);
             // The source label reflects that the essence was used.

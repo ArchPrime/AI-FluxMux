@@ -57,8 +57,8 @@ public sealed class VibeStatePlusMessagesFidelitySource : IFidelitySource
             snapshot.Next = essence.Current.Next;
             snapshot.Files = essence.Files.Count > 0 ? string.Join(", ", essence.Files) : essence.Current.Files;
             snapshot.GoalEvolution = FormatEssenceEvolution(essence.Evolution);
-            snapshot.KeyDecisions = FormatEssenceDecisions(essence.Decisions);
-            snapshot.DeadEnds = FormatEssenceDeadEnds(essence.DeadEnds);
+            // The essence no longer keeps decisions or dead ends (27 Nov): they were the model's
+            // own words. The model's conclusions come from the messages below, labelled as such.
         }
         else
         {
@@ -77,14 +77,15 @@ public sealed class VibeStatePlusMessagesFidelitySource : IFidelitySource
             // Recent turns are ALWAYS pulled from the .messages.json (verbatim detail of the
             // most recent exchange) — the essence does not carry verbatim turns.
             snapshot.RecentTurns = conv.RecentTurns;
-            // If the essence did not provide the evolution/decisions/dead-ends (no essence file),
-            // fall back to extracting them from the .messages.json as before.
+            // The goal's evolution comes from the essence when it has one. The model's conclusions
+            // and the failed tool calls always come from the messages.
             if (!essenceHasContent)
             {
                 snapshot.GoalEvolution = ExtractGoalEvolution(conv.UserMessages);
-                snapshot.KeyDecisions = ExtractKeyDecisions(conv.AssistantTexts);
-                snapshot.DeadEnds = ExtractDeadEnds(conv.FailedToolNotes);
             }
+
+            snapshot.KeyDecisions = ExtractKeyDecisions(conv.AssistantTexts);
+            snapshot.DeadEnds = ExtractDeadEnds(conv.FailedToolNotes);
         }
 
         snapshot.SourceLabel = (essenceHasContent ? "ESSENCE" : "VIBE_STATE")
@@ -138,48 +139,6 @@ public sealed class VibeStatePlusMessagesFidelitySource : IFidelitySource
         }
 
         return Truncate(sb.ToString().TrimEnd(), MaxGoalEvolutionChars);
-    }
-
-    /// <summary>Formats the essence's key decisions into the "## Key decisions" body.</summary>
-    private static string FormatEssenceDecisions(System.Collections.Generic.List<string> decisions)
-    {
-        if (decisions.Count == 0)
-        {
-            return string.Empty;
-        }
-
-        var sb = new System.Text.StringBuilder();
-        foreach (var d in decisions)
-        {
-            sb.AppendLine("• " + Truncate(d.Trim(), 500));
-            if (sb.Length > MaxKeyDecisionsChars)
-            {
-                break;
-            }
-        }
-
-        return Truncate(sb.ToString().TrimEnd(), MaxKeyDecisionsChars);
-    }
-
-    /// <summary>Formats the essence's dead ends into the "## Dead ends" body.</summary>
-    private static string FormatEssenceDeadEnds(System.Collections.Generic.List<string> deadEnds)
-    {
-        if (deadEnds.Count == 0)
-        {
-            return string.Empty;
-        }
-
-        var sb = new System.Text.StringBuilder();
-        foreach (var d in deadEnds)
-        {
-            sb.AppendLine("- " + Truncate(d.Trim(), 300));
-            if (sb.Length > MaxDeadEndsChars)
-            {
-                break;
-            }
-        }
-
-        return Truncate(sb.ToString().TrimEnd(), MaxDeadEndsChars);
     }
 
     private static void ApplyHeadroomBudget(FidelitySnapshot s, double targetFreeFraction)

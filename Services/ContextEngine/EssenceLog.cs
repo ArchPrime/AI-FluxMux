@@ -41,8 +41,6 @@ public sealed record EssenceIntentShift(
 public sealed class EssenceLog
 {
     private const int MaxEvolutionEntries = 64;   // bound the history so the file cannot balloon
-    private const int MaxDecisions = 64;
-    private const int MaxDeadEnds = 64;
     private const int MaxFiles = 128;
     private const int MaxIntentShifts = 64;        // bound the intent-shift candidates (verbatim)
     private const int MaxEntryChars = 2_000;      // cap any single free-text field
@@ -158,42 +156,6 @@ public sealed class EssenceLog
         Save(e);
     }
 
-    /// <summary>Appends a key decision / finding. Bounded. Never throws.</summary>
-    public void RecordDecision(string decision)
-    {
-        if (string.IsNullOrWhiteSpace(decision))
-        {
-            return;
-        }
-
-        var e = Load();
-        e.Decisions.Add(Truncate(decision));
-        while (e.Decisions.Count > MaxDecisions)
-        {
-            e.Decisions.RemoveAt(0);
-        }
-
-        Save(e);
-    }
-
-    /// <summary>Appends a dead end / failed approach (what NOT to retry). Bounded. Never throws.</summary>
-    public void RecordDeadEnd(string deadEnd)
-    {
-        if (string.IsNullOrWhiteSpace(deadEnd))
-        {
-            return;
-        }
-
-        var e = Load();
-        e.DeadEnds.Add(Truncate(deadEnd));
-        while (e.DeadEnds.Count > MaxDeadEnds)
-        {
-            e.DeadEnds.RemoveAt(0);
-        }
-
-        Save(e);
-    }
-
     /// <summary>Records a key file/symbol (distinct, bounded). Never throws.</summary>
     public void RecordFile(string file)
     {
@@ -278,8 +240,6 @@ public sealed class Essence
     /// steered the goal), most recent last. Bounded. The reading model judges each; the mechanical
     /// layer only captures the raw material.</summary>
     public List<EssenceIntentShift> IntentShifts { get; set; } = new();
-    public List<string> Decisions { get; set; } = new();
-    public List<string> DeadEnds { get; set; } = new();
     public List<string> Files { get; set; } = new();
     public int Version { get; set; } = 1;
 
@@ -296,8 +256,6 @@ public sealed class Essence
         !Current.IsEmpty
         || Evolution.Count > 0
         || IntentShifts.Count > 0
-        || Decisions.Count > 0
-        || DeadEnds.Count > 0
         || Files.Count > 0;
 
     /// <summary>Renders the essence into a Cline-style "Context summary" block (the compaction
@@ -341,31 +299,6 @@ public sealed class Essence
         sb.AppendLine("## State");
         sb.AppendLine(Dash(Current.State));
         sb.AppendLine();
-        sb.AppendLine("## Next");
-        sb.AppendLine(Dash(Current.Next));
-        sb.AppendLine();
-
-        if (Decisions.Count > 0)
-        {
-            sb.AppendLine("## Key decisions & findings");
-            foreach (var d in Decisions)
-            {
-                sb.AppendLine("- " + d.Trim());
-            }
-
-            sb.AppendLine();
-        }
-
-        if (DeadEnds.Count > 0)
-        {
-            sb.AppendLine("## Dead ends (do not retry)");
-            foreach (var d in DeadEnds)
-            {
-                sb.AppendLine("- " + d.Trim());
-            }
-
-            sb.AppendLine();
-        }
 
         sb.AppendLine("## Files");
         sb.AppendLine(Dash(Files.Count > 0 ? string.Join(", ", Files) : Current.Files));
@@ -384,22 +317,8 @@ public sealed class Essence
     public string ToRescueBlock(int maxChars = 3_000)
     {
         var sb = new System.Text.StringBuilder(ToReinjectionBlock());
-        void Section(string title, List<string> items)
-        {
-            if (items.Count == 0)
-            {
-                return;
-            }
-
-            sb.AppendLine(title);
-            foreach (var item in items.Skip(Math.Max(0, items.Count - 8)))
-            {
-                sb.AppendLine("- " + TruncateForReinjection(item, 240));
-            }
-        }
-
-        Section("Key decisions:", Decisions);
-        Section("Dead ends (do not retry):", DeadEnds);
+        // Decisions and dead ends were the model's own words, cut from its replies; handed back
+        // after a cut they repeated a mistaken conclusion as settled (27 Nov). Not re-injected.
         var text = sb.ToString().TrimEnd();
         return text.Length > maxChars ? text[..maxChars].TrimEnd() + "…" : text;
     }
@@ -410,7 +329,6 @@ public sealed class Essence
         sb.AppendLine("[ESSENCE — current session context]");
         sb.AppendLine("Task: " + Dash(Current.Task));
         sb.AppendLine("State: " + Dash(Current.State));
-        sb.AppendLine("Next: " + Dash(Current.Next));
         if (Files.Count > 0)
         {
             sb.AppendLine("Key files: " + string.Join(", ", Files));

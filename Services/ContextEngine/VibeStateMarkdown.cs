@@ -55,7 +55,8 @@ public static class VibeStateMarkdown
         sb.AppendLine("[VIBE STATE — current session context]");
         sb.AppendLine($"Task: {OrDash(state.Task)}");
         sb.AppendLine($"State: {OrDash(state.State)}");
-        sb.AppendLine($"Next: {OrDash(state.Next)}");
+        // Next came from the model's reply and is no longer filled (27 Nov); an old note may
+        // still hold one, which is not handed back as an instruction.
         if (!string.IsNullOrWhiteSpace(state.Files))
         {
             sb.AppendLine($"Key files: {state.Files}");

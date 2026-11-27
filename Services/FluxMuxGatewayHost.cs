@@ -4746,11 +4746,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 return;
             }
 
-            // Find the first user message (the original ask → stable task), the last user message
-            // (the current intent → pivot detection), and the last assistant message (the state).
+            // Find the first user message (the original ask → stable task) and the last user
+            // message (the current intent → pivot detection). Only the person's words go into the
+            // note: see the State comment below.
             string firstUser = string.Empty;
             string lastUser = string.Empty;
-            string lastAssistant = string.Empty;
             for (var i = 0; i < messages.Count; i++)
             {
                 if (messages[i] is not JsonObject msg)
@@ -4772,17 +4772,6 @@ public sealed class FluxMuxGatewayHost : IDisposable
                     if (!string.IsNullOrWhiteSpace(text))
                     {
                         lastUser = text;
-                    }
-                }
-                else if (role == "assistant")
-                {
-                    var text = MessageText(msg);
-                    // AI-FluxMux's own pause notice sits in the chat as an assistant message; it is
-                    // not the model's progress and must not become the session state.
-                    if (!string.IsNullOrWhiteSpace(text)
-                        && !FluxMux.Avalonia.Services.ContextEngine.ConversationText.IsAiFluxMuxNotice(text))
-                    {
-                        lastAssistant = text;
                     }
                 }
             }
@@ -4839,31 +4828,18 @@ public sealed class FluxMuxGatewayHost : IDisposable
                 Log("vibe-state: intent-shift candidate captured (verbatim, " + lastUser.Length + " chars) — " + TruncateForLog(lastUser));
             }
 
-            // Mechanical capture of decisions and dead ends from the last assistant message.
-            // These are the highest-value "meaning" that a lossy compaction destroys, and they
-            // can't be reconstructed from the conversation tail. We look for explicit markers
-            // (decision: / decided / going with / chose / opted for, and dead end / doesn't work /
-            // failed / abandoned / not viable) and record the surrounding text. Conservative:
-            // only records when a marker is found, and dedupes against already-recorded entries.
-            if (essence is not null && !string.IsNullOrWhiteSpace(lastAssistant))
-            {
-                foreach (var decision in ExtractDecisions(lastAssistant))
-                {
-                    essence.RecordDecision(decision);
-                    Log("vibe-state: remembered a decision — \"" + TruncateForLog(decision) + "\"");
-                }
-
-                foreach (var deadEnd in ExtractDeadEnds(lastAssistant))
-                {
-                    essence.RecordDeadEnd(deadEnd);
-                    Log("vibe-state: remembered a dead end (won't retry) — \"" + TruncateForLog(deadEnd) + "\"");
-                }
-            }
-
-            // Build a proper digest (not raw truncations): prefer explicit markers, else a bounded
-            // tail of the last assistant message.
-            var state = ExtractStateDigest(lastAssistant);
-            var next = ExtractNextMarker(lastAssistant, existing.Next);
+            // The note carries only the person's words (27 Nov). Its State used to be a digest of
+            // the model's latest reply and Next a marker from it, and the essence log recorded
+            // "decisions" and "dead ends" from replies; all of it was handed back to the model on
+            // every turn as the session's state. When the model went wrong, the note repeated
+            // the mistake as fact: a Cline chat told to leave the GPU code alone replied "Let me
+            // refocus on the actual issue: the apps listing has stopped working" (the opening
+            // request, hours old), and every later turn was told that was where things stood.
+            // The model's replies are in the chat already, and compaction's summary lists its
+            // conclusions as possibly wrong. Now State is the person's latest messages, which also
+            // keeps the note unchanged between the person's messages (better for the prompt cache).
+            var state = PersonsLatestWords(messages);
+            var next = string.Empty;
 
             var newState = new VibeState
             {
@@ -5157,283 +5133,37 @@ public sealed class FluxMuxGatewayHost : IDisposable
         return set;
     }
 
-    /// <summary>
-    /// Extracts a state digest from the last assistant message: prefers explicit Done/In
-    /// progress/Blocked/Next markers; otherwise a bounded tail of the text. Never returns more
-    /// than ~400 chars.
-    /// </summary>
-    private static string ExtractStateDigest(string assistantText)
-    {
-        if (string.IsNullOrWhiteSpace(assistantText))
-        {
-            return string.Empty;
-        }
-
-        var sb = new System.Text.StringBuilder();
-        foreach (var line in assistantText.Split('\n'))
-        {
-            var trimmed = line.Trim();
-            if (trimmed.StartsWith("Done:", StringComparison.OrdinalIgnoreCase)
-                || trimmed.StartsWith("In progress:", StringComparison.OrdinalIgnoreCase)
-                || trimmed.StartsWith("Blocked:", StringComparison.OrdinalIgnoreCase)
-                || trimmed.StartsWith("Next:", StringComparison.OrdinalIgnoreCase))
-            {
-                if (sb.Length > 0)
-                {
-                    sb.Append(' ');
-                }
-
-                sb.Append(trimmed);
-            }
-        }
-
-        var digest = sb.ToString();
-        if (string.IsNullOrWhiteSpace(digest))
-        {
-            // No explicit markers: take a bounded tail of the text, but collapse whitespace and
-            // strip leading conversational filler so the digest is concise (not a raw transcript
-            // with newlines). The essence should carry the *meaning* of where we are, not the
-            // verbatim last message.
-            var tail = assistantText.Length > 240 ? assistantText[^240..] : assistantText;
-            digest = DistillTask(tail, maxChars: 400);
-        }
-
-        return digest.Length > 400 ? digest[^400..] : digest;
-    }
+    /// <summary>How many of the person's latest messages the session note's State carries.</summary>
+    internal const int NoteLatestMessages = 3;
 
     /// <summary>
-    /// Extracts an explicit Next/TODO marker from the last assistant message; falls back to
-    /// <paramref name="fallback"/> when none is found.
+    /// The person's latest messages (their own words and their answers to the model's questions),
+    /// oldest first, quoted and capped, for the session note's State. A message repeated with only
+    /// its numbers changed counts once. Empty when the person has said nothing yet.
     /// </summary>
-    private static string ExtractNextMarker(string assistantText, string fallback)
+    internal static string PersonsLatestWords(JsonArray messages)
     {
-        if (!string.IsNullOrWhiteSpace(assistantText))
+        var picked = new List<string>();
+        string? newerShape = null;
+        foreach (var (_, text, question) in LocalHistoryCompaction.PersonMessages(messages, 0, messages.Count).Reverse())
         {
-            foreach (var line in assistantText.Split('\n'))
-            {
-                var trimmed = line.Trim();
-                if (trimmed.StartsWith("Next:", StringComparison.OrdinalIgnoreCase)
-                    || trimmed.StartsWith("TODO:", StringComparison.OrdinalIgnoreCase))
-                {
-                    return trimmed.Length > 200 ? trimmed[..200] + "…" : trimmed;
-                }
-            }
-        }
-
-        return fallback;
-    }
-
-    /// <summary>
-    /// Extracts decision markers from the last assistant message. Looks for lines that start with
-    /// or contain explicit decision phrases ("Decision:", "I decided", "We'll use", "Going with",
-    /// "Chose to", "Opted for", "Decided to"). Returns a bounded list of unique decision strings.
-    /// Conservative: only records when a marker is found; returns an empty list otherwise.
-    /// </summary>
-    internal static List<string> ExtractDecisions(string assistantText)
-    {
-        var results = new List<string>();
-        if (string.IsNullOrWhiteSpace(assistantText))
-        {
-            return results;
-        }
-
-        // Decision markers: lines that explicitly state a decision. We match on the *start* of the
-        // line (after trimming leading markdown/bullets) so we capture "Decision: X" or "- I decided
-        // to use Y" but NOT a line that merely lists the markers in quotes (e.g. my own
-        // documentation of this feature). The marker must be followed by substantive content.
-        var decisionMarkers = new[]
-        {
-            "decision:",
-            "i decided",
-            "we'll use", "we will use",
-            "going with",
-            "chose to", "chose",
-            "opted for", "opted to",
-            "decided to", "decided",
-        };
-
-        foreach (var rawLine in assistantText.Split('\n'))
-        {
-            // Strip leading markdown bullets/numbering so "- Decision: X" matches "decision:".
-            var trimmed = rawLine.Trim().TrimStart('-', '*', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', ')', ' ');
-            if (string.IsNullOrWhiteSpace(trimmed))
+            var said = LocalHistoryCompaction.CollapseWhitespace(text);
+            var shape = Regex.Replace(said.ToLowerInvariant(), @"\d+", "#");
+            if (said.Length == 0 || shape == newerShape)
             {
                 continue;
             }
 
-            var lower = trimmed.ToLowerInvariant();
-
-            // Find a decision marker at the start of the line.
-            string? matchedMarker = null;
-            foreach (var marker in decisionMarkers)
-            {
-                if (lower.StartsWith(marker, StringComparison.Ordinal))
-                {
-                    matchedMarker = marker;
-                    break;
-                }
-            }
-
-            if (matchedMarker is null)
-            {
-                continue;
-            }
-
-            // The marker must be followed by substantive content (not just the marker alone, and
-            // not a line that's clearly listing markers in quotes). Require at least 15 chars of
-            // content after the marker.
-            var contentAfterMarker = trimmed[matchedMarker.Length..].Trim().TrimStart(':', ' ', '—', '-');
-            if (contentAfterMarker.Length < 15)
-            {
-                continue;
-            }
-
-            // Skip lines that look like they're listing the markers themselves (contain multiple
-            // quoted markers) — that's documentation, not a real decision.
-            if (CountQuotedOccurrences(trimmed) >= 3)
-            {
-                continue;
-            }
-
-            // Extract the decision text (the full line, bounded to 200 chars).
-            var decision = trimmed.Length > 200 ? trimmed[..200] + "…" : trimmed;
-
-            // Dedupe: only add if not already in the list.
-            if (!results.Any(existing => existing == decision))
-            {
-                results.Add(decision);
-            }
-
-            // Bound the list to avoid excessive entries.
-            if (results.Count >= 5)
+            newerShape = shape;
+            var quoted = "\"" + LocalHistoryCompaction.Shorten(said, 200) + "\"";
+            picked.Insert(0, question is null ? quoted : "(answering \"" + LocalHistoryCompaction.Shorten(question, 80) + "\") " + quoted);
+            if (picked.Count == NoteLatestMessages)
             {
                 break;
             }
         }
 
-        return results;
-    }
-
-    /// <summary>
-    /// Counts how many distinct quoted phrases (text inside double quotes) appear in a line. Used
-    /// to detect lines that are *listing* markers (documentation) rather than stating a real
-    /// decision/dead-end. A line with 3+ quoted phrases is almost certainly a list, not a decision.
-    /// </summary>
-    private static int CountQuotedOccurrences(string line)
-    {
-        var count = 0;
-        var inQuotes = false;
-        foreach (var c in line)
-        {
-            if (c == '"')
-            {
-                if (!inQuotes)
-                {
-                    count++;
-                }
-
-                inQuotes = !inQuotes;
-            }
-        }
-
-        return count;
-    }
-
-    /// <summary>
-    /// Extracts dead-end markers from the last assistant message. Looks for lines that explicitly
-    /// state a failed approach or dead end ("dead end", "doesn't work", "failed", "abandoned",
-    /// "gave up on", "not viable", "no good", "rejected", "doesn't compile", "crashes"). Returns a
-    /// bounded list of unique dead-end strings. Conservative: only records when a marker is found;
-    /// returns an empty list otherwise.
-    /// </summary>
-    internal static List<string> ExtractDeadEnds(string assistantText)
-    {
-        var results = new List<string>();
-        if (string.IsNullOrWhiteSpace(assistantText))
-        {
-            return results;
-        }
-
-        // Dead-end markers: lines that explicitly state a failed approach. Match on the *start* of
-        // the line (after trimming leading markdown/bullets) so we capture "Dead end: X" or
-        // "- This approach doesn't work because Y" but NOT a line that merely lists the markers in
-        // quotes (e.g. my own documentation of this feature). The marker must be followed by
-        // substantive content.
-        var deadEndMarkers = new[]
-        {
-            "dead end",
-            "doesn't work", "does not work",
-            "failed",
-            "abandoned",
-            "gave up on",
-            "not viable",
-            "no good",
-            "rejected",
-            "doesn't compile", "does not compile",
-            "crashes",
-            "doesn't build", "does not build",
-        };
-
-        foreach (var rawLine in assistantText.Split('\n'))
-        {
-            // Strip leading markdown bullets/numbering so "- Dead end: X" matches "dead end".
-            var trimmed = rawLine.Trim().TrimStart('-', '*', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '.', ')', ' ');
-            if (string.IsNullOrWhiteSpace(trimmed))
-            {
-                continue;
-            }
-
-            var lower = trimmed.ToLowerInvariant();
-
-            // Find a dead-end marker at the start of the line.
-            string? matchedMarker = null;
-            foreach (var marker in deadEndMarkers)
-            {
-                if (lower.StartsWith(marker, StringComparison.Ordinal))
-                {
-                    matchedMarker = marker;
-                    break;
-                }
-            }
-
-            if (matchedMarker is null)
-            {
-                continue;
-            }
-
-            // The marker must be followed by substantive content (not just the marker alone, and
-            // not a line that's clearly listing markers in quotes). Require at least 15 chars of
-            // content after the marker.
-            var contentAfterMarker = trimmed[matchedMarker.Length..].Trim().TrimStart(':', ' ', '—', '-');
-            if (contentAfterMarker.Length < 15)
-            {
-                continue;
-            }
-
-            // Skip lines that look like they're listing the markers themselves (contain multiple
-            // quoted markers) — that's documentation, not a real dead end.
-            if (CountQuotedOccurrences(trimmed) >= 3)
-            {
-                continue;
-            }
-
-            // Extract the dead-end text (the full line, bounded to 200 chars).
-            var deadEnd = trimmed.Length > 200 ? trimmed[..200] + "…" : trimmed;
-
-            // Dedupe: only add if not already in the list.
-            if (!results.Any(existing => existing == deadEnd))
-            {
-                results.Add(deadEnd);
-            }
-
-            // Bound the list to avoid excessive entries.
-            if (results.Count >= 5)
-            {
-                break;
-            }
-        }
-
-        return results;
+        return picked.Count == 0 ? string.Empty : "the person's latest messages, oldest first: " + string.Join("; then ", picked);
     }
 
     /// <summary>

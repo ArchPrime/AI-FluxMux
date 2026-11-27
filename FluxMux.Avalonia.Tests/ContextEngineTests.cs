@@ -116,14 +116,14 @@ public class VibeStateMarkdownTests
     }
 
     [Fact]
-    public void BuildReinjectionBlock_IncludesTaskStateNext()
+    public void BuildReinjectionBlock_IncludesTaskStateFilesButNotNext()
     {
         var state = new VibeState { Task = "T", State = "S", Next = "N", Files = "F" };
         var block = VibeStateMarkdown.BuildReinjectionBlock(state);
 
         Assert.Contains("Task: T", block);
         Assert.Contains("State: S", block);
-        Assert.Contains("Next: N", block);
+        Assert.DoesNotContain("Next:", block);
         Assert.Contains("Key files: F", block);
     }
 
@@ -228,7 +228,9 @@ public class ContextEngineTests
 
         var block = engine.BuildReinjectionBlock(path);
         Assert.Contains("Task: T", block);
-        Assert.Contains("Next: N", block);
+        Assert.Contains("State: S", block);
+        // Next came from the model's reply and is not handed back (27 Nov).
+        Assert.DoesNotContain("Next:", block);
     }
 
     [Fact]

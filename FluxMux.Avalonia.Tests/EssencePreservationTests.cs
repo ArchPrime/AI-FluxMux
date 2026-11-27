@@ -22,8 +22,6 @@ public sealed class EssencePreservationTests
         var log = new EssenceLog(io, "/tmp/essence.json");
         log.UpdateCurrent("Fix the bug", "Done: read code", "Run tests", "a.cs,b.cs");
         log.RecordEvolution("Old goal", "New goal", "user pivoted");
-        log.RecordDecision("Chose approach X");
-        log.RecordDeadEnd("Approach Y failed");
         log.RecordFile("c.cs");
 
         var reloaded = log.Load();
@@ -33,8 +31,6 @@ public sealed class EssencePreservationTests
         Assert.Single(reloaded.Evolution);
         Assert.Equal("Old goal", reloaded.Evolution[0].From);
         Assert.Equal("New goal", reloaded.Evolution[0].To);
-        Assert.Contains("Chose approach X", reloaded.Decisions);
-        Assert.Contains("Approach Y failed", reloaded.DeadEnds);
         Assert.Contains("c.cs", reloaded.Files);
     }
 
@@ -73,21 +69,19 @@ public sealed class EssencePreservationTests
     }
 
     [Fact]
-    public void Essence_ToClineSummary_IncludesEvolutionAndDeadEnds()
+    public void Essence_ToClineSummary_IncludesEvolutionAndNoModelConclusions()
     {
+        // Decisions, dead ends and Next were the model's own words and are not kept (27 Nov).
         var e = Essence.Empty;
         e.Current = new EssenceCurrent("Goal", "State", "Next", "f.cs");
         e.Evolution.Add(new EssenceEvolutionEntry("A", "B", "why", DateTimeOffset.UtcNow));
-        e.DeadEnds.Add("don't retry X");
-        e.Decisions.Add("chose Y");
         var summary = e.ToClineSummary();
         Assert.Contains("## Goal", summary);
         Assert.Contains("## Goal evolution", summary);
         Assert.Contains("A → B", summary);
-        Assert.Contains("## Key decisions", summary);
-        Assert.Contains("chose Y", summary);
-        Assert.Contains("## Dead ends", summary);
-        Assert.Contains("don't retry X", summary);
+        Assert.DoesNotContain("## Key decisions", summary);
+        Assert.DoesNotContain("## Dead ends", summary);
+        Assert.DoesNotContain("## Next", summary);
         Assert.Contains("## Files", summary);
         Assert.Contains("f.cs", summary);
     }
@@ -650,68 +644,6 @@ public sealed class EssencePreservationTests
         var storedTask = "implement the essence-preserving compaction system for cline";
         var userMessage = "switch to a completely different architecture for the gateway layer";
         Assert.True(FluxMuxGatewayHost.LooksLikePivot(storedTask, userMessage));
-    }
-
-    // ── ExtractDecisions (decision capture) ─────────────────────────────────────
-
-    [Fact]
-    public void ExtractDecisions_CapturesExplicitDecision()
-    {
-        var text = "After analysis, I'll summarize.\nDecision: use symmetric q8_0/q8_0 KV cache for now to avoid the f16 fallback.\nMore text.";
-        var results = FluxMuxGatewayHost.ExtractDecisions(text);
-        Assert.Single(results);
-        Assert.Contains("q8_0/q8_0", results[0]);
-    }
-
-    [Fact]
-    public void ExtractDecisions_IgnoresMarkerListingLines()
-    {
-        var text = "- \"Decision:\", \"I decided\", \"We'll use\", \"Going with\", \"Chose to\", \"Opted for\", \"Decided to\"";
-        var results = FluxMuxGatewayHost.ExtractDecisions(text);
-        Assert.Empty(results);
-    }
-
-    [Fact]
-    public void ExtractDecisions_IgnoresMarkerAlone()
-    {
-        var text = "Decision:";
-        var results = FluxMuxGatewayHost.ExtractDecisions(text);
-        Assert.Empty(results);
-    }
-
-    [Fact]
-    public void ExtractDecisions_NoMarkers_ReturnsEmpty()
-    {
-        var text = "This is just a normal paragraph with no decision markers at all.";
-        var results = FluxMuxGatewayHost.ExtractDecisions(text);
-        Assert.Empty(results);
-    }
-
-    // ── ExtractDeadEnds (dead-end capture) ──────────────────────────────────────
-
-    [Fact]
-    public void ExtractDeadEnds_CapturesExplicitDeadEnd()
-    {
-        var text = "I tried approach A.\nDead end: approach A doesn't work because the kernel is missing.\nMoving on.";
-        var results = FluxMuxGatewayHost.ExtractDeadEnds(text);
-        Assert.Single(results);
-        Assert.Contains("kernel is missing", results[0]);
-    }
-
-    [Fact]
-    public void ExtractDeadEnds_IgnoresMarkerListingLines()
-    {
-        var text = "- \"dead end\", \"doesn't work\", \"failed\", \"abandoned\", \"gave up on\", \"not viable\", \"no good\"";
-        var results = FluxMuxGatewayHost.ExtractDeadEnds(text);
-        Assert.Empty(results);
-    }
-
-    [Fact]
-    public void ExtractDeadEnds_NoMarkers_ReturnsEmpty()
-    {
-        var text = "This is just a normal paragraph with no dead-end markers at all.";
-        var results = FluxMuxGatewayHost.ExtractDeadEnds(text);
-        Assert.Empty(results);
     }
 
     // ── TruncateForLog (human-readable diagnostic log lines) ─────────────────────
