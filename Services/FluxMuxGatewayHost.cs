@@ -305,6 +305,24 @@ public sealed class FluxMuxGatewayHost : IDisposable
     public Action<int, int, string>? ReportContextUsage { get; set; }
 
     /// <summary>
+    /// Reports what the model held after a local reply, from llama-server's own usage (prompt plus
+    /// completion of the request it was actually sent): the count the Client app's own gauge shows.
+    /// Arguments: tokens held, the loaded Context, the model. See <see cref="ReplyUsage"/>.
+    /// </summary>
+    public Action<int, int, string>? ReportServedContextUsage { get; set; }
+
+    private void ReportServedUsage(string routeKind, bool isProbeRequest, JsonObject state, int promptTokens, int completionTokens)
+    {
+        var hotContext = ParseInt(Str(state, "local_context"), 0);
+        if (isProbeRequest || hotContext <= 0 || !routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        ReportServedContextUsage?.Invoke(promptTokens + completionTokens, hotContext, Str(state, "local_preferred_model"));
+    }
+
+    /// <summary>
     /// Raised when a turn 400s on context overflow and the non-destructive Hail Mary prune
     /// pipeline (stages 1-4) already ran but the turn still can't fit. The UI shows the
     /// Hail Mary banner with a button to run the destructive stage-5 middle-cut.
@@ -2231,7 +2249,8 @@ public sealed class FluxMuxGatewayHost : IDisposable
                             // to switch from "Prefilling context…" to "Thinking…".
                             Log("ttfb: first reasoning token after " + ttfbStopwatch.ElapsedMilliseconds + " ms (model=" + model + ")");
                             ReportThinkingStarted?.Invoke(ttfbStopwatch.ElapsedMilliseconds);
-                        }).ConfigureAwait(false);
+                        },
+                        onUsage: (prompt, completion) => ReportServedUsage(routeKind, isProbeRequest, state, prompt, completion)).ConfigureAwait(false);
                     if (firstByteLogged)
                     {
                         Log($"ttfb: stream complete after {ttfbStopwatch.ElapsedMilliseconds} ms total (model={model})");
@@ -2323,6 +2342,11 @@ public sealed class FluxMuxGatewayHost : IDisposable
             var bytes = await response.Content.ReadAsByteArrayAsync(timeoutCts.Token).ConfigureAwait(false);
             ReportPrefillFirstByte?.Invoke(nonStreamStopwatch.ElapsedMilliseconds);
             _generationSpeed?.ProcessJsonBody(bytes);
+            if (ReplyUsage.TryRead(Encoding.UTF8.GetString(bytes), out var servedPrompt, out var servedCompletion))
+            {
+                ReportServedUsage(routeKind, isProbeRequest, state, servedPrompt, servedCompletion);
+            }
+
             if (routeKind.Equals("local", StringComparison.OrdinalIgnoreCase))
             {
                 var (sanitized, strippedThinking, healed) = LocalEndpointResponseSanitizer.SanitizeJsonBody(

@@ -339,6 +339,15 @@ public static class LocalPrioritySettingsCalculator
     }
 
     /// <summary>
+    /// True when "Extend context into RAM" is ticked but the Context fits the model's native window,
+    /// so extending adds nothing (27 Nov): a variant made from a YaRN profile kept the tick after its
+    /// Context was lowered to 151,232 on a 262,144-token model, and it looked as if editing had
+    /// ticked it. False when the native window is unknown.
+    /// </summary>
+    public static bool YarnAddsNothing(bool extendContextIntoRam, int context, int modelNativeContext)
+        => extendContextIntoRam && modelNativeContext > 0 && context > 0 && context <= modelNativeContext;
+
+    /// <summary>
     /// Determines whether YaRN extension is actually useful given the priority order and hardware.
     /// Returns false when:
     ///   1. The priority order means the context target would be small (e.g., Speed is top priority),

@@ -178,35 +178,81 @@
                                                                 </StackPanel>
                                                                 <StackPanel Grid.Column="1" Spacing="8" IsEnabled="{Binding IsCloudVariantEditable}">
                                                                     <TextBlock FontSize="{DynamicResource FluxFontSizeHeading}" FontWeight="SemiBold" Text="Detailed settings" />
-                                                                    <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="6">
-                                                                        <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Provider" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="1"
-                                                                                  ItemsSource="{Binding CloudProviders}"
-                                                                                  SelectedItem="{Binding CloudFamilyProviderDraft}"
-                                                                                  ToolTip.Tip="Which cloud company this profile uses. Saved with the rest of the profile." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Model id" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="3"
-                                                                                  ItemsSource="{Binding CloudFamilyModelIdChoices}"
-                                                                                  SelectedItem="{Binding CloudFamilyModelIdDraft}"
-                                                                                  ToolTip.Tip="The model id this profile talks to. Saved with the rest of the profile." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Paste" />
-                                                                        <TextBox Grid.Row="0" Grid.Column="5"
-                                                                                 PlaceholderText="gpt-4.1"
-                                                                                 Text="{Binding CloudFamilyModelIdPaste}"
-                                                                                 views:MarkedText.Tip="Optional model id if it is not in the list. Click **Save profile** to apply." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Context" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding CloudContextWindowChoices}" SelectedItem="{Binding CloudVariantContextWindow}" ToolTip.Tip="How much of the chat the cloud model can keep in mind. Shorter means it forgets earlier details sooner." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Max tokens" />
-                                                                        <NumericUpDown Grid.Row="1" Grid.Column="3" Minimum="128" Maximum="65536" Increment="128" Value="{Binding CloudVariantMaxTokens}" ToolTip.Tip="How long one answer can be. Shorter answers may stop in the middle of a reply." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Temp" />
-                                                                        <NumericUpDown Grid.Row="1" Grid.Column="5" Minimum="0" Maximum="2" Increment="0.05" Value="{Binding CloudVariantTemperature}" ToolTip.Tip="How mixed the wording is. Lower is more repeatable. Higher is more varied. Does not make answers faster." />
-                                                                        <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Reasoning" />
-                                                                        <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding CloudReasoningModeOptions}" SelectedItem="{Binding CloudVariantReasoningMode}" ToolTip.Tip="Quick answers versus slower, more careful thinking when the company supports it." />
-                                                                        <TextBlock Grid.Row="2" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Response" />
-                                                                        <ComboBox Grid.Row="2" Grid.Column="3" ItemsSource="{Binding CloudResponseFormatOptions}" SelectedItem="{Binding CloudVariantResponseFormat}" ToolTip.Tip="Ordinary text, or a structured layout if this model supports it." />
-                                                                        <TextBlock Grid.Row="2" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Effort" />
-                                                                        <ComboBox Grid.Row="2" Grid.Column="5" ItemsSource="{Binding CloudReasoningEffortChoices}" SelectedItem="{Binding CloudVariantOpenAiReasoningEffort}" ToolTip.Tip="How hard the cloud model tries on tough questions. Higher can be better, slower, and cost more." />
-                                                                    </Grid>
+                                                                    <!-- Label and value pairs that wrap: each takes the widest label and value in this group (shared sizes), so columns line up and a narrow pane gives fewer per row instead of cutting values off (27 Nov). -->
+                                                                    <WrapPanel Orientation="Horizontal" Grid.IsSharedSizeScope="True">
+                                                                        <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Provider" />
+                                                                            <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding CloudProviders}" SelectedItem="{Binding CloudFamilyProviderDraft}" ToolTip.Tip="Which cloud company this profile uses. Saved with the rest of the profile." />
+                                                                        </Grid>
+                                                                        <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Model id" />
+                                                                            <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding CloudFamilyModelIdChoices}" SelectedItem="{Binding CloudFamilyModelIdDraft}" ToolTip.Tip="The model id this profile talks to. Saved with the rest of the profile." />
+                                                                        </Grid>
+                                                                        <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Paste" />
+                                                                            <TextBox Grid.Column="1" HorizontalAlignment="Stretch" PlaceholderText="gpt-4.1" Text="{Binding CloudFamilyModelIdPaste}" views:MarkedText.Tip="Optional model id if it is not in the list. Click **Save profile** to apply." />
+                                                                        </Grid>
+                                                                        <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Context" />
+                                                                            <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding CloudContextWindowChoices}" SelectedItem="{Binding CloudVariantContextWindow}" ToolTip.Tip="How much of the chat the cloud model can keep in mind. Shorter means it forgets earlier details sooner." />
+                                                                        </Grid>
+                                                                        <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Max tokens" />
+                                                                            <NumericUpDown Grid.Column="1" HorizontalAlignment="Stretch" Minimum="128" Maximum="65536" Increment="128" Value="{Binding CloudVariantMaxTokens}" ToolTip.Tip="How long one answer can be. Shorter answers may stop in the middle of a reply." />
+                                                                        </Grid>
+                                                                        <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Temp" />
+                                                                            <NumericUpDown Grid.Column="1" HorizontalAlignment="Stretch" Minimum="0" Maximum="2" Increment="0.05" Value="{Binding CloudVariantTemperature}" ToolTip.Tip="How mixed the wording is. Lower is more repeatable. Higher is more varied. Does not make answers faster." />
+                                                                        </Grid>
+                                                                        <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Reasoning" />
+                                                                            <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding CloudReasoningModeOptions}" SelectedItem="{Binding CloudVariantReasoningMode}" ToolTip.Tip="Quick answers versus slower, more careful thinking when the company supports it." />
+                                                                        </Grid>
+                                                                        <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Response" />
+                                                                            <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding CloudResponseFormatOptions}" SelectedItem="{Binding CloudVariantResponseFormat}" ToolTip.Tip="Ordinary text, or a structured layout if this model supports it." />
+                                                                        </Grid>
+                                                                        <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Effort" />
+                                                                            <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding CloudReasoningEffortChoices}" SelectedItem="{Binding CloudVariantOpenAiReasoningEffort}" ToolTip.Tip="How hard the cloud model tries on tough questions. Higher can be better, slower, and cost more." />
+                                                                        </Grid>
+                                                                    </WrapPanel>
                                                                 </StackPanel>
                                                             </Grid>
                                                             <TextBlock FontSize="{DynamicResource FluxFontSizeSmall}" Opacity="0.75" TextWrapping="Wrap" Text="{Binding CloudVariantFootprintText}" />
@@ -248,7 +294,7 @@
                                                             </Grid>
                                                             <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8" HorizontalAlignment="Stretch">
                                                                 <Button Grid.Column="0" Content="Make New Variant" Command="{Binding AddGuidedProfileVariantCommand}" CommandParameter="Cloud" views:MarkedText.Tip="Creates a new model profile variant that starts with a copy of this profile's settings. Type a name in the box first. Change at least one setting, then **Save profile** — AI-FluxMux will not keep two variants with the same settings package." />
-                                                                <TextBox Grid.Column="1" Classes="profileName" Text="{Binding NewProfileVariantName, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="Name your variant first" ToolTip.Tip="Type a name here, then click Make New Variant. AI-FluxMux will tell you if this box is empty." />
+                                                                <TextBox Grid.Column="1" Classes="profileName" Text="{Binding NewProfileVariantName, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="{Binding CloudNewVariantPlaceholder}" ToolTip.Tip="Type a name here, then click Make New Variant. AI-FluxMux will tell you if this box is empty." />
                                                             </Grid>
                                                             <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8" HorizontalAlignment="Stretch">
                                                                 <Panel Grid.Column="0" VerticalAlignment="Center">
@@ -515,7 +561,8 @@
                                                                                 <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Max image edge" />
                                                                                 <NumericUpDown Grid.Column="3" Minimum="256" Maximum="4096" Increment="64" Value="{Binding LocalVariantVisionMaxImageEdge}" ToolTip.Tip="Largest picture size (longest side, in pixels) this model will accept. Bigger reserves more graphics memory, so AutoTune and Context have less headroom." />
                                                                             </Grid>
-                                                                            <Grid ColumnDefinitions="Auto,*,2*,Auto" ColumnSpacing="8">
+                                                                            <!-- The file list takes its file name's width and the path box the rest: as "*,2*" the name was cut off ("mmproj-F16.g", 27 Nov). -->
+                                                                            <Grid ColumnDefinitions="Auto,Auto,*,Auto" ColumnSpacing="8">
                                                                                 <TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Projector file" />
                                                                                 <ComboBox Grid.Column="1"
                                                                                           VerticalAlignment="Center"
@@ -539,95 +586,241 @@
                                                                     <Border Padding="8,6" CornerRadius="5" BorderBrush="{DynamicResource FluxMutedBorder}" BorderThickness="1" Background="{DynamicResource FluxMutedBackground}">
                                                                         <StackPanel Spacing="6">
                                                                             <TextBlock FontSize="{DynamicResource FluxFontSizeBody}" FontWeight="SemiBold" Text="Fit and memory" />
-                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="6">
-                                                                        <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Context" />
-                                                                        <NumericUpDown Grid.Row="0" Grid.Column="1" Minimum="1024" Maximum="{Binding LocalVariantContextMax}" Increment="1024" Value="{Binding LocalVariantContext}" ToolTip.Tip="How much of the chat the model can keep in mind. More uses more graphics memory and needs a reload. AutoTune sizes this from the graphics memory left after the model and Images." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Flash" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantFlashAttention}" ToolTip.Tip="Usually makes long chats faster and lighter on graphics memory. Leave On unless a model misbehaves with it. AutoTune turns it on for NVIDIA cards." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Fit VRAM" />
-                                                                        <CheckBox Grid.Row="0"
-                                                                                  Grid.Column="5"
-                                                                                  VerticalAlignment="Center"
-                                                                                  IsChecked="{Binding LocalVariantFitEnabled}"
-                                                                                  Content="On"
-                                                                                  ToolTip.Tip="On: shrink settings so the model still fits in graphics memory. Off: keep the sizes you set, even if that needs more graphics memory. Save keeps this choice." />
-
-                                                                        <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="KV key" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalKvCacheOptions}" SelectedItem="{Binding LocalVariantKvCacheTypeK}" ToolTip.Tip="How precisely the model remembers earlier turns. q8_0 or f16 is the most faithful. q5 or q4 fit roughly twice the Context in the same graphics memory, but recall of earlier turns is weaker: worth it when Context matters more than Fidelity. Keep KV value the same unless you are tuning on purpose." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="KV value" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="3" ItemsSource="{Binding LocalKvCacheOptions}" SelectedItem="{Binding LocalVariantKvCacheTypeV}" ToolTip.Tip="How precisely the model remembers earlier turns. q8_0 or f16 is the most faithful. q5 or q4 fit roughly twice the Context in the same graphics memory, but recall of earlier turns is weaker: worth it when Context matters more than Fidelity. Keep KV key the same unless you are tuning on purpose." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="SWA full" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="5" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantSwaFull}" ToolTip.Tip="Keeps extra chat memory on some models. Try On if long chats forget what you just said." />
-
-                                                                        <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Cache reuse" />
-                                                                        <ComboBox Grid.Row="2" Grid.Column="1" ItemsSource="{Binding LocalCacheReuseOptions}" SelectedItem="{Binding LocalVariantCacheReuse}" ToolTip.Tip="Reuse work from similar earlier questions so follow-ups can start sooner." />
-                                                                        <TextBlock Grid.Row="2" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Cache RAM" />
-                                                                        <ComboBox Grid.Row="2" Grid.Column="3" ItemsSource="{Binding LocalCacheRamOptions}" SelectedItem="{Binding LocalVariantCacheRam}" ToolTip.Tip="How much ordinary computer memory to keep for that reuse. Unlimited helps long back-and-forth chats. Disabled turns reuse off." />
-                                                                         <TextBlock Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Cache strategy" />
-                                                                         <ComboBox Grid.Row="3" Grid.Column="1" ItemsSource="{Binding LocalCacheStrategyOptions}" SelectedItem="{Binding LocalVariantCacheStrategy}" ToolTip.Tip="How the model reuses its work from the previous turn so the next reply starts sooner. Auto picks the right method for this model (models that read pictures or use MTP need a different one). Leave on Auto." />
-                                                                            </Grid>
+                                                                            <!-- Label and value pairs that wrap: each takes the widest label and value in this group (shared sizes), so columns line up and a narrow pane gives fewer per row instead of cutting values off (27 Nov). -->
+                                                                            <WrapPanel Orientation="Horizontal" Grid.IsSharedSizeScope="True">
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Context" />
+                                                                                    <NumericUpDown Grid.Column="1" HorizontalAlignment="Stretch" Minimum="1024" Maximum="{Binding LocalVariantContextMax}" Increment="1024" Value="{Binding LocalVariantContext}" ToolTip.Tip="How much of the chat the model can keep in mind. More uses more graphics memory and needs a reload. AutoTune sizes this from the graphics memory left after the model and Images." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Flash" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantFlashAttention}" ToolTip.Tip="Usually makes long chats faster and lighter on graphics memory. Leave On unless a model misbehaves with it. AutoTune turns it on for NVIDIA cards." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Fit VRAM" />
+                                                                                    <CheckBox Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Center" IsChecked="{Binding LocalVariantFitEnabled}" Content="On" ToolTip.Tip="On: shrink settings so the model still fits in graphics memory. Off: keep the sizes you set, even if that needs more graphics memory. Save keeps this choice." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="KV key" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalKvCacheOptions}" SelectedItem="{Binding LocalVariantKvCacheTypeK}" ToolTip.Tip="How precisely the model remembers earlier turns. q8_0 or f16 is the most faithful. q5 or q4 fit roughly twice the Context in the same graphics memory, but recall of earlier turns is weaker: worth it when Context matters more than Fidelity. Keep KV value the same unless you are tuning on purpose." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="KV value" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalKvCacheOptions}" SelectedItem="{Binding LocalVariantKvCacheTypeV}" ToolTip.Tip="How precisely the model remembers earlier turns. q8_0 or f16 is the most faithful. q5 or q4 fit roughly twice the Context in the same graphics memory, but recall of earlier turns is weaker: worth it when Context matters more than Fidelity. Keep KV key the same unless you are tuning on purpose." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="SWA full" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantSwaFull}" ToolTip.Tip="Keeps extra chat memory on some models. Try On if long chats forget what you just said." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Cache reuse" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalCacheReuseOptions}" SelectedItem="{Binding LocalVariantCacheReuse}" ToolTip.Tip="Reuse work from similar earlier questions so follow-ups can start sooner." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Cache RAM" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalCacheRamOptions}" SelectedItem="{Binding LocalVariantCacheRam}" ToolTip.Tip="How much ordinary computer memory to keep for that reuse. Unlimited helps long back-and-forth chats. Disabled turns reuse off." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Cache strategy" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalCacheStrategyOptions}" SelectedItem="{Binding LocalVariantCacheStrategy}" ToolTip.Tip="How the model reuses its work from the previous turn so the next reply starts sooner. Auto picks the right method for this model (models that read pictures or use MTP need a different one). Leave on Auto." />
+                                                                                </Grid>
+                                                                            </WrapPanel>
                                                                         </StackPanel>
                                                                     </Border>
                                                                     <Border Padding="8,6" CornerRadius="5" BorderBrush="{DynamicResource FluxTintGreenBorder}" BorderThickness="1" Background="{DynamicResource FluxTintGreenBackground}">
                                                                         <StackPanel Spacing="6">
                                                                             <TextBlock FontSize="{DynamicResource FluxFontSizeBody}" FontWeight="SemiBold" Text="Graphics card" />
-                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="6">
-                                                                        <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="GPU mode" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding LocalGpuOffloadModeOptions}" SelectedItem="{Binding LocalVariantGpuOffloadMode}" ToolTip.Tip="Run the model on the graphics card, the ordinary processor, or both. More graphics-card use is usually faster if there is enough graphics memory." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="GPU layers" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalGpuLayersChoices}" SelectedItem="{Binding LocalVariantGpuLayers}" ToolTip.Tip="How much of the model sits on the graphics card. More is usually faster if there is room. Auto lets AI-FluxMux place it. Auto is only on editable copies." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Speculative" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="5" ItemsSource="{Binding LocalSpecTypeOptions}" SelectedItem="{Binding LocalVariantSpecType}" ToolTip.Tip="Lets the model guess a few words ahead and check them, so replies come out faster with exactly the same text. Use draft-mtp for models built with MTP (for example Qwen 3.x MTP files); ngram-simple helps a little on any model; Disabled turns it off." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Multi-GPU" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalMultiGpuModeOptions}" SelectedItem="{Binding LocalVariantMultiGpuMode}" ToolTip.Tip="Auto: with two or more graphics cards, the model is spread across them by free memory. Disabled: use one card only. Manual: use the split settings below." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Split mode" IsVisible="{Binding ShowLocalMultiGpuManualSettings}" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="3" ItemsSource="{Binding LocalSplitModeOptions}" SelectedItem="{Binding LocalVariantSplitMode}" IsVisible="{Binding ShowLocalMultiGpuManualSettings}" ToolTip.Tip="How llama-server spreads the model across graphics cards. Layer is usually best for two cards." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Main GPU" IsVisible="{Binding ShowLocalMultiGpuManualSettings}" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="5" ItemsSource="{Binding LocalMainGpuOptions}" SelectedItem="{Binding LocalVariantMainGpu}" IsVisible="{Binding ShowLocalMultiGpuManualSettings}" ToolTip.Tip="Which graphics card owns intermediate results. Auto lets llama-server choose." />
-                                                                        <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Tensor split" IsVisible="{Binding ShowLocalMultiGpuManualSettings}" />
-                                                                        <TextBox Grid.Row="2"
-                                                                                 Grid.Column="1"
-                                                                                 Grid.ColumnSpan="5"
-                                                                                 IsVisible="{Binding ShowLocalMultiGpuManualSettings}"
-                                                                                 Text="{Binding LocalVariantTensorSplit}"
-                                                                                 PlaceholderText="Auto or 50,50"
-                                                                                 ToolTip.Tip="Comma-separated share per graphics card, for example 60,40. Auto lets llama-server or AI-FluxMux choose." />
-                                                                            </Grid>
+                                                                            <!-- Label and value pairs that wrap: each takes the widest label and value in this group (shared sizes), so columns line up and a narrow pane gives fewer per row instead of cutting values off (27 Nov). -->
+                                                                            <WrapPanel Orientation="Horizontal" Grid.IsSharedSizeScope="True">
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="GPU mode" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalGpuOffloadModeOptions}" SelectedItem="{Binding LocalVariantGpuOffloadMode}" ToolTip.Tip="Run the model on the graphics card, the ordinary processor, or both. More graphics-card use is usually faster if there is enough graphics memory." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="GPU layers" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalGpuLayersChoices}" SelectedItem="{Binding LocalVariantGpuLayers}" ToolTip.Tip="How much of the model sits on the graphics card. More is usually faster if there is room. Auto lets AI-FluxMux place it. Auto is only on editable copies." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Speculative" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalSpecTypeOptions}" SelectedItem="{Binding LocalVariantSpecType}" ToolTip.Tip="Lets the model guess a few words ahead and check them, so replies come out faster with exactly the same text. Use draft-mtp for models built with MTP (for example Qwen 3.x MTP files); ngram-simple helps a little on any model; Disabled turns it off." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Multi-GPU" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalMultiGpuModeOptions}" SelectedItem="{Binding LocalVariantMultiGpuMode}" ToolTip.Tip="Auto: with two or more graphics cards, the model is spread across them by free memory. Disabled: use one card only. Manual: use the split settings below." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6" IsVisible="{Binding ShowLocalMultiGpuManualSettings}">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Split mode" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalSplitModeOptions}" SelectedItem="{Binding LocalVariantSplitMode}" ToolTip.Tip="How llama-server spreads the model across graphics cards. Layer is usually best for two cards." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6" IsVisible="{Binding ShowLocalMultiGpuManualSettings}">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Main GPU" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalMainGpuOptions}" SelectedItem="{Binding LocalVariantMainGpu}" ToolTip.Tip="Which graphics card owns intermediate results. Auto lets llama-server choose." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6" IsVisible="{Binding ShowLocalMultiGpuManualSettings}">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Tensor split" />
+                                                                                    <TextBox Grid.Column="1" HorizontalAlignment="Stretch" Text="{Binding LocalVariantTensorSplit}" PlaceholderText="Auto or 50,50" ToolTip.Tip="Comma-separated share per graphics card, for example 60,40. Auto lets llama-server or AI-FluxMux choose." />
+                                                                                </Grid>
+                                                                            </WrapPanel>
                                                                         </StackPanel>
                                                                     </Border>
                                                                     <Border Padding="8,6" CornerRadius="5" BorderBrush="{DynamicResource FluxTintOrangeBorder}" BorderThickness="1" Background="{DynamicResource FluxTintOrangeBackground}">
                                                                         <StackPanel Spacing="6">
                                                                             <TextBlock FontSize="{DynamicResource FluxFontSizeBody}" FontWeight="SemiBold" Text="Prompt and CPU" />
-                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6">
-                                                                        <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Threads" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding LocalThreadOptions}" SelectedItem="{Binding LocalVariantOverrideThreads}" ToolTip.Tip="How many processor cores to use when writing the answer. AutoTune usually aims for about half of your cores. More is not always faster." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Batch threads" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalThreadBatchOptions}" SelectedItem="{Binding LocalVariantThreadsBatch}" ToolTip.Tip="How many processor cores to use while reading your question. More can be faster if the rest of the PC is not busy." />
-                                                                        <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Batch size" />
-                                                                        <ComboBox Grid.Row="0" Grid.Column="5" ItemsSource="{Binding LocalBatchSizeOptions}" SelectedItem="{Binding LocalVariantBatchSize}" ToolTip.Tip="How much of a long prompt is read at once. Larger reads long chats faster but uses more graphics memory. Must be at least Micro-batch." />
-
-                                                                        <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Micro-batch" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalUbatchSizeOptions}" SelectedItem="{Binding LocalVariantUbatchSize}" ToolTip.Tip="How much of the prompt the graphics card reads per step. Larger reads long chats noticeably faster for a little more graphics memory. Lower it only if the model fails to load for lack of memory. Speed AutoTune can try sizes on this PC." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Multi-user" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="3" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantMultiUserMode}" ToolTip.Tip="Allow more than one question at a time. This does not make a single answer faster, and each extra question uses graphics memory." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Draft length" IsEnabled="{Binding IsLocalSpecDraftLengthApplicable}" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="5" ItemsSource="{Binding LocalSpecDraftNMaxOptions}" SelectedItem="{Binding LocalVariantSpecDraftNMax}" IsEnabled="{Binding IsLocalSpecDraftLengthApplicable}" ToolTip.Tip="With Speculative on draft-mtp: how many words the model guesses ahead. Higher can be faster until too many guesses are rejected; it never changes the text. Auto is 2. Speed AutoTune can find the best value for this PC. Needs a reload." />
-                                                                            </Grid>
+                                                                            <!-- Label and value pairs that wrap: each takes the widest label and value in this group (shared sizes), so columns line up and a narrow pane gives fewer per row instead of cutting values off (27 Nov). -->
+                                                                            <WrapPanel Orientation="Horizontal" Grid.IsSharedSizeScope="True">
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Threads" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalThreadOptions}" SelectedItem="{Binding LocalVariantOverrideThreads}" ToolTip.Tip="How many processor cores to use when writing the answer. AutoTune usually aims for about half of your cores. More is not always faster." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Batch threads" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalThreadBatchOptions}" SelectedItem="{Binding LocalVariantThreadsBatch}" ToolTip.Tip="How many processor cores to use while reading your question. More can be faster if the rest of the PC is not busy." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Batch size" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalBatchSizeOptions}" SelectedItem="{Binding LocalVariantBatchSize}" ToolTip.Tip="How much of a long prompt is read at once. Larger reads long chats faster but uses more graphics memory. Must be at least Micro-batch." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Micro-batch" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalUbatchSizeOptions}" SelectedItem="{Binding LocalVariantUbatchSize}" ToolTip.Tip="How much of the prompt the graphics card reads per step. Larger reads long chats noticeably faster for a little more graphics memory. Lower it only if the model fails to load for lack of memory. Speed AutoTune can try sizes on this PC." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Multi-user" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantMultiUserMode}" ToolTip.Tip="Allow more than one question at a time. This does not make a single answer faster, and each extra question uses graphics memory." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Draft length" IsEnabled="{Binding IsLocalSpecDraftLengthApplicable}" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalSpecDraftNMaxOptions}" SelectedItem="{Binding LocalVariantSpecDraftNMax}" IsEnabled="{Binding IsLocalSpecDraftLengthApplicable}" ToolTip.Tip="With Speculative on draft-mtp: how many words the model guesses ahead. Higher can be faster until too many guesses are rejected; it never changes the text. Auto is 2. Speed AutoTune can find the best value for this PC. Needs a reload." />
+                                                                                </Grid>
+                                                                            </WrapPanel>
                                                                         </StackPanel>
                                                                     </Border>
                                                                     <Border Padding="8,6" CornerRadius="5" BorderBrush="{DynamicResource FluxTintPurpleBorder}" BorderThickness="1" Background="{DynamicResource FluxTintPurpleBackground}">
                                                                         <StackPanel Spacing="6">
                                                                             <TextBlock FontSize="{DynamicResource FluxFontSizeBody}" FontWeight="SemiBold" Text="Chat format" />
-                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6">
-                                                                        <TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Template" />
-                                                                        <ComboBox Grid.Column="1" ItemsSource="{Binding LocalChatTemplateOptions}" SelectedItem="{Binding LocalVariantChatTemplate}" ToolTip.Tip="Auto uses the format stored in the local model. Pick a named format only for older models. Newer Qwen models must stay on Auto or they may ignore instructions from the Client app." />
-                                                                        <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Chat parser" />
-                                                                        <ComboBox Grid.Column="3" ItemsSource="{Binding LocalChatParserOptions}" SelectedItem="{Binding LocalVariantChatParser}" ToolTip.Tip="How chat messages are read. Leave the default unless answers look garbled. Skip parsing is a last resort." />
-                                                                        <TextBlock Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Unban tokens" />
-                                                                        <ComboBox Grid.Column="5" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantUnbanTokensMode}" ToolTip.Tip="Lets the model use a few special words llama-server normally blocks. Some chat formats need it, and AutoTune turns it on for those." />
-                                                                        <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Thinking budget" />
-                                                                        <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalReasoningBudgetOptions}" SelectedItem="{Binding LocalVariantReasoningBudget}" ToolTip.Tip="The most the model may think before it answers, when Reasoning is on. Unlimited: no cap. 0: no thinking. A cap gets replies started sooner but can make answers shallower. Needs a reload." />
-                                                                            </Grid>
+                                                                            <!-- Label and value pairs that wrap: each takes the widest label and value in this group (shared sizes), so columns line up and a narrow pane gives fewer per row instead of cutting values off (27 Nov). -->
+                                                                            <WrapPanel Orientation="Horizontal" Grid.IsSharedSizeScope="True">
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Template" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalChatTemplateOptions}" SelectedItem="{Binding LocalVariantChatTemplate}" ToolTip.Tip="Auto uses the format stored in the local model. Pick a named format only for older models. Newer Qwen models must stay on Auto or they may ignore instructions from the Client app." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Chat parser" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalChatParserOptions}" SelectedItem="{Binding LocalVariantChatParser}" ToolTip.Tip="How chat messages are read. Leave the default unless answers look garbled. Skip parsing is a last resort." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Unban tokens" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantUnbanTokensMode}" ToolTip.Tip="Lets the model use a few special words llama-server normally blocks. Some chat formats need it, and AutoTune turns it on for those." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Thinking budget" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalReasoningBudgetOptions}" SelectedItem="{Binding LocalVariantReasoningBudget}" ToolTip.Tip="The most the model may think before it answers, when Reasoning is on. Unlimited: no cap. 0: no thinking. A cap gets replies started sooner but can make answers shallower. Needs a reload." />
+                                                                                </Grid>
+                                                                            </WrapPanel>
                                                                             <StackPanel Orientation="Horizontal" Spacing="10">
                                                                                 <TextBlock FontSize="{DynamicResource FluxFontSizeBody}"
                                                                                            FontWeight="SemiBold"
@@ -639,14 +832,33 @@
                                                                                            Text="next message · no reload"
                                                                                            ToolTip.Tip="Temperature, max tokens, and Reasoning apply on the next Client-app message while this profile is loaded. llama-server is not reloaded." />
                                                                             </StackPanel>
-                                                                            <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="8" RowSpacing="6">
-                                                                        <TextBlock Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Temperature" />
-                                                                        <NumericUpDown Grid.Column="1" Minimum="0" Maximum="2" Increment="0.05" Value="{Binding LocalVariantTemperature}" ToolTip.Tip="How mixed the wording is. Lower is more repeatable. Higher is more varied. Does not make answers faster." />
-                                                                        <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Max tokens" />
-                                                                        <ComboBox Grid.Column="3" ItemsSource="{Binding LocalMaxTokenOptions}" SelectedItem="{Binding LocalVariantMaxTokens}" ToolTip.Tip="How long one answer can be. Shorter answers may stop in the middle of a reply. AutoTune and the priority arrows will not lower this. Save keeps it." />
-                                                                        <TextBlock Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Reasoning" />
-                                                                        <ComboBox Grid.Column="5" ItemsSource="{Binding LocalReasoningOptions}" SelectedItem="{Binding LocalVariantReasoning}" ToolTip.Tip="Whether the model writes a hidden thinking step before answering. Off is usually better for the Client app. Use the Quick Select list for Off, Low, Medium, or XHigh on the running row." />
-                                                                            </Grid>
+                                                                            <!-- Label and value pairs that wrap: each takes the widest label and value in this group (shared sizes), so columns line up and a narrow pane gives fewer per row instead of cutting values off (27 Nov). -->
+                                                                            <WrapPanel Orientation="Horizontal" Grid.IsSharedSizeScope="True">
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Temperature" />
+                                                                                    <NumericUpDown Grid.Column="1" HorizontalAlignment="Stretch" Minimum="0" Maximum="2" Increment="0.05" Value="{Binding LocalVariantTemperature}" ToolTip.Tip="How mixed the wording is. Lower is more repeatable. Higher is more varied. Does not make answers faster." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Max tokens" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalMaxTokenOptions}" SelectedItem="{Binding LocalVariantMaxTokens}" ToolTip.Tip="How long one answer can be. Shorter answers may stop in the middle of a reply. AutoTune and the priority arrows will not lower this. Save keeps it." />
+                                                                                </Grid>
+                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                    <Grid.ColumnDefinitions>
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                    </Grid.ColumnDefinitions>
+                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Reasoning" />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalReasoningOptions}" SelectedItem="{Binding LocalVariantReasoning}" ToolTip.Tip="Whether the model writes a hidden thinking step before answering. Off is usually better for the Client app. Use the Quick Select list for Off, Low, Medium, or XHigh on the running row." />
+                                                                                </Grid>
+                                                                            </WrapPanel>
                                                                             <Expander Classes="fieldHeight"
                                                                                       Header="Sampling · needs a reload"
                                                                                       IsExpanded="False"
@@ -657,16 +869,41 @@
                                                                                     <Thickness x:Key="ExpanderHeaderPadding">8,0,0,0</Thickness>
                                                                                     <Thickness x:Key="ExpanderChevronMargin">8,0,8,0</Thickness>
                                                                                 </Expander.Resources>
-                                                                                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="6" Margin="0,6,0,0">
-                                                                                    <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Top-k" />
-                                                                                    <ComboBox Grid.Row="0" Grid.Column="1" ItemsSource="{Binding LocalTopKOptions}" SelectedItem="{Binding LocalVariantTopK}" ToolTip.Tip="Only the k most likely next words are considered. llama-server default 40; Qwen suggests 20." />
-                                                                                    <TextBlock Grid.Row="0" Grid.Column="2" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Top-p" />
-                                                                                    <ComboBox Grid.Row="0" Grid.Column="3" ItemsSource="{Binding LocalTopPOptions}" SelectedItem="{Binding LocalVariantTopP}" ToolTip.Tip="Only the most likely words that add up to this share are considered. llama-server default 0.95." />
-                                                                                    <TextBlock Grid.Row="0" Grid.Column="4" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Min-p" />
-                                                                                    <ComboBox Grid.Row="0" Grid.Column="5" ItemsSource="{Binding LocalMinPOptions}" SelectedItem="{Binding LocalVariantMinP}" ToolTip.Tip="Drops words far less likely than the best one. llama-server default 0.05; Qwen suggests 0." />
-                                                                                    <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Presence" />
-                                                                                    <ComboBox Grid.Row="1" Grid.Column="1" ItemsSource="{Binding LocalPresencePenaltyOptions}" SelectedItem="{Binding LocalVariantPresencePenalty}" ToolTip.Tip="Discourages repeating words already used. Try 1.5 if a quantized model starts looping the same lines. Too high can make code worse." />
-                                                                                </Grid>
+                                                                                <!-- Label and value pairs that wrap: each takes the widest label and value in this group (shared sizes), so columns line up and a narrow pane gives fewer per row instead of cutting values off (27 Nov). -->
+                                                                                <WrapPanel Orientation="Horizontal" Grid.IsSharedSizeScope="True" Margin="0,6,0,0">
+                                                                                    <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                        <Grid.ColumnDefinitions>
+                                                                                            <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                            <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                        </Grid.ColumnDefinitions>
+                                                                                        <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Top-k" />
+                                                                                        <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalTopKOptions}" SelectedItem="{Binding LocalVariantTopK}" ToolTip.Tip="Only the k most likely next words are considered. llama-server default 40; Qwen suggests 20." />
+                                                                                    </Grid>
+                                                                                    <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                        <Grid.ColumnDefinitions>
+                                                                                            <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                            <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                        </Grid.ColumnDefinitions>
+                                                                                        <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Top-p" />
+                                                                                        <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalTopPOptions}" SelectedItem="{Binding LocalVariantTopP}" ToolTip.Tip="Only the most likely words that add up to this share are considered. llama-server default 0.95." />
+                                                                                    </Grid>
+                                                                                    <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                        <Grid.ColumnDefinitions>
+                                                                                            <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                            <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                        </Grid.ColumnDefinitions>
+                                                                                        <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Min-p" />
+                                                                                        <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalMinPOptions}" SelectedItem="{Binding LocalVariantMinP}" ToolTip.Tip="Drops words far less likely than the best one. llama-server default 0.05; Qwen suggests 0." />
+                                                                                    </Grid>
+                                                                                    <Grid ColumnSpacing="8" Margin="0,0,16,6">
+                                                                                        <Grid.ColumnDefinitions>
+                                                                                            <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
+                                                                                            <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
+                                                                                        </Grid.ColumnDefinitions>
+                                                                                        <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Presence" />
+                                                                                        <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalPresencePenaltyOptions}" SelectedItem="{Binding LocalVariantPresencePenalty}" ToolTip.Tip="Discourages repeating words already used. Try 1.5 if a quantized model starts looping the same lines. Too high can make code worse." />
+                                                                                    </Grid>
+                                                                                </WrapPanel>
                                                                             </Expander>
                                                                         </StackPanel>
                                                                     </Border>
@@ -710,7 +947,7 @@
                                                             </Grid>
                                                             <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8" HorizontalAlignment="Stretch">
                                                                 <Button Grid.Column="0" Content="Make New Variant" Command="{Binding AddGuidedProfileVariantCommand}" CommandParameter="Local" views:MarkedText.Tip="Creates a new model profile variant that starts with a copy of this profile's settings. Type a name in the box first. Change at least one setting, then **Save profile** — AI-FluxMux will not keep two variants with the same settings package." />
-                                                                <TextBox Grid.Column="1" Classes="profileName" Text="{Binding NewProfileVariantName, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="Name your variant first" ToolTip.Tip="Type a name here, then click Make New Variant. AI-FluxMux will tell you if this box is empty." />
+                                                                <TextBox Grid.Column="1" Classes="profileName" Text="{Binding NewProfileVariantName, UpdateSourceTrigger=PropertyChanged}" PlaceholderText="{Binding LocalNewVariantPlaceholder}" ToolTip.Tip="Type a name here, then click Make New Variant. AI-FluxMux will tell you if this box is empty." />
                                                             </Grid>
                                                             <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8" HorizontalAlignment="Stretch">
                                                                 <Panel Grid.Column="0" VerticalAlignment="Center">

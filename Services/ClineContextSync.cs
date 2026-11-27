@@ -738,7 +738,12 @@ public static class ClineContextSync
         var compact = string.Equals(compactMode, "none", StringComparison.OrdinalIgnoreCase)
             ? "Cline Auto compact was turned on, because this model profile leaves compaction to the Client app"
             : "Cline Auto compact was turned off, because AI-FluxMux compacts for this model profile";
-        var follow = "Start a new Cline task. If the bar or Auto compact toggle is unchanged, reload the editor that has Cline.";
+        // Cline 4.x reads models.json into memory once per editor session (its settings page reads
+        // the file afresh, which is why it shows the new value while a chat does not), so neither
+        // an open chat nor a new task picks this up until the editor reloads (27 Nov). AI-FluxMux
+        // still keeps each request within the loaded model's Context meanwhile.
+        var follow = "Cline keeps the settings it read when the editor started, so its chats show the old size until you reload the editor that has Cline (Developer: Reload Window); "
+                     + "until then AI-FluxMux still keeps each request within this model's Context.";
         if (contextChanged && compactChanged)
         {
             return context + ". " + compact + ". " + follow;

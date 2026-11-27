@@ -3161,7 +3161,12 @@ settings in this profile, you should scroll to the bottom of the open profile,
 type a name, and click <strong><span style='font-family:"Calibri",sans-serif'>Make
 New Variant</span></strong>, then change settings there. You can still edit the
 default profile if you really need to, but first you need to click to unlock
-the associated padlock icon. Remember to lock it again afterwards.<o:p></o:p></span></p>
+the associated padlock icon. Remember to lock it again afterwards.
+A new variant is a copy of the profile it was made from, settings and all, so
+make it from the profile closest to what you want. If <strong>Extend context into
+RAM (YaRN)</strong> came along with the copy and you lower Context to what the
+graphics card holds natively, <strong>Save profile</strong> unticks it, because it no
+longer adds anything.<o:p></o:p></span></p>
 
 <p><span lang=EN style='font-size:11.0pt;font-family:"Calibri",sans-serif;
 color:#111111;mso-ansi-language:EN'>For a cloud model, choose the <strong><span
@@ -7251,10 +7256,13 @@ margin-left:36.0pt;text-indent:-18.0pt;mso-list:l12 level1 lfo21;tab-stops:
 style='font-size:10.0pt;mso-bidi-font-size:12.0pt;font-family:Symbol;
 mso-fareast-font-family:Symbol;mso-bidi-font-family:Symbol'><span
 style='mso-list:Ignore'>·<span style='font:7.0pt "Times New Roman"'>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-</span></span></span><![endif]><span style='mso-fareast-font-family:"Times New Roman"'>Reload
-the editor window if the new model profile name does not appear in the bar
-below the Cline task dialog, or the Context window size display looks
-unchanged. AI-<span class=SpellE>FluxMux</span> will keep running.<o:p></o:p></span></p>
+</span></span></span><![endif]><span style='mso-fareast-font-family:"Times New Roman"'>Cline reads
+these settings once each time the editor starts, so after AI-<span class=SpellE>FluxMux</span>
+launches a different model, reload the editor window (<strong>Developer: Reload Window</strong>)
+for the bar below the Cline task dialog to show the new model profile name and Context size.
+Until then Cline chats keep the old size, and AI-<span class=SpellE>FluxMux</span> still keeps each
+request within the new model's Context. Reloading does not change your chat.
+AI-<span class=SpellE>FluxMux</span> will keep running.<o:p></o:p></span></p>
 
 <p class=MsoNormal style='mso-margin-top-alt:auto;mso-margin-bottom-alt:auto;
 margin-left:36.0pt;text-indent:-18.0pt;mso-list:l12 level1 lfo21;tab-stops:

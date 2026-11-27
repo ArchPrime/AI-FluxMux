@@ -890,6 +890,7 @@ public sealed class FluxMuxRuntimeService
 		host.ReportPortRulesPostMortem = note => PortRulesPostMortemNotice?.Invoke(note);
 		host.ReportPortRulesTelemetry = snap => PortRulesTelemetryNotice?.Invoke(snap);
 		host.ReportContextUsage = WriteLocalContextUsage;
+		host.ReportServedContextUsage = WriteServedContextUsage;
 		host.ReportHailMaryOffer = line => OfferHailMary(line);
 		host.ReportLog = line =>
 		{
@@ -10711,23 +10712,93 @@ private List<GpuProcessUse> CollectGpuProcessUses()
 	/// </summary>
 	private void WriteLocalContextUsage(int promptTokens, int contextLimit, string model)
 	{
+		lock (_localContextUsageGate)
+		{
+			try
+			{
+				JsonObject root = new()
+				{
+					["prompt_tokens"] = promptTokens,
+					["context_limit"] = contextLimit,
+					["model"] = model ?? string.Empty,
+					["updated_utc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
+				};
+				// What the model held after the last reply stays while the same model and Context
+				// are loaded (the gauge shows it until the next reply, as the Client app does); a
+				// launch (prompt 0) or another model clears it.
+				JsonObject previous = File.Exists(_localContextUsagePath) ? LoadJson(_localContextUsagePath) : new JsonObject();
+				if (promptTokens > 0
+					&& string.Equals(previous["model"]?.ToString() ?? string.Empty, model ?? string.Empty, StringComparison.Ordinal)
+					&& ParseInt(previous["context_limit"]?.ToString() ?? string.Empty, 0) == contextLimit
+					&& ParseInt(previous["served_tokens"]?.ToString() ?? string.Empty, 0) > 0)
+				{
+					root["served_tokens"] = previous["served_tokens"]?.DeepClone();
+					root["served_utc"] = previous["served_utc"]?.DeepClone();
+				}
+				File.WriteAllText(_localContextUsagePath, root.ToJsonString(new JsonSerializerOptions
+				{
+					WriteIndented = true
+				}));
+			}
+			catch
+			{
+				// Best-effort: a gauge-write failure must not break the gateway turn.
+			}
+		}
+	}
+
+	private readonly object _localContextUsageGate = new();
+
+	/// <summary>
+	/// Records what the model held after a reply (llama-server's prompt plus completion for the
+	/// request it was sent), beside the chat as the Client app sent it (<c>prompt_tokens</c>, which
+	/// Hail Mary and the hand over brief size the chat by). The gauge shows this one.
+	/// </summary>
+	private void WriteServedContextUsage(int heldTokens, int contextLimit, string model)
+	{
+		lock (_localContextUsageGate)
+		{
+			try
+			{
+				JsonObject root = File.Exists(_localContextUsagePath) ? LoadJson(_localContextUsagePath) : new JsonObject();
+				root["served_tokens"] = heldTokens;
+				root["context_limit"] = contextLimit;
+				root["model"] = model ?? string.Empty;
+				root["served_utc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+				File.WriteAllText(_localContextUsagePath, root.ToJsonString(new JsonSerializerOptions
+				{
+					WriteIndented = true
+				}));
+			}
+			catch
+			{
+				// Best-effort, as above.
+			}
+		}
+	}
+
+	/// <summary>
+	/// What the Context gauge shows: the tokens the model held after the last reply when known,
+	/// else the chat as the Client app last sent it; <c>Held</c> says which.
+	/// </summary>
+	public (int Tokens, int ContextLimit, string Model, bool Held) ReadContextGauge()
+	{
 		try
 		{
-			JsonObject root = new()
+			if (!File.Exists(_localContextUsagePath))
 			{
-				["prompt_tokens"] = promptTokens,
-				["context_limit"] = contextLimit,
-				["model"] = model ?? string.Empty,
-				["updated_utc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture)
-			};
-			File.WriteAllText(_localContextUsagePath, root.ToJsonString(new JsonSerializerOptions
-			{
-				WriteIndented = true
-			}));
+				return (0, 0, string.Empty, false);
+			}
+			JsonObject root = LoadJson(_localContextUsagePath);
+			int served = ParseInt(root["served_tokens"]?.ToString() ?? string.Empty, 0);
+			int prompt = ParseInt(root["prompt_tokens"]?.ToString() ?? string.Empty, 0);
+			int contextLimit = ParseInt(root["context_limit"]?.ToString() ?? string.Empty, 0);
+			string model = root["model"]?.ToString() ?? string.Empty;
+			return served > 0 ? (served, contextLimit, model, true) : (prompt, contextLimit, model, false);
 		}
 		catch
 		{
-			// Best-effort: a gauge-write failure must not break the gateway turn.
+			return (0, 0, string.Empty, false);
 		}
 	}
 

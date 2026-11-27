@@ -1115,7 +1115,7 @@ public partial class MainViewModel : ViewModelBase
         + ((int)LocalVariantContext).ToString(CultureInfo.InvariantCulture)
         + "). Then reload the editor so Cline rereads the files. Older Cline: expand MODEL CONFIGURATION (chevron below Azure Identity) and set Context Window Size. "
         + "Launch also turns off Cline Auto compact (use FluxMux Compact) and leaves Supports Images ticked if a validated Images-on profile exists, so a picture can reach Port. "
-        + "Start a new Cline task after Launch. If the bar or those toggles are unchanged, reload that editor window. AI-FluxMux keeps running if you close the editor.";
+        + "Cline reads these once per editor session, so after a Launch that changes them, reload the editor that has Cline (Developer: Reload Window); a new task alone keeps the old values. AI-FluxMux keeps each request within the loaded Context meanwhile, and keeps running if you close the editor.";
 
     public string GenericEndpointHintText =>
         HelpHtmlParser.NoteBullet
@@ -4247,7 +4247,7 @@ public partial class MainViewModel : ViewModelBase
     {
         try
         {
-            var (promptTokens, contextLimit, model) = _runtimeService.ReadLocalContextUsage();
+            var (promptTokens, contextLimit, model, held) = _runtimeService.ReadContextGauge();
             if (contextLimit > 0 && promptTokens > 0)
             {
                 var percent = Math.Clamp(100.0 * promptTokens / contextLimit, 0, 100);
@@ -4256,17 +4256,14 @@ public partial class MainViewModel : ViewModelBase
                 ContextGauge.DetailText = promptTokens.ToString("0", CultureInfo.InvariantCulture)
                     + " / " + contextLimit.ToString("0", CultureInfo.InvariantCulture) + " tokens";
                 ContextGauge.Badge = string.IsNullOrEmpty(model) ? string.Empty : model.Length > 18 ? model[..18] + "…" : model;
-                // When the client reinflates its full history (Cline), the operator also sees a
-                // HIGHER token count in the client's own UI. That is not a bug: this gauge measures
-                // what llama-server actually evaluated for the forwarded turn (the KV-cache prefix),
-                // while the client counts its entire reinflated history before forwarding. Label the
-                // two distinctly so they are not read as a contradiction.
-                var reinflateNote = UserClientReinflatesContext
-                    ? " This gauge shows tokens forwarded to llama-server (the KV-cache prefix). The client's own counter is higher because it reinflates the full history before forwarding."
-                    : string.Empty;
-                ContextGauge.Tooltip = "Context fill: " + ContextGauge.DetailText
-                    + " (" + ContextGauge.PercentText + "). Measured by the model's tokenizer each turn."
-                    + reinflateNote;
+                // After a reply the gauge shows what the model held: llama-server's own count of the
+                // request it was sent (after AI-FluxMux shortened it) plus the reply, the same
+                // count Cline's gauge shows (27 Nov). Before the first reply on this model it shows
+                // the chat as the Client app sent it.
+                ContextGauge.Tooltip = "Context fill: " + ContextGauge.DetailText + " (" + ContextGauge.PercentText + "). "
+                    + (held
+                        ? "What the model held after its last reply, as llama-server counted it: the request AI-FluxMux sent (after any shortening) plus the reply. A Client app's own gauge counts the same, though it keeps the Context it was given when it started."
+                        : "The chat as the Client app sent it, measured by the model's tokenizer; after the first reply this shows what the model held.");
                 HailMaryButtonVisible = true;
             }
             else
@@ -8604,9 +8601,9 @@ public partial class MainViewModel : ViewModelBase
     private string _localYarnMaxContextAdvisoryText = string.Empty;
 
     /// <summary>
-    /// Note shown when the wizard unticks "Extend into RAM (YaRN)" because the extension is not
-    /// useful given the current priority order and hardware. Empty string when the wizard did not
-    /// untick it.
+    /// The note under "Extend into RAM (YaRN)": the wizard unticked it (not useful for the priority
+    /// order and hardware), or it is ticked while Context fits the native window, or Save profile
+    /// unticked it for that reason. Empty otherwise; cleared when another profile is loaded.
     /// </summary>
     [ObservableProperty]
     private string _localYarnUntickedByWizardNote = string.Empty;
@@ -10605,7 +10602,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         LocalVariantContext = contextTokens;
-        SaveLocalVariant();
+        SaveLocalVariantSettings();
         StatusMessage = $"Context set to {contextTokens:N0}. Re-launching local model...";
         await LaunchLocalRouteAsync("Smaller-context retry", model, variant);
     }
@@ -10629,7 +10626,7 @@ public partial class MainViewModel : ViewModelBase
         // beyond the native window into system RAM.
         LocalVariantExtendContextIntoRam = true;
         LocalVariantYarnMaxContext = suggestedTarget;
-        SaveLocalVariant();
+        SaveLocalVariantSettings();
         StatusMessage = $"Context set to {suggestedTarget}. Re-launching local model...";
         await LaunchLocalRouteAsync("OOM smaller-context retry", model, variant);
     }
@@ -13301,8 +13298,37 @@ public partial class MainViewModel : ViewModelBase
         SetProfileActionFeedback("Profile deleted.", ProfileActionFeedbackKind.Success);
     }
 
+    /// <summary>
+    /// Save profile. Unticks "Extend context into RAM" first when Context fits the native window
+    /// (<see cref="UntickYarnThatAddsNothing"/>). The out-of-memory retries save through
+    /// <see cref="SaveLocalVariantSettings"/> and keep their own choice.
+    /// </summary>
+    /// <summary>The Make New Variant name box's placeholder: says which profile the new variant copies.</summary>
+    public string LocalNewVariantPlaceholder => "Name your copy of " + CopiedFromLabel(SelectedLocalVariant).Trim('"');
+
+    public string CloudNewVariantPlaceholder => "Name your copy of " + CopiedFromLabel(SelectedCloudVariant).Trim('"');
+
+    /// <summary>"YaRN test 393k with vision", or "the default profile" for the base variant.</summary>
+    private static string CopiedFromLabel(string? variant)
+    {
+        var name = NormalizeVariantName(variant);
+        return string.IsNullOrWhiteSpace(name) ? "the default profile" : "\"" + name + "\"";
+    }
+
     [RelayCommand]
     private void SaveLocalVariant()
+    {
+        var unticked = IsLocalVariantEditable && UntickYarnThatAddsNothing();
+        var note = LocalYarnUntickedByWizardNote;
+        SaveLocalVariantSettings();
+        if (unticked)
+        {
+            // Saving reloads the form, which clears the note; it is about this save, so keep it.
+            LocalYarnUntickedByWizardNote = note;
+        }
+    }
+
+    private void SaveLocalVariantSettings()
     {
         var intended = SelectedLocalVariantItem;
         AdoptExpandedLocalEditorSelection();
@@ -13937,7 +13963,11 @@ public partial class MainViewModel : ViewModelBase
             return;
         }
 
-        // New variants always start from the settings currently shown for this profile.
+        // New variants always start from the settings currently shown for this profile. Say which
+        // one, and that a YaRN tick comes along (27 Nov: "Low context" was made from "YaRN test
+        // 393k", kept its tick after Context was lowered, and looked as if editing had ticked it).
+        var copiedFrom = CopiedFromLabel(isCloud ? SelectedCloudVariant : SelectedLocalVariant);
+        var carriesYarn = isLocal && LocalVariantExtendContextIntoRam;
         if (isCloud)
         {
             CloudVariantDraftName = name;
@@ -13954,7 +13984,9 @@ public partial class MainViewModel : ViewModelBase
             && !StatusMessage.Equals("Local model profile variant already exists.", StringComparison.Ordinal))
         {
             NewProfileVariantName = string.Empty;
-            SetProfileActionFeedback("New variant created. Change a setting, then Save profile.", ProfileActionFeedbackKind.Success);
+            SetProfileActionFeedback("New variant created as a copy of " + copiedFrom
+                + (carriesYarn ? ", with Extend context into RAM (YaRN) ticked as it was there" : string.Empty)
+                + ". Change a setting, then Save profile.", ProfileActionFeedbackKind.Success);
         }
         RefreshProfileTemplateSources();
     }
@@ -15213,6 +15245,49 @@ public partial class MainViewModel : ViewModelBase
         HandleLocalDetailedSettingsChanged();
         OnPropertyChanged(nameof(ClineEndpointHintText));
         PublishHelpNoteValues();
+        UpdateYarnAddsNothingNote();
+    }
+
+    /// <summary>
+    /// The note under "Extend context into RAM" when it is ticked but Context fits the model's
+    /// native window (27 Nov). Only a note while editing: unticking as Context changed would fire
+    /// on every digit typed ("393216" passes 3, 39, 393…) and lower Context's maximum under the
+    /// typing. Save profile unticks it (<see cref="UntickYarnThatAddsNothing"/>).
+    /// </summary>
+    private void UpdateYarnAddsNothingNote()
+    {
+        if (_isHydratingLocalVariantForm)
+        {
+            return;
+        }
+
+        var native = CurrentLocalHardwareAdvice().ModelMaxCtx;
+        if (LocalPrioritySettingsCalculator.YarnAddsNothing(LocalVariantExtendContextIntoRam, (int)LocalVariantContext, native))
+        {
+            LocalYarnUntickedByWizardNote = "A Context of " + ((int)LocalVariantContext).ToString("N0", CultureInfo.InvariantCulture)
+                + " fits this model's native window (" + native.ToString("N0", CultureInfo.InvariantCulture)
+                + "), so extending into RAM adds nothing. Save profile will untick it; raise Context above the native window to keep it.";
+        }
+        else if (LocalYarnUntickedByWizardNote.StartsWith("A Context of ", StringComparison.Ordinal))
+        {
+            LocalYarnUntickedByWizardNote = string.Empty;
+        }
+    }
+
+    /// <summary>Save profile: unticks "Extend context into RAM" when Context fits the native window; true when it did.</summary>
+    private bool UntickYarnThatAddsNothing()
+    {
+        var native = CurrentLocalHardwareAdvice().ModelMaxCtx;
+        if (!LocalPrioritySettingsCalculator.YarnAddsNothing(LocalVariantExtendContextIntoRam, (int)LocalVariantContext, native))
+        {
+            return false;
+        }
+
+        LocalVariantExtendContextIntoRam = false;
+        LocalYarnUntickedByWizardNote = "Unticked on Save: a Context of " + ((int)LocalVariantContext).ToString("N0", CultureInfo.InvariantCulture)
+            + " fits this model's native window (" + native.ToString("N0", CultureInfo.InvariantCulture)
+            + "), so extending into RAM added nothing. Tick it again and raise Context above the native window to extend.";
+        return true;
     }
     partial void OnLocalVariantOverrideThreadsChanged(string value)
         => AcceptLocalComboChange("OverrideThreads", value, restored => LocalVariantOverrideThreads = restored);
@@ -15284,6 +15359,7 @@ public partial class MainViewModel : ViewModelBase
     {
         OnPropertyChanged(nameof(LocalVariantContextMax));
         HandleLocalDetailedSettingsChanged();
+        UpdateYarnAddsNothingNote();
         if (!value)
         {
             // YaRN turned off: restore the VRAM-only default KV cache type (the same value
@@ -19239,6 +19315,7 @@ public partial class MainViewModel : ViewModelBase
 
     partial void OnSelectedCloudVariantChanged(string value)
     {
+        OnPropertyChanged(nameof(CloudNewVariantPlaceholder));
         EnsureSelection2CloudDefaults();
         LoadCloudVariantSettingsEditor();
         UpdateVariantEditability();
@@ -19317,6 +19394,7 @@ public partial class MainViewModel : ViewModelBase
 
     partial void OnSelectedLocalVariantChanged(string value)
     {
+        OnPropertyChanged(nameof(LocalNewVariantPlaceholder));
         EnsureSelection1LocalDefaults();
         if (!_isValidatingLocalProfile)
         {
@@ -22869,6 +22947,8 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantRopeScaling = CoerceLocalOption(settings["LocalRopeScaling"]?.ToString(), LocalRopeScalingOptions, "Auto");
         LocalVariantRopeScale = CoerceLocalOption(settings["LocalRopeScale"]?.ToString(), LocalRopeScaleOptions, "Auto");
         LocalVariantExtendContextIntoRam = ParseBool(settings["LocalExtendContextIntoRam"]?.ToString() ?? string.Empty, false);
+        // The note belongs to the profile it was written for.
+        LocalYarnUntickedByWizardNote = string.Empty;
         LocalVariantUseYarn = ParseBool(settings["LocalUseYarn"]?.ToString() ?? string.Empty, true);
         LocalVariantYarnMaxContext = CoerceLocalOption(settings["LocalYarnMaxContext"]?.ToString(), LocalYarnMaxContextOptions, "Auto");
         LocalVariantSwaFull = CoerceOnOff(settings["LocalSwaFull"]?.ToString(), advice.EnableSwaFull ? "Enabled" : "Disabled");

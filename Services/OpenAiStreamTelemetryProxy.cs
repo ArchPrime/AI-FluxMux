@@ -70,7 +70,8 @@ public static class OpenAiStreamTelemetryProxy
         LocalSessionArtifacts? artifacts = null,
         int maxTokens = 0,
         Action? onFirstContentToken = null,
-        Action? onFirstReasoningToken = null)
+        Action? onFirstReasoningToken = null,
+        Action<int, int>? onUsage = null)
     {
         var sanitizeResponses = !string.IsNullOrWhiteSpace(localReasoningMode);
         LocalToolCallHealSession? healSession = declaredTools is { Count: > 0 } || artifacts is not null
@@ -80,7 +81,8 @@ public static class OpenAiStreamTelemetryProxy
             || healSession is not null
             || (tracker is not null && tracker.IsEnabled)
             || onFirstContentToken is not null
-            || onFirstReasoningToken is not null;
+            || onFirstReasoningToken is not null
+            || onUsage is not null;
         if (!parseLines)
         {
             await CopyFlushingAsync(upstream, downstream, cancellationToken, onUpstreamBytes).ConfigureAwait(false);
@@ -176,6 +178,11 @@ public static class OpenAiStreamTelemetryProxy
             }
 
             tracker?.ProcessSseLine(line);
+            if (onUsage is not null && ReplyUsage.TryRead(line, out var usedPrompt, out var usedCompletion))
+            {
+                onUsage(usedPrompt, usedCompletion);
+            }
+
             if (streamSession is { IsThinkOnly: true }
                 && healSession is not { Healed: true }
                 && IsDoneDataLine(line)
