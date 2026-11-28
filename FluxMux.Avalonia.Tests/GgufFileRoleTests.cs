@@ -126,11 +126,12 @@ public sealed class GgufFileRoleTests : IDisposable
         var speedFirst = Wizard("ngram-simple", "Speed", "Context length", "Fidelity", "Stability", "Reply length", "Reasoning depth");
         Assert.Equal("draft-dspark", speedFirst["LocalSpecType"]);
         // Speed first starts from the lower Context (131,072); the drafter's file, buffers and its
-        // 4 KB/token cache come out of it: (131072 x 16384 - 503889952 - 256 MiB) / (16384 + 4096).
+        // cache (4 KB/token at f16, run at the model's q8_0: 4096 x 8.5 / 16) come out of it.
         var fixedBytes = LocalPrioritySettingsCalculator.DrafterReserveBytes(503889952);
-        var expected = (int)(Math.Floor((131072.0 * 16384 - fixedBytes) / (16384 + 4096) / 1024) * 1024);
+        var drafterKv = 4096 * 8.5 / 16;
+        var expected = (int)(Math.Floor((131072.0 * 16384 - fixedBytes) / (16384 + drafterKv) / 1024) * 1024);
         Assert.Equal(expected.ToString(), speedFirst["OverrideContext"]);
-        Assert.InRange(expected, 60_000, 70_000);
+        Assert.InRange(expected, 70_000, 80_000);
 
         var contextFirst = Wizard("ngram-simple", "Context length", "Speed", "Fidelity", "Stability", "Reply length", "Reasoning depth");
         Assert.Equal("ngram-simple", contextFirst["LocalSpecType"]);

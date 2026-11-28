@@ -166,6 +166,9 @@ public sealed class FluxMuxRuntimeService
 		/// </summary>
 		public long DrafterKvBytesPerToken { get; init; }
 
+		/// <summary>The cache types this llama-server build accepts (--cache-type-k "allowed values"); empty when unknown.</summary>
+		public IReadOnlyList<string> AllowedKvCacheTypes { get; init; } = Array.Empty<string>();
+
 		public bool EnableSwaFull { get; init; }
 
 		/// <summary>
@@ -6547,6 +6550,7 @@ public sealed class FluxMuxRuntimeService
 		{
 			list.Add("--no-ui");
 		}
+		bool drafterLaunched = false;
 		string specType = GetString(profile, "LocalSpecType");
 		if (string.IsNullOrWhiteSpace(specType) || specType.Equals("Auto", StringComparison.OrdinalIgnoreCase))
 		{
@@ -6568,6 +6572,7 @@ public sealed class FluxMuxRuntimeService
 			{
 				list.Add("--model-draft");
 				list.Add(localHardwareLaunchAdvice.DrafterPath);
+				drafterLaunched = true;
 				if (!offloadMode.Equals("CPU only", StringComparison.OrdinalIgnoreCase) && SupportsArg(helpText, "--n-gpu-layers-draft"))
 				{
 					list.Add("--n-gpu-layers-draft");
@@ -6777,12 +6782,22 @@ public sealed class FluxMuxRuntimeService
 			list.Add(loraPath);
 		}
 		string specDraftKvK = GetString(profile, "LocalSpecDraftKvK");
+		string specDraftKvV = GetString(profile, "LocalSpecDraftKvV");
+		// A drafter keeps the model's cache type unless set (28 Nov): llama-server's draft default is
+		// f16, which doubled DSpark's cache against the model's q8_0 and is not what the wizard sized.
+		if (drafterLaunched && (string.IsNullOrWhiteSpace(specDraftKvK) || specDraftKvK.Equals("Auto", StringComparison.OrdinalIgnoreCase)))
+		{
+			specDraftKvK = kvCacheTypeK;
+		}
+		if (drafterLaunched && (string.IsNullOrWhiteSpace(specDraftKvV) || specDraftKvV.Equals("Auto", StringComparison.OrdinalIgnoreCase)))
+		{
+			specDraftKvV = kvCacheTypeV;
+		}
 		if (!string.IsNullOrWhiteSpace(specDraftKvK) && !specDraftKvK.Equals("Auto", StringComparison.OrdinalIgnoreCase) && SupportsArg(helpText, "--spec-draft-type-k"))
 		{
 			list.Add("--spec-draft-type-k");
 			list.Add(specDraftKvK);
 		}
-		string specDraftKvV = GetString(profile, "LocalSpecDraftKvV");
 		if (!string.IsNullOrWhiteSpace(specDraftKvV) && !specDraftKvV.Equals("Auto", StringComparison.OrdinalIgnoreCase) && SupportsArg(helpText, "--spec-draft-type-v"))
 		{
 			list.Add("--spec-draft-type-v");
@@ -7312,6 +7327,33 @@ public sealed class FluxMuxRuntimeService
 	/// the GGUF has MTP heads, and the ngram types. Draft-model types need a draft file and are not
 	/// offered here.
 	/// </summary>
+	/// <summary>The cache types this llama-server build lists as allowed for --cache-type-k; empty when the help has none.</summary>
+	private IReadOnlyList<string> AllowedKvCacheTypes()
+	{
+		try
+		{
+			string help = GetLlamaHelpText(ResolveLlamaServerPath());
+			int at = help.IndexOf("--cache-type-k", StringComparison.OrdinalIgnoreCase);
+			int allowed = at < 0 ? -1 : help.IndexOf("allowed values:", at, StringComparison.OrdinalIgnoreCase);
+			if (allowed < 0 || allowed - at > 400)
+			{
+				return Array.Empty<string>();
+			}
+			int start = allowed + "allowed values:".Length;
+			int end = help.IndexOf("(default", start, StringComparison.OrdinalIgnoreCase);
+			string list = help.Substring(start, (end > start ? end : Math.Min(help.Length, start + 200)) - start);
+			return list.Split(new[] { ',', ' ', '\r', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries)
+				.Select(type => type.Trim().ToLowerInvariant())
+				.Where(type => type.Length > 1 && type.All(ch => char.IsLetterOrDigit(ch) || ch == '_'))
+				.Distinct()
+				.ToArray();
+		}
+		catch
+		{
+			return Array.Empty<string>();
+		}
+	}
+
 	public IReadOnlyList<string> GetSpeculativeTypesFor(LocalHardwareLaunchAdvice advice)
 	{
 		HashSet<string> listed;
@@ -8053,6 +8095,7 @@ public sealed class FluxMuxRuntimeService
 			DrafterSpecType = drafter?.SpecType,
 			DrafterBytes = drafter?.Bytes ?? 0,
 			DrafterKvBytesPerToken = drafter?.KvBytesPerToken ?? 0,
+			AllowedKvCacheTypes = AllowedKvCacheTypes(),
 			KvComputeBudgetGb = nvidia ? Math.Max(0.0, gpuGb - fileGb - overheadBaseGb - (visionEnabled ? visionReserveGb : 0.0)) : 0.0,
 			SlidingWindowPattern = slidingWindowPattern,
 			HybridKv = hybridKv,

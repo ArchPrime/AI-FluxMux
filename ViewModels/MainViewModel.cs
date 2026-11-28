@@ -8358,8 +8358,9 @@ public partial class MainViewModel : ViewModelBase
 
     public ObservableCollection<LocalVisionProjectorChoice> LocalVariantVisionProjectorChoices { get; } = [];
 
+    /// <summary>Manual cache types: what the llama-server build accepts (refreshed on profile load), best first.</summary>
     public ObservableCollection<string> LocalKvCacheOptions { get; } =
-    ["f16", "q8_0", "q6_k", "q5_1", "q4_1"];
+    ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"];
 
     public ObservableCollection<string> LocalChatTemplateOptions { get; } =
     ["Auto", "chatml", "qwen", "llama3", "mistral", "deepseek"];
@@ -21876,18 +21877,7 @@ public partial class MainViewModel : ViewModelBase
     }
 
     private static double ResolveKvBytesPerToken(string keyType, string valueType)
-    {
-        static double Resolve(string type) => type.ToLowerInvariant() switch
-        {
-            "q4_1" => 64 * 1024d,
-            "q5_1" => 80 * 1024d,
-            "q6_k" => 96 * 1024d,
-            "q8_0" => 128 * 1024d,
-            _ => 192 * 1024d
-        };
-
-        return Resolve(keyType) + Resolve(valueType);
-    }
+        => (LocalPrioritySettingsCalculator.KvBytesPerTokenForType(keyType) + LocalPrioritySettingsCalculator.KvBytesPerTokenForType(valueType)) / 2;
 
     private void UpdateVariantEditability()
     {
@@ -23055,6 +23045,7 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantUbatchSize = CoerceLocalOption(settings["LocalUbatchSize"]?.ToString(), LocalUbatchSizeOptions, advice.UbatchSize);
         var specFallback = advice.SpecType;
         RefreshLocalSpecTypeOptions(advice, FluxMuxRuntimeService.NormalizeLlamaSpecType(settings["LocalSpecType"]?.ToString()));
+        RefreshLocalKvCacheOptions(advice, settings["LocalKvCacheTypeK"]?.ToString(), settings["LocalKvCacheTypeV"]?.ToString());
         LocalVariantSpecType = CoerceLocalOption(
             FluxMuxRuntimeService.NormalizeLlamaSpecType(settings["LocalSpecType"]?.ToString()),
             LocalSpecTypeOptions,
@@ -24918,7 +24909,7 @@ public partial class MainViewModel : ViewModelBase
         // Build the options list: only include types that physically fit AND are usable speed-wise.
         // A KV cache that's mostly in system RAM gives minutes-per-token, which is not a setting
         // a user should have to consciously choose. Exclude those options entirely.
-        string[] allTypes = ["q8_0", "q6_k", "q5_1", "q4_1", "q4_0"];
+        var allTypes = LocalPrioritySettingsCalculator.WizardKvLadder(advice.AllowedKvCacheTypes);
         var fitting = new List<string>();
         foreach (var type in allTypes)
         {
@@ -25056,8 +25047,8 @@ public partial class MainViewModel : ViewModelBase
         string fidelityLine = choice.ToLowerInvariant() switch
         {
             "q8_0" => "Best answer quality.",
-            "q6_k" => "Slight quality loss vs best.",
-            "q5_1" => "Moderate quality loss vs best.",
+            "q5_1" or "q5_0" => "Moderate quality loss vs best.",
+            "q4_0" => "Noticeable quality loss — the model may lose track of details in very long chats.",
             "q4_1" => "Noticeable quality loss — the model may lose track of details in very long chats.",
             _ => string.Empty
         };
@@ -25576,29 +25567,57 @@ public partial class MainViewModel : ViewModelBase
     /// list in place and never removing the current choice, so the selection is not cleared.
     /// </summary>
     private void RefreshLocalSpecTypeOptions(FluxMuxRuntimeService.LocalHardwareLaunchAdvice advice, string? keep)
+        => SyncOptionsInPlace(LocalSpecTypeOptions, _runtimeService.GetSpeculativeTypesFor(advice), keep, LocalVariantSpecType);
+
+    /// <summary>
+    /// The manual cache types the llama-server build accepts (28 Nov), best first, changed in place
+    /// like the speculative list. Unknown help keeps the list as it is.
+    /// </summary>
+    private void RefreshLocalKvCacheOptions(FluxMuxRuntimeService.LocalHardwareLaunchAdvice advice, string? keepK, string? keepV)
     {
-        var wanted = _runtimeService.GetSpeculativeTypesFor(advice).ToList();
+        if (advice.AllowedKvCacheTypes.Count == 0)
+        {
+            return;
+        }
+
+        string[] manual = ["f16", "q8_0", "q5_1", "q5_0", "q4_1", "q4_0"];
+        var wanted = manual.Where(type => advice.AllowedKvCacheTypes.Contains(type, StringComparer.OrdinalIgnoreCase)).ToList();
+        if (!string.IsNullOrWhiteSpace(keepV) && !wanted.Contains(keepV, StringComparer.OrdinalIgnoreCase))
+        {
+            wanted.Add(keepV);
+        }
+
+        SyncOptionsInPlace(LocalKvCacheOptions, wanted, keepK, LocalVariantKvCacheTypeK, LocalVariantKvCacheTypeV);
+    }
+
+    /// <summary>
+    /// Makes <paramref name="options"/> match <paramref name="wantedOptions"/> in order, in place, never
+    /// removing <paramref name="keep"/> or a currently selected value, so a bound selection is not cleared.
+    /// </summary>
+    private static void SyncOptionsInPlace(ObservableCollection<string> options, IEnumerable<string> wantedOptions, string? keep, params string?[] selected)
+    {
+        var wanted = wantedOptions.ToList();
         if (!string.IsNullOrWhiteSpace(keep) && !wanted.Contains(keep, StringComparer.OrdinalIgnoreCase))
         {
             wanted.Add(keep);
         }
 
-        foreach (var stale in LocalSpecTypeOptions.Where(option => !wanted.Contains(option, StringComparer.OrdinalIgnoreCase)
-                     && !option.Equals(LocalVariantSpecType, StringComparison.OrdinalIgnoreCase)).ToList())
+        foreach (var stale in options.Where(option => !wanted.Contains(option, StringComparer.OrdinalIgnoreCase)
+                     && !selected.Any(value => option.Equals(value, StringComparison.OrdinalIgnoreCase))).ToList())
         {
-            LocalSpecTypeOptions.Remove(stale);
+            options.Remove(stale);
         }
 
         for (var i = 0; i < wanted.Count; i++)
         {
-            var existing = LocalSpecTypeOptions.IndexOf(LocalSpecTypeOptions.FirstOrDefault(option => option.Equals(wanted[i], StringComparison.OrdinalIgnoreCase)) ?? string.Empty);
+            var existing = options.IndexOf(options.FirstOrDefault(option => option.Equals(wanted[i], StringComparison.OrdinalIgnoreCase)) ?? string.Empty);
             if (existing < 0)
             {
-                LocalSpecTypeOptions.Insert(Math.Min(i, LocalSpecTypeOptions.Count), wanted[i]);
+                options.Insert(Math.Min(i, options.Count), wanted[i]);
             }
-            else if (existing != i && i < LocalSpecTypeOptions.Count)
+            else if (existing != i && i < options.Count)
             {
-                LocalSpecTypeOptions.Move(existing, i);
+                options.Move(existing, i);
             }
         }
     }

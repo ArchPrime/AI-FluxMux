@@ -195,6 +195,23 @@ public static class LocalPrioritySettingsCalculator
             : fidelity == 0 && advice.PreferFitEnabled == false
                 ? "f16"
                 : PickKvTypeForYarnFit(advice, int.TryParse(ctx, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ctxInt) ? ctxInt : 0, extendContextIntoRam, effectiveKvBytesPerToken);
+        // Context length first with Fidelity below it, and the model's own window larger than what
+        // fits at this cache type (28 Nov: Inkling 2 Mini, 1M window, 668K at q8_0 with Images):
+        // step down the ladder until the window fits, as far as q4_0.
+        var extendingIntoRam = extendContextIntoRam && extendedCeiling > 0 && nativeCeiling > 0;
+        var widenedUncapped = 0;
+        if (kvCacheChoice is null && context == 0 && !extendingIntoRam && !KvMinimumApplies(resolved)
+            && advice.ContextPriorityFirst > 0 && advice.ModelMaxCtx > advice.ContextPriorityFirst
+            && int.TryParse(ctx, NumberStyles.Integer, CultureInfo.InvariantCulture, out var atLadderTop)
+            && atLadderTop >= advice.ContextPriorityFirst)
+        {
+            var fromKv = kv;
+            (kv, var widened) = WidenContextWithSmallerCache(advice, kv);
+            ctx = widened.ToString(CultureInfo.InvariantCulture);
+            // What the memory holds at the new type before the model's window caps it, so a drafter
+            // is taken from spare room first.
+            widenedUncapped = (int)(advice.ContextPriorityFirst * KvBitsForType(fromKv) / KvBitsForType(kv));
+        }
         // Temperature starts from the model maker's recommendation in the GGUF (28 Nov: Inkling 2 Mini
         // and Qwen 3.8 both say 1.0; the wizard used to always pick 0.2-0.4), else 0.3. Fidelity or
         // Stability first lowers it to 60 % for more repeatable answers. Speed does not change it.
@@ -278,11 +295,15 @@ public static class LocalPrioritySettingsCalculator
 
         // The drafter's memory comes out of Context: its file and buffers, plus its own KV cache,
         // which grows with Context too (c x (model + drafter KV) + fixed <= what Context had).
-        var drafterKvPerToken = drafterReserveBytes > 0 ? Math.Max(0, advice.DrafterKvBytesPerToken) : 0;
-        if (drafterReserveBytes > 0 && advice.KvBytesPerToken > 0 && !extending
+        // The launch gives the drafter the model's cache type (advice figure is f16), and the model's
+        // KV per token is scaled from q8_0 to the chosen type.
+        var drafterKvPerToken = drafterReserveBytes > 0 ? Math.Max(0, advice.DrafterKvBytesPerToken) * KvBitsForType(kv) / KvBitsForType("f16") : 0;
+        var modelKvPerToken = advice.KvBytesPerToken * KvBitsForType(kv) / KvBitsForType("q8_0");
+        if (drafterReserveBytes > 0 && modelKvPerToken > 0 && !extending
             && int.TryParse(ctx, NumberStyles.Integer, CultureInfo.InvariantCulture, out var beforeDrafter))
         {
-            ctx = DrafterFitContext(beforeDrafter, advice.KvBytesPerToken, drafterKvPerToken, drafterReserveBytes).ToString(CultureInfo.InvariantCulture);
+            var fitted = DrafterFitContext(Math.Max(beforeDrafter, widenedUncapped), modelKvPerToken, drafterKvPerToken, drafterReserveBytes);
+            ctx = Math.Min(fitted, widenedUncapped > 0 ? Math.Max(beforeDrafter, Math.Min(fitted, advice.ModelMaxCtx)) : fitted).ToString(CultureInfo.InvariantCulture);
         }
 
         // A learned compute buffer that grows with micro-batch x Context (28 Nov): fit both to the card.
@@ -326,6 +347,28 @@ public static class LocalPrioritySettingsCalculator
             ["LocalRopeScaling"] = ropeScaling,
             ["LocalRopeScale"] = ropeScale
         };
+    }
+
+    /// <summary>
+    /// The smallest step down the cache ladder from <paramref name="kv"/> at which the model's own
+    /// window fits the memory Context had at <paramref name="kv"/> (advice.ContextPriorityFirst);
+    /// with none, the smallest step and the Context it fits. Never below <paramref name="kv"/>'s Context.
+    /// </summary>
+    public static (string Kv, int Context) WidenContextWithSmallerCache(FluxMuxRuntimeService.LocalHardwareLaunchAdvice advice, string kv)
+    {
+        var baseBits = KvBitsForType(kv);
+        var best = (Kv: kv, Context: advice.ContextPriorityFirst);
+        foreach (var type in WizardKvLadder(advice.AllowedKvCacheTypes).Where(type => KvBitsForType(type) < baseBits))
+        {
+            var fits = (int)(Math.Floor(advice.ContextPriorityFirst * baseBits / KvBitsForType(type) / 1024.0) * 1024);
+            best = (type, Math.Min(advice.ModelMaxCtx, fits));
+            if (fits >= advice.ModelMaxCtx)
+            {
+                break;
+            }
+        }
+
+        return best.Context > advice.ContextPriorityFirst ? best : (kv, advice.ContextPriorityFirst);
     }
 
     /// <summary>Fixed graphics memory for a drafter: its file and 256 MiB for its buffers (its KV cache is per token).</summary>
@@ -613,20 +656,40 @@ public static class LocalPrioritySettingsCalculator
     /// <summary>
     /// Maps a KV cache type to its bytes-per-token (K+V combined).
     /// </summary>
-    public static double KvBytesPerTokenForType(string kvType)
+    /// <summary>
+    /// Bits per stored value for each llama.cpp cache type (28 Nov): q4_0 4.5, q4_1 5, q5_0 5.5,
+    /// q5_1 6, q8_0 8.5, f16/bf16 16. The old table put q4_0 at 38 % of q8_0 (it is 53 %) and
+    /// listed q6_k, which llama-server does not accept as a cache type.
+    /// </summary>
+    public static double KvBitsForType(string? kvType) => (kvType ?? string.Empty).Trim().ToLowerInvariant() switch
     {
-        static double Resolve(string type) => type.ToLowerInvariant() switch
-        {
-            "q4_0" => 48 * 1024d,
-            "q4_1" => 64 * 1024d,
-            "q5_0" => 72 * 1024d,
-            "q5_1" => 80 * 1024d,
-            "q6_k" => 96 * 1024d,
-            "q8_0" => 128 * 1024d,
-            _ => 192 * 1024d // f16
-        };
+        "q4_0" or "iq4_nl" => 4.5,
+        "q4_1" => 5.0,
+        "q5_0" => 5.5,
+        "q5_1" => 6.0,
+        "q8_0" => 8.5,
+        "f8_e4m3" => 8.0,
+        "f32" => 32.0,
+        _ => 16.0 // f16, bf16
+    };
 
-        return Resolve(kvType) * 2; // K + V
+    /// <summary>Generic KV bytes per token (K + V) for a cache type, scaled from 128 KiB per side at q8_0.</summary>
+    public static double KvBytesPerTokenForType(string kvType)
+        => 128 * 1024d * KvBitsForType(kvType) / KvBitsForType("q8_0") * 2;
+
+    /// <summary>
+    /// The cache types the wizard, YaRN fit and AutoTune pick from, best first: q8_0 then q4_0,
+    /// those this llama-server build accepts (<paramref name="allowed"/>; all when unknown). They
+    /// are the quantized types every CUDA build runs with Flash Attention; q5/q4_1 need a build
+    /// with all FA quant kernels, so they stay manual choices.
+    /// </summary>
+    public static IReadOnlyList<string> WizardKvLadder(IReadOnlyCollection<string>? allowed)
+    {
+        string[] ladder = ["q8_0", "q4_0"];
+        var usable = allowed is { Count: > 0 }
+            ? ladder.Where(type => allowed.Contains(type, StringComparer.OrdinalIgnoreCase)).ToArray()
+            : ladder;
+        return usable.Length > 0 ? usable : ladder;
     }
 
     /// <summary>
@@ -751,40 +814,19 @@ public static class LocalPrioritySettingsCalculator
             effectiveScale = (double)effectiveKvBytesPerToken.Value / rawQ8;
         }
 
-        // Try q8_0 first (best fidelity). If the KV cache fits in VRAM, use it.
-        double q8BytesPerToken = KvBytesPerTokenForType("q8_0") * effectiveScale;
-        double q8KvGb = contextTokens * q8BytesPerToken / 1073741824.0;
-        if (q8KvGb <= kvVramGb)
+        // The ladder, best first; the first whose KV cache fits in VRAM, else the smallest to
+        // keep the RAM spill down.
+        var ladder = WizardKvLadder(advice.AllowedKvCacheTypes);
+        foreach (var type in ladder)
         {
-            return "q8_0";
+            double kvGb = contextTokens * KvBytesPerTokenForType(type) * effectiveScale / 1073741824.0;
+            if (kvGb <= kvVramGb)
+            {
+                return type;
+            }
         }
 
-        // q8_0 doesn't fit. Try q6_k.
-        double q6BytesPerToken = KvBytesPerTokenForType("q6_k") * effectiveScale;
-        double q6KvGb = contextTokens * q6BytesPerToken / 1073741824.0;
-        if (q6KvGb <= kvVramGb)
-        {
-            return "q6_k";
-        }
-
-        // q6_k doesn't fit. Try q5_0.
-        double q5BytesPerToken = KvBytesPerTokenForType("q5_0") * effectiveScale;
-        double q5KvGb = contextTokens * q5BytesPerToken / 1073741824.0;
-        if (q5KvGb <= kvVramGb)
-        {
-            return "q5_0";
-        }
-
-        // q5_0 doesn't fit. Try q4_0.
-        double q4BytesPerToken = KvBytesPerTokenForType("q4_0") * effectiveScale;
-        double q4KvGb = contextTokens * q4BytesPerToken / 1073741824.0;
-        if (q4KvGb <= kvVramGb)
-        {
-            return "q4_0";
-        }
-
-        // Nothing fits fully in VRAM. Use q4_0 (smallest) to minimize the RAM spill.
-        return "q4_0";
+        return ladder[^1];
     }
 
     public static string KeepHigherInteger(int wizardValue, string? currentValue)

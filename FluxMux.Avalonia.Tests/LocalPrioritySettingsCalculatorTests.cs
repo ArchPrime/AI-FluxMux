@@ -454,8 +454,16 @@ public sealed class LocalPrioritySettingsCalculatorTests
             threadsBatch: "8",
             extendContextIntoRam: false);
 
-        // Native ceiling: ContextPriorityFirst is capped at modelMaxCtx (131072), so 65536.
-        Assert.Equal("65536", settings["OverrideContext"]);
+        // 65,536 fits at q8_0. Context first with Fidelity below it steps the cache down to q4_0
+        // to reach the native window (28 Nov): 65,536 x 8.5 / 4.5 bits, snapped, under 131,072.
+        Assert.Equal("q4_0", settings["LocalKvCacheTypeK"]);
+        Assert.Equal("122880", settings["OverrideContext"]);
+
+        // Fidelity above Context keeps q8_0 and its Context.
+        var fidelityFirst = LocalPrioritySettingsCalculator.Calculate(
+            LocalPrioritySettingsCalculator.ResolveOrder(new[] { "Fidelity", "Context length", "Speed", "Reasoning depth", "Reply length", "Stability" }),
+            advice, "qwen", "ngram-simple", "Disabled", true, "Disabled", string.Empty, "1344", "8", "8", extendContextIntoRam: false);
+        Assert.NotEqual("q4_0", fidelityFirst["LocalKvCacheTypeK"]);
         Assert.Equal("Auto", settings["LocalRopeScaling"]);
         Assert.Equal("Auto", settings["LocalRopeScale"]);
     }
