@@ -229,6 +229,9 @@ public sealed class FluxMuxRuntimeService
 		/// <summary>Multi-token prediction heads in the file (nextn_predict_layers), which draft-mtp drafts with.</summary>
 		public int NextnPredictLayers { get; init; }
 
+		/// <summary>True when the file declares a state-space-model layout (ssm.state_size), i.e. a hybrid linear-attention model.</summary>
+		public bool HasSsm { get; init; }
+
 		public long FileLength { get; init; }
 
 		public DateTime LastWriteUtc { get; init; }
@@ -6922,39 +6925,45 @@ public sealed class FluxMuxRuntimeService
 
 	public static bool IsQwen38Model(string modelPathOrFile)
 	{
-		string stem = ChatTemplateModelStem(modelPathOrFile);
-		return stem.Contains("qwen3.8", StringComparison.Ordinal) || stem.Contains("qwen3_8", StringComparison.Ordinal) || stem.Contains("qwen-3.8", StringComparison.Ordinal);
+		// File-derived: the Qwen 3.8 GGUF declares architecture "qwen35" (a hybrid linear-attention
+		// model with state-space layers). Match on the architecture, not the file name.
+		var info = GgufFileRole.Read(modelPathOrFile);
+		return info is not null && info.Architecture.Contains("qwen3", StringComparison.OrdinalIgnoreCase);
 	}
 
 	public static bool IsQwen3Family(string modelPathOrFile)
 	{
-		return ChatTemplateModelStem(modelPathOrFile).Contains("qwen3", StringComparison.Ordinal);
+		// File-derived: any Qwen 3.x GGUF declares an architecture starting with "qwen3".
+		var info = GgufFileRole.Read(modelPathOrFile);
+		return info is not null && info.Architecture.Contains("qwen3", StringComparison.OrdinalIgnoreCase);
 	}
 
 	public static string RecommendStoredChatTemplate(string modelPathOrFile)
 	{
-		string stem = ChatTemplateModelStem(modelPathOrFile);
-		if (string.IsNullOrWhiteSpace(stem))
+		// File-derived: the chat template comes from the GGUF's architecture, not the file name.
+		var info = GgufFileRole.Read(modelPathOrFile);
+		if (info is null || string.IsNullOrWhiteSpace(info.Architecture))
 		{
 			return "Auto";
 		}
-		if (IsQwen3Family(modelPathOrFile))
+		var arch = info.Architecture.ToLowerInvariant();
+		if (arch.Contains("qwen3", StringComparison.Ordinal))
 		{
 			return "Auto";
 		}
-		if (stem.Contains("qwen", StringComparison.Ordinal))
+		if (arch.Contains("qwen", StringComparison.Ordinal))
 		{
 			return "qwen";
 		}
-		if (stem.Contains("llama", StringComparison.Ordinal))
+		if (arch.Contains("llama", StringComparison.Ordinal))
 		{
 			return "llama3";
 		}
-		if (stem.Contains("mistral", StringComparison.Ordinal))
+		if (arch.Contains("mistral", StringComparison.Ordinal))
 		{
 			return "mistral";
 		}
-		if (stem.Contains("deepseek", StringComparison.Ordinal))
+		if (arch.Contains("deepseek", StringComparison.Ordinal))
 		{
 			return "deepseek";
 		}
@@ -6975,21 +6984,13 @@ public sealed class FluxMuxRuntimeService
 		return normalized;
 	}
 
-	private static string ChatTemplateModelStem(string modelPathOrFile)
-	{
-		string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(modelPathOrFile ?? string.Empty);
-		return string.IsNullOrWhiteSpace(fileNameWithoutExtension) ? (modelPathOrFile ?? string.Empty).Trim().ToLowerInvariant() : fileNameWithoutExtension.ToLowerInvariant();
-	}
-
 	private static string ResolveChatTemplate(string configuredTemplate, string modelPath)
 	{
-		string modelStem = Path.GetFileNameWithoutExtension(modelPath).ToLowerInvariant();
+		// File-derived: the chat template comes from the GGUF's architecture, not the file name.
+		var info = GgufFileRole.Read(modelPath);
+		var arch = info?.Architecture.ToLowerInvariant() ?? string.Empty;
 		string configured = (configuredTemplate ?? string.Empty).Trim();
-		if (IsQwen38Model(modelPath))
-		{
-			return string.Empty;
-		}
-		if (modelStem.Contains("qwen3", StringComparison.Ordinal) && (string.IsNullOrWhiteSpace(configured) || configured.Equals("Auto", StringComparison.OrdinalIgnoreCase) || configured.Equals("qwen", StringComparison.OrdinalIgnoreCase)))
+		if (arch.Contains("qwen3", StringComparison.Ordinal) && (string.IsNullOrWhiteSpace(configured) || configured.Equals("Auto", StringComparison.OrdinalIgnoreCase) || configured.Equals("qwen", StringComparison.OrdinalIgnoreCase)))
 		{
 			return "chatml";
 		}
@@ -6997,11 +6998,11 @@ public sealed class FluxMuxRuntimeService
 		{
 			return configured;
 		}
-		if (modelStem.Contains("qwen", StringComparison.Ordinal))
+		if (arch.Contains("qwen", StringComparison.Ordinal))
 		{
 			return "qwen";
 		}
-		if (modelStem.Contains("gemma", StringComparison.Ordinal))
+		if (arch.Contains("gemma", StringComparison.Ordinal))
 		{
 			return "gemma";
 		}
@@ -8010,8 +8011,7 @@ public sealed class FluxMuxRuntimeService
 		}
 		GgufModelShape ggufModelShape = TryReadGgufModelShape(modelPath);
 		var drafter = FindDrafterFor(modelPath);
-		bool isQwen38 = IsQwen38Model(modelPath);
-		bool hybridKv = isQwen38 || IsHybridLinearAttentionArchitecture(ggufModelShape);
+		bool hybridKv = (ggufModelShape?.HasSsm ?? false) || IsHybridLinearAttentionArchitecture(ggufModelShape);
 		int reportedCtx = ((ggufModelShape != null && ggufModelShape.ContextLength > 0) ? ggufModelShape.ContextLength : 0);
 		int modelMaxCtx = LocalVramFootprintEstimate.AdviseModelMaxContext(reportedCtx);
 		// The model's TRUE native trained window (from the GGUF), used for YaRN extension
@@ -8279,6 +8279,7 @@ public sealed class FluxMuxRuntimeService
 			bool[] slidingWindowLayers = Array.Empty<bool>();
 			double? samplingTemperature = null;
 			int nextnPredictLayers = 0;
+			bool hasSsm = false;
 			for (ulong metadataIndex = 0uL; metadataIndex < metadataCount; metadataIndex++)
 			{
 				string keyName = ReadGgufString(binaryReader);
@@ -8368,6 +8369,10 @@ public sealed class FluxMuxRuntimeService
 				{
 					nextnPredictLayers = value2;
 				}
+				else if (keyName.EndsWith(".ssm.state_size", StringComparison.Ordinal))
+				{
+					hasSsm = value2 > 0;
+				}
 			}
 			GgufModelShape ggufModelShape = new GgufModelShape
 			{
@@ -8385,6 +8390,7 @@ public sealed class FluxMuxRuntimeService
 				LoopStart = loopStart,
 				SamplingTemperature = samplingTemperature,
 				NextnPredictLayers = nextnPredictLayers,
+				HasSsm = hasSsm,
 				LoopEnd = loopEnd,
 				FileLength = fileInfo.Length,
 				LastWriteUtc = fileInfo.LastWriteTimeUtc
