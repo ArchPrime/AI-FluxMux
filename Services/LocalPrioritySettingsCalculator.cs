@@ -209,6 +209,20 @@ public static class LocalPrioritySettingsCalculator
         // variants ended up with MTP Disabled in Nov 2026. The caller passes the form's current
         // choice (or the model-based guess when unset), and the preset keeps it.
         var spec = specType;
+        // A drafter beside the model (DSpark for Inkling 2 Mini, 28 Nov) is faster than ngram but
+        // takes graphics memory from Context, so it is chosen when Speed ranks above Context length,
+        // and only in place of an ngram type or Auto (never over Disabled or MTP).
+        var drafterSpec = advice.DrafterSpecType;
+        if (!string.IsNullOrWhiteSpace(drafterSpec) && speed < context
+            && (string.IsNullOrWhiteSpace(spec) || spec.Equals("Auto", StringComparison.OrdinalIgnoreCase)
+                || spec.StartsWith("ngram", StringComparison.OrdinalIgnoreCase)))
+        {
+            spec = drafterSpec;
+        }
+
+        var drafterReserveBytes = !string.IsNullOrWhiteSpace(drafterSpec) && drafterSpec.Equals(spec, StringComparison.OrdinalIgnoreCase)
+            ? DrafterReserveBytes(advice.DrafterBytes)
+            : 0;
         // With effort levels known for the model's template (recorded at its last load), Reasoning
         // depth's rank picks a level: first XHigh, second Medium, lower Off. Without them, On or Off.
         // The gateway sends the template's nearest level (LocalChatTemplateTraits.NearestEffort).
@@ -262,12 +276,23 @@ public static class LocalPrioritySettingsCalculator
             }
         }
 
+        // The drafter's memory comes out of Context: its file and buffers, plus its own KV cache,
+        // which grows with Context too (c x (model + drafter KV) + fixed <= what Context had).
+        var drafterKvPerToken = drafterReserveBytes > 0 ? Math.Max(0, advice.DrafterKvBytesPerToken) : 0;
+        if (drafterReserveBytes > 0 && advice.KvBytesPerToken > 0 && !extending
+            && int.TryParse(ctx, NumberStyles.Integer, CultureInfo.InvariantCulture, out var beforeDrafter))
+        {
+            ctx = DrafterFitContext(beforeDrafter, advice.KvBytesPerToken, drafterKvPerToken, drafterReserveBytes).ToString(CultureInfo.InvariantCulture);
+        }
+
         // A learned compute buffer that grows with micro-batch x Context (28 Nov): fit both to the card.
         var swaFullSetting = advice.SlidingWindowPattern ? "Disabled" : advice.EnableSwaFull ? "Enabled" : currentSwaFull;
         (ctx, ubatch, batch) = FitToLearnedCompute(
             advice, ctx, ubatch, batch,
             LearnedComputeBuffer.KvKey(kv, swaFullSetting.Equals("Enabled", StringComparison.OrdinalIgnoreCase)),
-            contextOutranksSpeed: context < speed);
+            contextOutranksSpeed: context < speed,
+            reserveBytes: drafterReserveBytes,
+            extraKvBytesPerToken: drafterKvPerToken);
 
         return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -303,6 +328,20 @@ public static class LocalPrioritySettingsCalculator
         };
     }
 
+    /// <summary>Fixed graphics memory for a drafter: its file and 256 MiB for its buffers (its KV cache is per token).</summary>
+    public static double DrafterReserveBytes(long drafterBytes)
+        => drafterBytes > 0 ? drafterBytes + 256.0 * 1024 * 1024 : 0;
+
+    /// <summary>
+    /// The Context that fits in the memory <paramref name="context"/> used, once a drafter takes
+    /// <paramref name="fixedBytes"/> plus <paramref name="drafterKvPerToken"/> per token; snapped down to 1,024.
+    /// </summary>
+    public static int DrafterFitContext(int context, double kvPerToken, double drafterKvPerToken, double fixedBytes)
+    {
+        var fitted = ((double)context * kvPerToken - fixedBytes) / (kvPerToken + Math.Max(0, drafterKvPerToken));
+        return Math.Max(4096, (int)(Math.Floor(Math.Max(0, fitted) / 1024.0) * 1024));
+    }
+
     /// <summary>Smallest micro-batch the fit lowers to before it lowers Context.</summary>
     public const int SmallestFitUbatch = 64;
 
@@ -321,7 +360,9 @@ public static class LocalPrioritySettingsCalculator
         string ubatch,
         string batch,
         string kvType,
-        bool contextOutranksSpeed)
+        bool contextOutranksSpeed,
+        double reserveBytes = 0,
+        double extraKvBytesPerToken = 0)
     {
         if (advice.LearnedComputeBytesPerUbatchToken is not { Count: > 0 } learned
             || !learned.TryGetValue((kvType ?? string.Empty).Trim().ToLowerInvariant(), out var computePerUbatchToken)
@@ -335,9 +376,9 @@ public static class LocalPrioritySettingsCalculator
 
         var q8 = KvBytesPerTokenForType("q8_0");
         var kvTypeOnly = (kvType ?? "q8_0").Split('+')[0];
-        var kvPerToken = advice.KvBytesPerToken * (q8 > 0 ? KvBytesPerTokenForType(kvTypeOnly) / q8 : 1.0);
+        var kvPerToken = advice.KvBytesPerToken * (q8 > 0 ? KvBytesPerTokenForType(kvTypeOnly) / q8 : 1.0) + Math.Max(0, extraKvBytesPerToken);
         // The same margin the advice keeps when it sizes Context from leftover memory.
-        var budget = advice.KvComputeBudgetGb * 1073741824.0 * 0.92;
+        var budget = Math.Max(0, advice.KvComputeBudgetGb * 1073741824.0 - reserveBytes) * 0.92;
         bool Fits(int c, int u) => (double)c * (kvPerToken + computePerUbatchToken * u) <= budget;
         if (Fits(ctx, ub))
         {

@@ -147,6 +147,25 @@ public sealed class FluxMuxRuntimeService
 		/// </summary>
 		public IReadOnlyList<string> TemplateEffortLevels { get; init; } = Array.Empty<string>();
 
+		/// <summary>
+		/// A drafter beside the model that this llama-server build can run (<see cref="GgufFileRole"/>):
+		/// its path and speculative type, or null. It costs graphics memory, so the wizard uses it only
+		/// with Speed ranked above Context length.
+		/// </summary>
+		public string? DrafterPath { get; init; }
+
+		public string? DrafterSpecType { get; init; }
+
+		/// <summary>The drafter file's size.</summary>
+		public long DrafterBytes { get; init; }
+
+		/// <summary>
+		/// The drafter's own KV cache per Context token, from its layout at f16 (llama-server's draft
+		/// default): DSpark for Inkling has one full-attention layer of three, 8 KV heads x 256, about
+		/// 4 KB/token, 1.6 GB at Context 395,264 (28 Nov, measured +2.3 GB with the file and buffers).
+		/// </summary>
+		public long DrafterKvBytesPerToken { get; init; }
+
 		public bool EnableSwaFull { get; init; }
 
 		/// <summary>
@@ -6539,7 +6558,30 @@ public sealed class FluxMuxRuntimeService
 		{
 			list.Add("--spec-type");
 			list.Add(specType);
-			if (specType.Equals("draft-mtp", StringComparison.OrdinalIgnoreCase))
+			// A draft-model type (DSpark, EAGLE3, ...) runs the drafter found beside the model, on the
+			// graphics card unless the profile is CPU only (28 Nov).
+			bool needsDrafter = specType.StartsWith("draft-", StringComparison.OrdinalIgnoreCase)
+				&& !specType.Equals("draft-mtp", StringComparison.OrdinalIgnoreCase);
+			if (needsDrafter && !string.IsNullOrWhiteSpace(localHardwareLaunchAdvice.DrafterPath)
+				&& specType.Equals(localHardwareLaunchAdvice.DrafterSpecType, StringComparison.OrdinalIgnoreCase)
+				&& SupportsArg(helpText, "--model-draft"))
+			{
+				list.Add("--model-draft");
+				list.Add(localHardwareLaunchAdvice.DrafterPath);
+				if (!offloadMode.Equals("CPU only", StringComparison.OrdinalIgnoreCase) && SupportsArg(helpText, "--n-gpu-layers-draft"))
+				{
+					list.Add("--n-gpu-layers-draft");
+					list.Add("999");
+				}
+			}
+			else if (needsDrafter)
+			{
+				// No matching drafter beside the model: drop the type rather than fail the launch.
+				LogLaunchMonitor("speculative type " + specType + " needs a drafter beside the model and none was found; launching without it");
+				list.RemoveRange(list.Count - 2, 2);
+				specType = "Disabled";
+			}
+			if (specType.StartsWith("draft-", StringComparison.OrdinalIgnoreCase))
 			{
 				int profileInt5 = GetProfileInt(profile, "LocalSpecDraftNMax", 2);
 				if (profileInt5 > 0 && SupportsArg(helpText, "--spec-draft-n-max"))
@@ -7290,8 +7332,57 @@ public sealed class FluxMuxRuntimeService
 		{
 			types.Add("draft-mtp");
 		}
+		if (!string.IsNullOrWhiteSpace(advice.DrafterSpecType) && listed.Contains(advice.DrafterSpecType))
+		{
+			types.Add(advice.DrafterSpecType);
+		}
 		types.AddRange(listed.Where(type => type.StartsWith("ngram", StringComparison.OrdinalIgnoreCase)).OrderBy(type => type.Equals("ngram-simple", StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(type => type, StringComparer.OrdinalIgnoreCase));
 		return types;
+	}
+
+	/// <summary>
+	/// The drafter for <paramref name="modelPath"/>: a GGUF in the same folder with no token
+	/// embeddings of its own whose speculative type this build lists (28 Nov, DSpark for Inkling 2
+	/// Mini). With several, the smallest (least graphics memory). Null when there is none.
+	/// </summary>
+	private (string Path, string SpecType, long Bytes, long KvBytesPerToken)? FindDrafterFor(string modelPath)
+	{
+		try
+		{
+			string? folder = Path.GetDirectoryName(modelPath);
+			if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+			{
+				return null;
+			}
+			HashSet<string> listed = ParseSpecTypeAllowList(GetLlamaHelpText(ResolveLlamaServerPath()));
+			return Directory.EnumerateFiles(folder, "*.gguf", SearchOption.TopDirectoryOnly)
+				.Where(path => !path.Equals(modelPath, StringComparison.OrdinalIgnoreCase))
+				.Select(path => (Path: path, Info: GgufFileRole.Read(path)))
+				.Where(item => item.Info is { IsDrafter: true })
+				.Select(item => (item.Path, SpecType: GgufFileRole.SpecTypeFor(item.Info!, listed), Bytes: item.Info!.Length))
+				.Where(item => item.SpecType is not null)
+				.OrderBy(item => item.Bytes)
+				.Select(item => ((string Path, string SpecType, long Bytes, long KvBytesPerToken)?)(item.Path, item.SpecType!, item.Bytes, DrafterKvBytesPerToken(item.Path)))
+				.FirstOrDefault();
+		}
+		catch
+		{
+			return null;
+		}
+	}
+
+	/// <summary>A drafter's KV cache per token at f16: its full-attention layers x KV heads x (key + value length) x 2 bytes.</summary>
+	private long DrafterKvBytesPerToken(string drafterPath)
+	{
+		GgufModelShape? shape = TryReadGgufModelShape(drafterPath);
+		if (shape == null || shape.BlockCount <= 0 || shape.HeadCountKv <= 0)
+		{
+			return 0;
+		}
+		int fullLayers = shape.SlidingWindowLayers.Length > 0 ? FullAttentionLayerPasses(shape) : shape.BlockCount;
+		int headDim = shape.HeadCount > 0 ? shape.EmbeddingLength / shape.HeadCount : 0;
+		int keyValue = (shape.KeyLength > 0 ? shape.KeyLength : headDim) + (shape.ValueLength > 0 ? shape.ValueLength : headDim);
+		return (long)fullLayers * shape.HeadCountKv * keyValue * 2;
 	}
 
 	private static HashSet<string> ParseSpecTypeAllowList(string helpText)
@@ -7876,6 +7967,7 @@ public sealed class FluxMuxRuntimeService
 		{
 		}
 		GgufModelShape ggufModelShape = TryReadGgufModelShape(modelPath);
+		var drafter = FindDrafterFor(modelPath);
 		bool isQwen38 = IsQwen38Model(modelPath);
 		bool hybridKv = isQwen38 || IsHybridLinearAttentionArchitecture(ggufModelShape);
 		int reportedCtx = ((ggufModelShape != null && ggufModelShape.ContextLength > 0) ? ggufModelShape.ContextLength : 0);
@@ -7957,6 +8049,10 @@ public sealed class FluxMuxRuntimeService
 			KvBytesPerToken = slidingWindowPattern ? Math.Max(1L, (long)(gbPer8k * 1073741824.0 / 8192.0)) : 262144,
 			LearnedComputeBytesPerUbatchToken = LearnedComputeFor(modelPath),
 			TemplateEffortLevels = RecordedEffortLevels(modelPath),
+			DrafterPath = drafter?.Path,
+			DrafterSpecType = drafter?.SpecType,
+			DrafterBytes = drafter?.Bytes ?? 0,
+			DrafterKvBytesPerToken = drafter?.KvBytesPerToken ?? 0,
 			KvComputeBudgetGb = nvidia ? Math.Max(0.0, gpuGb - fileGb - overheadBaseGb - (visionEnabled ? visionReserveGb : 0.0)) : 0.0,
 			SlidingWindowPattern = slidingWindowPattern,
 			HybridKv = hybridKv,

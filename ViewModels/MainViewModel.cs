@@ -21334,9 +21334,11 @@ public partial class MainViewModel : ViewModelBase
         {
             try
             {
+                // Projectors and drafters go with a model, so they are not listed as one (GgufFileRole).
                 discovered = EnumerateGgufFilesCached()
+                    .Where(path => !GgufFileRole.IsSidecar(path))
                     .Select(Path.GetFileName)
-                    .Where(x => !string.IsNullOrWhiteSpace(x) && !LocalHealthGuidance.IsVisionProjectorFile(x))
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
                     .Select(x => x!)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
