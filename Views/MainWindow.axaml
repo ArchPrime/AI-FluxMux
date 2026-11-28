@@ -695,7 +695,7 @@
                                                                                         <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
                                                                                     </Grid.ColumnDefinitions>
                                                                                     <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Speculative" />
-                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalSpecTypeOptions}" SelectedItem="{Binding LocalVariantSpecType}" ToolTip.Tip="Lets the model guess a few words ahead and check them, so replies come out faster with exactly the same text. Use draft-mtp for models built with MTP (for example Qwen 3.x MTP files); ngram-simple helps a little on any model; Disabled turns it off." />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalSpecTypeOptions}" SelectedItem="{Binding LocalVariantSpecType}" ToolTip.Tip="Lets the model guess a few words ahead and check them, so replies come out faster with exactly the same text. draft-mtp is offered when the model file has MTP heads; ngram-simple helps a little on any model; Disabled turns it off. The list shows what your llama-server supports." />
                                                                                 </Grid>
                                                                                 <Grid ColumnSpacing="8" Margin="0,0,16,6">
                                                                                     <Grid.ColumnDefinitions>
@@ -767,7 +767,7 @@
                                                                                         <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
                                                                                     </Grid.ColumnDefinitions>
                                                                                     <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Micro-batch" />
-                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalUbatchSizeOptions}" SelectedItem="{Binding LocalVariantUbatchSize}" ToolTip.Tip="How much of the prompt the graphics card reads per step. Larger reads long chats noticeably faster for a little more graphics memory. Lower it only if the model fails to load for lack of memory. Speed AutoTune can try sizes on this PC." />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalUbatchSizeOptions}" SelectedItem="{Binding LocalVariantUbatchSize}" ToolTip.Tip="How much of the prompt the graphics card reads per step. Larger reads long chats noticeably faster for a little more graphics memory. Lower it only if the model fails to load for lack of memory. Speed AutoTune can try sizes on this PC. On a few models (such as Inkling) the memory it needs also grows with Context; AI-FluxMux learns this from the model's first load, and AutoTune then lowers Micro-batch, or Context, so both fit." />
                                                                                 </Grid>
                                                                                 <Grid ColumnSpacing="8" Margin="0,0,16,6">
                                                                                     <Grid.ColumnDefinitions>
@@ -814,14 +814,6 @@
                                                                                         <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
                                                                                         <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
                                                                                     </Grid.ColumnDefinitions>
-                                                                                    <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Unban tokens" />
-                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalOnOffOptions}" SelectedItem="{Binding LocalVariantUnbanTokensMode}" ToolTip.Tip="Lets the model use a few special words llama-server normally blocks. Some chat formats need it, and AutoTune turns it on for those." />
-                                                                                </Grid>
-                                                                                <Grid ColumnSpacing="8" Margin="0,0,16,6">
-                                                                                    <Grid.ColumnDefinitions>
-                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldLabel" />
-                                                                                        <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
-                                                                                    </Grid.ColumnDefinitions>
                                                                                     <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Thinking budget" />
                                                                                     <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalReasoningBudgetOptions}" SelectedItem="{Binding LocalVariantReasoningBudget}" ToolTip.Tip="The most the model may think before it answers, when Reasoning is on. Unlimited: no cap. 0: no thinking. A cap gets replies started sooner but can make answers shallower. Needs a reload." />
                                                                                 </Grid>
@@ -861,7 +853,7 @@
                                                                                         <ColumnDefinition Width="Auto" SharedSizeGroup="FieldValue" />
                                                                                     </Grid.ColumnDefinitions>
                                                                                     <TextBlock VerticalAlignment="Center" FontSize="{DynamicResource FluxFontSizeCaption}" Text="Reasoning" />
-                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalReasoningOptions}" SelectedItem="{Binding LocalVariantReasoning}" ToolTip.Tip="Whether the model writes a hidden thinking step before answering. Off is usually better for the Client app. Use the Quick Select list for Off, Low, Medium, or XHigh on the running row." />
+                                                                                    <ComboBox Grid.Column="1" HorizontalAlignment="Stretch" ItemsSource="{Binding LocalReasoningOptions}" SelectedItem="{Binding LocalVariantReasoning}" ToolTip.Tip="Whether the model writes a hidden thinking step before answering, and how much: Low, Medium or XHigh when the model's template takes an effort level (On is Medium). Off is usually better for the Client app. Quick Select can change it on the running row." />
                                                                                 </Grid>
                                                                             </WrapPanel>
                                                                             <Expander Classes="fieldHeight"

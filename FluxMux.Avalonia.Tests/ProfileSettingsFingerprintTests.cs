@@ -90,7 +90,6 @@ public sealed class ProfileSettingsFingerprintTests
             ["LocalKvCacheTypeV"] = "q8_0",
             ["LocalChatTemplate"] = "Auto",
             ["LocalMultiUserMode"] = "Disabled",
-            ["LocalUnbanTokensMode"] = "Disabled",
             ["AutoCompressEnabled"] = true,
             ["OverrideMaxTokens"] = "8192",
             ["LocalBatchSize"] = "1024",

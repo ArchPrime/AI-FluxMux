@@ -11,12 +11,13 @@ namespace FluxMux.Avalonia.Services;
 /// </summary>
 public static class LocalEndpointResponseSanitizer
 {
-    public static bool SanitizeCompletionJson(JsonObject root, string? reasoningMode)
+    public static bool SanitizeCompletionJson(JsonObject root, string? reasoningMode, LocalChatTemplateTraits? templateTraits = null)
     {
         var mode = LocalReasoningLaunchPolicy.NormalizeMode(reasoningMode);
-        return LocalReasoningLaunchPolicy.IsThinkingEnabled(mode)
+        var translated = (templateTraits ?? LocalChatTemplateTraits.Current).TranslateCompletion(root);
+        return (LocalReasoningLaunchPolicy.IsThinkingEnabled(mode)
             ? LocalThinkingContentFilter.StripEmptyThinkingFromCompletion(root)
-            : LocalThinkingContentFilter.StripThinkingFromCompletion(root);
+            : LocalThinkingContentFilter.StripThinkingFromCompletion(root)) | translated;
     }
 
     public static (byte[] Body, bool Changed) SanitizeJsonBody(byte[] body, string? reasoningMode)

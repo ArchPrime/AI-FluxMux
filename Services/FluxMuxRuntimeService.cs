@@ -135,7 +135,36 @@ public sealed class FluxMuxRuntimeService
 
 		public string SpecType { get; init; } = "ngram-simple";
 
+		/// <summary>The model maker's recommended temperature from the GGUF, or null.</summary>
+		public double? RecommendedTemperature { get; init; }
+
+		/// <summary>The GGUF has multi-token prediction heads (nextn_predict_layers), so draft-mtp can draft with them.</summary>
+		public bool HasMtpHeads { get; init; }
+
+		/// <summary>
+		/// Reasoning-effort levels the model's chat template accepts, as llama-server reported them
+		/// the last time the model loaded (<see cref="LocalChatTemplateTraits"/>); empty until then.
+		/// </summary>
+		public IReadOnlyList<string> TemplateEffortLevels { get; init; } = Array.Empty<string>();
+
 		public bool EnableSwaFull { get; init; }
+
+		/// <summary>
+		/// The model declares a per-layer sliding-window pattern (Inkling 2): SWA full is off for
+		/// it, and <see cref="KvBytesPerToken"/> is its own figure (full-attention layer passes
+		/// only), not the generic q8_0 default.
+		/// </summary>
+		public bool SlidingWindowPattern { get; init; }
+
+		/// <summary>
+		/// Prompt-reading (compute) buffer cost per micro-batch × Context token, learned from
+		/// llama-server's own output for this model file, by K cache type (<see cref="LearnedComputeBuffer"/>).
+		/// Empty when none was learned: the buffer was the usual small fixed working set.
+		/// </summary>
+		public IReadOnlyDictionary<string, double> LearnedComputeBytesPerUbatchToken { get; init; } = new Dictionary<string, double>();
+
+		/// <summary>Graphics memory left for the KV cache and compute buffer after weights, overhead and Images (GPU only).</summary>
+		public double KvComputeBudgetGb { get; init; }
 
 		public string MaxTokens { get; init; } = "4096";
 
@@ -171,6 +200,12 @@ public sealed class FluxMuxRuntimeService
 		public int LoopStart { get; init; }
 
 		public int LoopEnd { get; init; }
+
+		/// <summary>The model maker's recommended temperature (general.sampling.temp), or null.</summary>
+		public double? SamplingTemperature { get; init; }
+
+		/// <summary>Multi-token prediction heads in the file (nextn_predict_layers), which draft-mtp drafts with.</summary>
+		public int NextnPredictLayers { get; init; }
 
 		public long FileLength { get; init; }
 
@@ -4039,6 +4074,21 @@ public sealed class FluxMuxRuntimeService
 		// stderr/stdout even if the launch fails early (e.g., during the launch prep phase).
 		// The file is overwritten on each launch (new launch = new diagnosis).
 		string llamaOutputLogPath = Path.Combine(_logDirectory, "llama_server_output.log");
+		// Learn from the previous launch's output before this launch overwrites it, and keep it as
+		// llama_server_output.prev.log: a Retry from the failure dialog otherwise erases the output
+		// that said why the launch failed (28 Nov).
+		LearnFromLastLlamaServerOutput();
+		try
+		{
+			if (File.Exists(llamaOutputLogPath))
+			{
+				File.Copy(llamaOutputLogPath, Path.Combine(_logDirectory, "llama_server_output.prev.log"), overwrite: true);
+			}
+		}
+		catch
+		{
+			// Best-effort; never block the launch on keeping the old log.
+		}
 		try
 		{
 			File.WriteAllText(llamaOutputLogPath,
@@ -4531,6 +4581,7 @@ public sealed class FluxMuxRuntimeService
 				int readyMs = (int)Math.Min(2147483647L, launchStopwatch.ElapsedMilliseconds);
 				LogLaunchMonitor($"launch SUCCESS in {readyMs}ms; local_phase=ready");
 				WriteLocalRuntimeState(modelPath, localBackendPort, process.Id, "ready", "llama-server on the daemon port and Port are both responding.");
+				_ = RecordTemplateTraitsAsync(modelPath, localBackendPort);
 				WriteProxyRuntimeStateForLocal(selectedLocalModel, port, localBackendPort, "ready", "Port is ready.", GetGatewayPid());
 				SeedForwardCompactFromProfile(selectedLocalModel, selectedVariant);
 				// Seed the context gauge immediately so it shows the correct context limit from
@@ -5860,6 +5911,7 @@ public sealed class FluxMuxRuntimeService
 		{
 			File.AppendAllText(llamaOutputLogPath,
 				"Server: " + serverPath + Environment.NewLine +
+				LearnedComputeBuffer.ServerBuildLabel + LearnedComputeBuffer.ServerBuild(serverPath) + Environment.NewLine +
 				"Args: " + argString + Environment.NewLine +
 				"Process start: " + DateTime.Now.ToString("o") + Environment.NewLine);
 		}
@@ -6455,11 +6507,6 @@ public sealed class FluxMuxRuntimeService
 		{
 			list.Add("--no-slots");
 		}
-		string unbanTokensMode = GetString(profile, "LocalUnbanTokensMode");
-		if ((unbanTokensMode.Equals("Enabled", StringComparison.OrdinalIgnoreCase) || (unbanTokensMode.Equals("Auto", StringComparison.OrdinalIgnoreCase) && chatTemplate.Equals("qwen", StringComparison.OrdinalIgnoreCase))) && SupportsArg(helpText, "--unbantokens"))
-		{
-			list.Add("--unbantokens");
-		}
 		string warmup = GetString(profile, "LocalWarmup");
 		if (warmup.Equals("Enabled", StringComparison.OrdinalIgnoreCase) && SupportsArg(helpText, "--warmup"))
 		{
@@ -6484,8 +6531,7 @@ public sealed class FluxMuxRuntimeService
 		string specType = GetString(profile, "LocalSpecType");
 		if (string.IsNullOrWhiteSpace(specType) || specType.Equals("Auto", StringComparison.OrdinalIgnoreCase))
 		{
-			string modelStem = Path.GetFileNameWithoutExtension(modelPath).ToLowerInvariant();
-			specType = (modelStem.Contains("qwen3") ? "draft-mtp" : ((!SupportsArg(helpText, "--spec-type")) ? "Disabled" : "ngram-simple"));
+			specType = !SupportsArg(helpText, "--spec-type") ? "Disabled" : localHardwareLaunchAdvice.SpecType;
 		}
 		specType = NormalizeLlamaSpecType(specType);
 		specType = CoerceSpecTypeToServerAllowList(specType, helpText);
@@ -7218,6 +7264,36 @@ public sealed class FluxMuxRuntimeService
 		return "Disabled";
 	}
 
+	/// <summary>
+	/// The speculative types the profile editor offers for a model (28 Nov): Disabled, then what this
+	/// llama-server build lists that the model can use without another file: draft-mtp only when
+	/// the GGUF has MTP heads, and the ngram types. Draft-model types need a draft file and are not
+	/// offered here.
+	/// </summary>
+	public IReadOnlyList<string> GetSpeculativeTypesFor(LocalHardwareLaunchAdvice advice)
+	{
+		HashSet<string> listed;
+		try
+		{
+			listed = ParseSpecTypeAllowList(GetLlamaHelpText(ResolveLlamaServerPath()));
+		}
+		catch
+		{
+			listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+		}
+		if (listed.Count == 0)
+		{
+			listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "draft-mtp", "ngram-simple" };
+		}
+		var types = new List<string> { "Disabled" };
+		if (advice.HasMtpHeads && listed.Contains("draft-mtp"))
+		{
+			types.Add("draft-mtp");
+		}
+		types.AddRange(listed.Where(type => type.StartsWith("ngram", StringComparison.OrdinalIgnoreCase)).OrderBy(type => type.Equals("ngram-simple", StringComparison.OrdinalIgnoreCase) ? 0 : 1).ThenBy(type => type, StringComparer.OrdinalIgnoreCase));
+		return types;
+	}
+
 	private static HashSet<string> ParseSpecTypeAllowList(string helpText)
 	{
 		HashSet<string> hashSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -7513,10 +7589,10 @@ public sealed class FluxMuxRuntimeService
 	private static JsonObject BuildDefaultLocalProfile(JsonObject root)
 	{
 		JsonObject jsonObject = new JsonObject();
-		string[] array = new string[13]
+		string[] array = new string[]
 		{
 			"OverrideContext", "OverrideThreads", "LocalThreadsBatch", "LocalTemperature", "LocalGpuOffloadMode", "GpuLayers", "LocalFlashAttention", "LocalKvCacheTypeK", "LocalKvCacheTypeV", "LocalChatTemplate",
-			"LocalMultiUserMode", "LocalUnbanTokensMode", "AutoCompressEnabled"
+			"LocalMultiUserMode", "AutoCompressEnabled"
 		};
 		foreach (string propertyName in array)
 		{
@@ -7529,6 +7605,128 @@ public sealed class FluxMuxRuntimeService
 		return jsonObject;
 	}
 
+	private string LearnedComputeBuffersPath => Path.Combine(_logDirectory, "learned_compute_buffers.json");
+
+	private readonly object _learnedComputeLock = new();
+	private DateTime _learnedFromLogWriteUtc = DateTime.MinValue;
+
+	/// <summary>
+	/// Learns the compute buffer of the last llama-server launch from its output log, once per log
+	/// write (<see cref="LearnedComputeBuffer"/>). Called before a launch overwrites the log and
+	/// when advice is built. Best-effort: never throws.
+	/// </summary>
+	private void LearnFromLastLlamaServerOutput()
+	{
+		try
+		{
+			string logPath = Path.Combine(_logDirectory, "llama_server_output.log");
+			if (!File.Exists(logPath))
+			{
+				return;
+			}
+			DateTime written = File.GetLastWriteTimeUtc(logPath);
+			lock (_learnedComputeLock)
+			{
+				if (written <= _learnedFromLogWriteUtc)
+				{
+					return;
+				}
+				_learnedFromLogWriteUtc = written;
+				LearnedComputeBuffer.Observation? seen = LearnedComputeBuffer.Parse(File.ReadAllText(logPath));
+				if (seen == null)
+				{
+					return;
+				}
+				JsonObject store = File.Exists(LearnedComputeBuffersPath) ? LoadJson(LearnedComputeBuffersPath) : new JsonObject();
+				if (LearnedComputeBuffer.Record(store, seen, DateTime.UtcNow))
+				{
+					File.WriteAllText(LearnedComputeBuffersPath, store.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+					LogLaunchMonitor("learned compute buffer: " + Path.GetFileName(seen.ModelPath) + " K cache " + seen.KvType
+						+ " needs " + (seen.ComputeBytes / 1073741824.0).ToString("0.0", CultureInfo.InvariantCulture) + " GiB at Context "
+						+ seen.Context.ToString(CultureInfo.InvariantCulture) + " x micro-batch " + seen.Ubatch.ToString(CultureInfo.InvariantCulture)
+						+ " (" + seen.BytesPerUbatchToken.ToString("0.0", CultureInfo.InvariantCulture) + " bytes per micro-batch x Context token, "
+						+ (seen.Failed ? "out of memory" : "loaded") + ")");
+				}
+			}
+		}
+		catch
+		{
+			// Learning is best-effort; a bad log never affects a launch or advice.
+		}
+	}
+
+	private string ModelTemplateTraitsPath => Path.Combine(_logDirectory, "model_template_traits.json");
+
+	/// <summary>
+	/// After a model loads, records what its chat template says (llama-server /props: thinking
+	/// markers, effort levels) under the model file, so the wizard knows it before the next load.
+	/// Best-effort.
+	/// </summary>
+	private async Task RecordTemplateTraitsAsync(string modelPath, int port)
+	{
+		try
+		{
+			using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+			string text = await HttpClient.GetStringAsync($"http://127.0.0.1:{port}/props", timeout.Token);
+			LocalChatTemplateTraits traits = LocalChatTemplateTraits.FromProps(JsonNode.Parse(text) as JsonObject);
+			if (ReferenceEquals(traits, LocalChatTemplateTraits.None))
+			{
+				return;
+			}
+			lock (_learnedComputeLock)
+			{
+				JsonObject store = File.Exists(ModelTemplateTraitsPath) ? LoadJson(ModelTemplateTraitsPath) : new JsonObject();
+				store[LearnedComputeBuffer.KeyFor(modelPath, "template")] = new JsonObject
+				{
+					["thinkOpen"] = traits.ThinkOpen,
+					["thinkClose"] = traits.ThinkClose,
+					["readsEnableThinking"] = traits.ReadsEnableThinking,
+					["effortLevels"] = new JsonArray(traits.EffortLevels.Select(level => (JsonNode?)JsonValue.Create(level)).ToArray()),
+					["updatedUtc"] = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+				};
+				File.WriteAllText(ModelTemplateTraitsPath, store.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+			}
+		}
+		catch
+		{
+			// Recording is best-effort; the gateway reads /props itself when it serves the model.
+		}
+	}
+
+	private IReadOnlyList<string> RecordedEffortLevels(string modelPath)
+	{
+		try
+		{
+			lock (_learnedComputeLock)
+			{
+				JsonObject? store = File.Exists(ModelTemplateTraitsPath) ? LoadJson(ModelTemplateTraitsPath) : null;
+				return store?[LearnedComputeBuffer.KeyFor(modelPath, "template")]?["effortLevels"] is JsonArray levels
+					? levels.Select(level => level?.ToString() ?? string.Empty).Where(level => level.Length > 0).ToArray()
+					: Array.Empty<string>();
+			}
+		}
+		catch
+		{
+			return Array.Empty<string>();
+		}
+	}
+
+	private IReadOnlyDictionary<string, double> LearnedComputeFor(string modelPath)
+	{
+		try
+		{
+			lock (_learnedComputeLock)
+			{
+				JsonObject? store = File.Exists(LearnedComputeBuffersPath) ? LoadJson(LearnedComputeBuffersPath) : null;
+				return LearnedComputeBuffer.ByKvType(store, modelPath, LearnedComputeBuffer.ServerBuild(ResolveLlamaServerPath()));
+			}
+		}
+		catch
+		{
+			return new Dictionary<string, double>();
+		}
+	}
+
 	public LocalHardwareLaunchAdvice GetLocalHardwareLaunchAdvice(
 		string selectedLocalModel,
 		string modelDirectory,
@@ -7536,6 +7734,7 @@ public sealed class FluxMuxRuntimeService
 		string? visionProjectorPath = null,
 		int visionMaxImageEdge = LocalVramFootprintEstimate.ReferenceImageEdge)
 	{
+		LearnFromLastLlamaServerOutput();
 		string modelPath = ResolveModelPath(selectedLocalModel, modelDirectory);
 		if (string.IsNullOrWhiteSpace(modelPath))
 		{
@@ -7686,6 +7885,7 @@ public sealed class FluxMuxRuntimeService
 		// "extension" impossible when the native window already equals the editor max.
 		int nativeTrainedCtx = reportedCtx > 0 ? reportedCtx : modelMaxCtx;
 		double gbPer8k = EstimateKvGigabytesPer8k(ggufModelShape, fileGb, hybridKv);
+		bool slidingWindowPattern = ggufModelShape != null && FullAttentionLayerPasses(ggufModelShape) > 0;
 		double overheadBaseGb = (nvidia ? Math.Max(0.7, 0.45 + gpuGb * 0.035 + Math.Max(0.0, fileGb) * 0.02) : 0.6);
 		double projectorGb = (visionEnabled ? ResolveVisionProjectorGigabytes(visionProjectorPath, modelPath) : 0.0);
 		double visionReserveGb = (visionEnabled
@@ -7752,7 +7952,13 @@ public sealed class FluxMuxRuntimeService
 			ContextPriorityLower = contextPriorityLower,
 			ModelMaxCtx = nativeTrainedCtx,
 			TotalRamGb = systemRamGb,
-			KvBytesPerToken = 262144, // q8_0 default (256 KB/token); the ViewModel can refine this per profile
+			// q8_0 default (256 KB/token), refined per profile by the ViewModel; a sliding-window
+			// model gets its own figure at q8_0 (28 Nov), since only its full-attention layers grow.
+			KvBytesPerToken = slidingWindowPattern ? Math.Max(1L, (long)(gbPer8k * 1073741824.0 / 8192.0)) : 262144,
+			LearnedComputeBytesPerUbatchToken = LearnedComputeFor(modelPath),
+			TemplateEffortLevels = RecordedEffortLevels(modelPath),
+			KvComputeBudgetGb = nvidia ? Math.Max(0.0, gpuGb - fileGb - overheadBaseGb - (visionEnabled ? visionReserveGb : 0.0)) : 0.0,
+			SlidingWindowPattern = slidingWindowPattern,
 			HybridKv = hybridKv,
 			OffloadMode = offloadMode,
 			OffloadModeAtMaxContext = offloadModeAtMaxContext,
@@ -7763,12 +7969,16 @@ public sealed class FluxMuxRuntimeService
 			// attention on only for CUDA, where it is proven. Other backends keep Auto.
 			FlashAttention = (nvidia && nvidiaGpuInventory.Any(row => row.Backend.Equals("CUDA", StringComparison.OrdinalIgnoreCase)) ? "Enabled" : "Auto"),
 			PreferFitEnabled = (preferFit || offloadMode.Equals("GPU + CPU", StringComparison.OrdinalIgnoreCase)),
-			SpecType = ((isQwen38 || LooksLikeMultiTokenPrediction(modelPath)) ? "draft-mtp" : "ngram-simple"),
+			// From the file, not the name (28 Nov): MTP heads in the GGUF mean draft-mtp; the server
+			// build's own list decides at launch (CoerceSpecTypeToServerAllowList).
+			SpecType = (ggufModelShape?.NextnPredictLayers ?? 0) > 0 ? "draft-mtp" : "ngram-simple",
+			HasMtpHeads = (ggufModelShape?.NextnPredictLayers ?? 0) > 0,
+			RecommendedTemperature = ggufModelShape?.SamplingTemperature,
 			// Not for a model with a per-layer sliding-window pattern (28 Nov): SWA full keeps the
 			// whole Context on every windowed layer too (Inkling 2 Mini: 20 of 24 layers), which put
 			// its 1M window out of reach; llama.cpp reuses such a cache through the context
 			// checkpoints AI-FluxMux already sets.
-			EnableSwaFull = hybridKv && (ggufModelShape == null || FullAttentionLayerPasses(ggufModelShape) == 0),
+			EnableSwaFull = hybridKv && !slidingWindowPattern,
 			MaxTokens = maxTokens.ToString(CultureInfo.InvariantCulture),
 			CacheRam = cacheRam
 		};
@@ -7805,12 +8015,6 @@ public sealed class FluxMuxRuntimeService
 			}
 			return (fileGb + KvGb(tokens) + overheadGb <= gpuGb + 0.05) ? "GPU only" : "GPU + CPU";
 		}
-	}
-
-	private static bool LooksLikeMultiTokenPrediction(string modelPath)
-	{
-		string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(modelPath ?? string.Empty);
-		return fileNameWithoutExtension.Contains("mtp", StringComparison.OrdinalIgnoreCase);
 	}
 
 	private static bool IsHybridLinearAttentionArchitecture(GgufModelShape? shape)
@@ -7934,6 +8138,8 @@ public sealed class FluxMuxRuntimeService
 			int loopStart = 0;
 			int loopEnd = 0;
 			bool[] slidingWindowLayers = Array.Empty<bool>();
+			double? samplingTemperature = null;
+			int nextnPredictLayers = 0;
 			for (ulong metadataIndex = 0uL; metadataIndex < metadataCount; metadataIndex++)
 			{
 				string keyName = ReadGgufString(binaryReader);
@@ -7963,6 +8169,13 @@ public sealed class FluxMuxRuntimeService
 					{
 						headCount = items.Max();
 					}
+				}
+				// The maker's recommended temperature (28 Nov): Inkling 2 Mini and Qwen 3.8 both give 1.0;
+				// llama-server already takes top-k/top-p/min-p from the file, but FluxMux always sent --temp.
+				else if (type == 6u && keyName.Equals("general.sampling.temp", StringComparison.Ordinal))
+				{
+					float temp = binaryReader.ReadSingle();
+					samplingTemperature = float.IsFinite(temp) && temp >= 0f ? Math.Round(temp, 2) : null;
 				}
 				else if (!TryReadGgufValueAsInt(binaryReader, type, out value2))
 				{
@@ -8012,6 +8225,10 @@ public sealed class FluxMuxRuntimeService
 				{
 					loopEnd = value2;
 				}
+				else if (keyName.EndsWith(".nextn_predict_layers", StringComparison.Ordinal))
+				{
+					nextnPredictLayers = value2;
+				}
 			}
 			GgufModelShape ggufModelShape = new GgufModelShape
 			{
@@ -8027,6 +8244,8 @@ public sealed class FluxMuxRuntimeService
 				ValueLength = valueLength,
 				LoopCount = loopCount,
 				LoopStart = loopStart,
+				SamplingTemperature = samplingTemperature,
+				NextnPredictLayers = nextnPredictLayers,
 				LoopEnd = loopEnd,
 				FileLength = fileInfo.Length,
 				LastWriteUtc = fileInfo.LastWriteTimeUtc

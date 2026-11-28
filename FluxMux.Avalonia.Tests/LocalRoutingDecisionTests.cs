@@ -841,7 +841,6 @@ public sealed class LocalRoutingDecisionTests
             ["LocalKvCacheTypeV"] = "q8_0",
             ["LocalChatTemplate"] = "Auto",
             ["LocalMultiUserMode"] = "Disabled",
-            ["LocalUnbanTokensMode"] = "Disabled",
             ["LocalBatchSize"] = "2048",
             ["LocalUbatchSize"] = "512",
             ["LocalSpecType"] = "draft-mtp",

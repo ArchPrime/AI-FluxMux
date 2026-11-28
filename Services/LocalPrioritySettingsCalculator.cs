@@ -195,7 +195,12 @@ public static class LocalPrioritySettingsCalculator
             : fidelity == 0 && advice.PreferFitEnabled == false
                 ? "f16"
                 : PickKvTypeForYarnFit(advice, int.TryParse(ctx, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ctxInt) ? ctxInt : 0, extendContextIntoRam, effectiveKvBytesPerToken);
-        var temp = fidelity == 0 || stability == 0 ? "0.2" : speed == 0 ? "0.4" : "0.3";
+        // Temperature starts from the model maker's recommendation in the GGUF (28 Nov: Inkling 2 Mini
+        // and Qwen 3.8 both say 1.0; the wizard used to always pick 0.2-0.4), else 0.3. Fidelity or
+        // Stability first lowers it to 60 % for more repeatable answers. Speed does not change it.
+        var baseTemp = advice.RecommendedTemperature is > 0 and <= 2 ? advice.RecommendedTemperature.Value : 0.3;
+        var tempValue = fidelity == 0 || stability == 0 ? baseTemp * 0.6 : baseTemp;
+        var temp = (Math.Round(tempValue / 0.05) * 0.05).ToString("0.##", CultureInfo.InvariantCulture);
         // The speculative method is NOT derived from the priority order. It used to be: Fidelity
         // first turned MTP off and Stability first swapped it for ngram-simple. Both were wrong —
         // speculative decoding is lossless (the model verifies every drafted token, so output is
@@ -204,7 +209,12 @@ public static class LocalPrioritySettingsCalculator
         // variants ended up with MTP Disabled in Nov 2026. The caller passes the form's current
         // choice (or the model-based guess when unset), and the preset keeps it.
         var spec = specType;
-        var reasoning = thinking == 0 ? "On" : "Off";
+        // With effort levels known for the model's template (recorded at its last load), Reasoning
+        // depth's rank picks a level: first XHigh, second Medium, lower Off. Without them, On or Off.
+        // The gateway sends the template's nearest level (LocalChatTemplateTraits.NearestEffort).
+        var reasoning = advice.TemplateEffortLevels.Count > 0
+            ? thinking == 0 ? "XHigh" : thinking == 1 ? "Medium" : "Off"
+            : thinking == 0 ? "On" : "Off";
         // When YaRN extends the context past the native window, the overflow is meant to live
         // in ordinary memory. Fit-to-VRAM (KV compression to squeeze more onto the card) is
         // counterproductive there — it adds compression overhead for no benefit, since the
@@ -252,6 +262,13 @@ public static class LocalPrioritySettingsCalculator
             }
         }
 
+        // A learned compute buffer that grows with micro-batch x Context (28 Nov): fit both to the card.
+        var swaFullSetting = advice.SlidingWindowPattern ? "Disabled" : advice.EnableSwaFull ? "Enabled" : currentSwaFull;
+        (ctx, ubatch, batch) = FitToLearnedCompute(
+            advice, ctx, ubatch, batch,
+            LearnedComputeBuffer.KvKey(kv, swaFullSetting.Equals("Enabled", StringComparison.OrdinalIgnoreCase)),
+            contextOutranksSpeed: context < speed);
+
         return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["OverrideContext"] = ctx,
@@ -264,7 +281,6 @@ public static class LocalPrioritySettingsCalculator
             ["LocalThreadsBatch"] = threadsBatch,
             ["LocalChatTemplate"] = autoTemplate,
             ["LocalMultiUserMode"] = "Disabled",
-            ["LocalUnbanTokensMode"] = autoTemplate.Equals("qwen", StringComparison.OrdinalIgnoreCase) ? "Enabled" : "Disabled",
             ["AutoCompressEnabled"] = autoCompress.ToString(),
             ["GpuLayers"] = gpuLayers,
             ["OverrideMaxTokens"] = maxTokens,
@@ -274,7 +290,9 @@ public static class LocalPrioritySettingsCalculator
             ["LocalCacheReuse"] = "256",
             ["LocalCacheRam"] = cacheRam,
             ["LocalFit"] = fit,
-            ["LocalSwaFull"] = advice.EnableSwaFull ? "Enabled" : currentSwaFull,
+            // Off for a sliding-window model (28 Nov): it keeps the whole Context on every windowed
+            // layer. The wizard used to only ever switch it on, so an old "Enabled" survived.
+            ["LocalSwaFull"] = swaFullSetting,
             ["LocalReasoning"] = reasoning,
             ["LocalChatParser"] = "Jinja",
             ["LocalVisionEnabled"] = visionEnabled,
@@ -283,6 +301,64 @@ public static class LocalPrioritySettingsCalculator
             ["LocalRopeScaling"] = ropeScaling,
             ["LocalRopeScale"] = ropeScale
         };
+    }
+
+    /// <summary>Smallest micro-batch the fit lowers to before it lowers Context.</summary>
+    public const int SmallestFitUbatch = 64;
+
+    /// <summary>
+    /// Fits Context and micro-batch to the card when llama-server's compute buffer for this model
+    /// and K cache type was learned to grow with micro-batch x Context (<see cref="LearnedComputeBuffer"/>):
+    /// the KV cache plus that buffer must fit the memory left after weights, overhead and Images.
+    /// With Context ranked above Speed the micro-batch is halved first, down to
+    /// <see cref="SmallestFitUbatch"/> (prompt reading gets slower, Context is kept), then Context is
+    /// lowered; otherwise Context is lowered and the micro-batch kept. Unchanged when nothing was
+    /// learned, so models whose buffer is the usual small working set are not affected.
+    /// </summary>
+    public static (string Context, string Ubatch, string Batch) FitToLearnedCompute(
+        FluxMuxRuntimeService.LocalHardwareLaunchAdvice advice,
+        string context,
+        string ubatch,
+        string batch,
+        string kvType,
+        bool contextOutranksSpeed)
+    {
+        if (advice.LearnedComputeBytesPerUbatchToken is not { Count: > 0 } learned
+            || !learned.TryGetValue((kvType ?? string.Empty).Trim().ToLowerInvariant(), out var computePerUbatchToken)
+            || computePerUbatchToken <= 0
+            || advice.KvComputeBudgetGb <= 0
+            || !int.TryParse(context, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ctx)
+            || !int.TryParse(ubatch, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ub))
+        {
+            return (context, ubatch, batch);
+        }
+
+        var q8 = KvBytesPerTokenForType("q8_0");
+        var kvTypeOnly = (kvType ?? "q8_0").Split('+')[0];
+        var kvPerToken = advice.KvBytesPerToken * (q8 > 0 ? KvBytesPerTokenForType(kvTypeOnly) / q8 : 1.0);
+        // The same margin the advice keeps when it sizes Context from leftover memory.
+        var budget = advice.KvComputeBudgetGb * 1073741824.0 * 0.92;
+        bool Fits(int c, int u) => (double)c * (kvPerToken + computePerUbatchToken * u) <= budget;
+        if (Fits(ctx, ub))
+        {
+            return (context, ubatch, batch);
+        }
+
+        if (contextOutranksSpeed)
+        {
+            while (ub > SmallestFitUbatch && !Fits(ctx, ub))
+            {
+                ub = Math.Max(SmallestFitUbatch, ub / 2);
+            }
+        }
+
+        if (!Fits(ctx, ub))
+        {
+            ctx = Math.Max(4096, LearnedComputeBuffer.FittingContext(budget, kvPerToken, computePerUbatchToken, ub));
+        }
+
+        var newBatch = int.TryParse(batch, NumberStyles.Integer, CultureInfo.InvariantCulture, out var b) && b >= ub ? batch : ub.ToString(CultureInfo.InvariantCulture);
+        return (ctx.ToString(CultureInfo.InvariantCulture), ub.ToString(CultureInfo.InvariantCulture), newBatch);
     }
 
     /// <summary>
@@ -734,7 +810,6 @@ public static class LocalPrioritySettingsCalculator
         KeepIfPresent(settings, current, "LocalReasoning");
         KeepIfPresent(settings, current, "LocalChatTemplate");
         KeepIfPresent(settings, current, "LocalChatParser");
-        KeepIfPresent(settings, current, "LocalUnbanTokensMode");
         KeepIfPresent(settings, current, "AutoCompressEnabled");
         KeepIfPresent(settings, current, "LocalVisionEnabled");
         KeepIfPresent(settings, current, "LocalVisionProjectorPath");

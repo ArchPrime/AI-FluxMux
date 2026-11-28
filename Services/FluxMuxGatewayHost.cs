@@ -4106,7 +4106,22 @@ public sealed class FluxMuxGatewayHost : IDisposable
     {
         var reasoningMode = LocalReasoningLaunchPolicy.NormalizeMode(Str(state, "local_reasoning", "Off"));
 
-        if (LocalReasoningPayloadPolicy.ApplyToPayload(payload, reasoningMode, GetUserClientReinflatesContext))
+        // The loaded model's own thinking markers and effort levels (LocalChatTemplateTraits), read
+        // once per loaded model. Assistant replies saved before they were translated are translated
+        // here too, the same way every turn, so the prompt prefix (and KV cache reuse) is unchanged.
+        var traitsPort = ParseInt(Str(state, "local_port"), 0);
+        await LocalChatTemplateTraits.EnsureAsync(
+            _http,
+            traitsPort,
+            traitsPort + "|" + Str(state, "local_preferred_model") + "|" + Str(state, "local_variant"),
+            Log).ConfigureAwait(false);
+        var templateTraits = LocalChatTemplateTraits.Current;
+        if (payload["messages"] is JsonArray historyMessages && templateTraits.TranslateHistory(historyMessages))
+        {
+            Log("local chat: turned this model's raw thinking markers in history into <think> tags");
+        }
+
+        if (LocalReasoningPayloadPolicy.ApplyToPayload(payload, reasoningMode, GetUserClientReinflatesContext, templateTraits))
         {
             Log("local chat: stripped thinking from history forwarded to llama-server (Client app still shows it)");
         }

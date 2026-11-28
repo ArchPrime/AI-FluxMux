@@ -6,7 +6,7 @@ namespace FluxMux.Avalonia.Services;
 
 public static class LocalReasoningPayloadPolicy
 {
-    public static bool ApplyToPayload(JsonObject payload, string? reasoningMode, Func<bool>? userClientReinflatesContext = null)
+    public static bool ApplyToPayload(JsonObject payload, string? reasoningMode, Func<bool>? userClientReinflatesContext = null, LocalChatTemplateTraits? templateTraits = null)
     {
         var mode = LocalReasoningLaunchPolicy.NormalizeMode(reasoningMode);
         var changed = false;
@@ -36,6 +36,10 @@ public static class LocalReasoningPayloadPolicy
             // to the card default (xhigh).
             var effort = LocalReasoningRequestPolicy.Effort(mode)
                 ?? (LocalReasoningLaunchPolicy.IsOn(mode) ? "medium" : null);
+            if (effort is not null && templateTraits is not null)
+            {
+                effort = templateTraits.NearestEffort(effort);
+            }
             if (string.IsNullOrWhiteSpace(effort))
             {
                 onKwargs.Remove("reasoning_effort");
@@ -63,6 +67,12 @@ public static class LocalReasoningPayloadPolicy
         offKwargs["thinking_budget"] = 0;
         payload["chat_template_kwargs"] = offKwargs;
         payload["thinking_budget"] = 0;
+        // A template that never reads enable_thinking (Inkling 2 Mini) keeps thinking at its own
+        // default effort; send the lowest level it accepts instead (LocalChatTemplateTraits.OffEffort).
+        if (templateTraits?.OffEffort is { } offEffort)
+        {
+            offKwargs["reasoning_effort"] = offEffort;
+        }
         payload.Remove("reasoning");
         payload.Remove("reasoning_effort");
         payload.Remove("enable_thinking");

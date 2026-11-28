@@ -20,7 +20,6 @@ public static class ProfileSettingsFingerprint
             Token(settings["LocalKvCacheTypeV"], "Auto"),
             Token(settings["LocalChatTemplate"], "Auto"),
             Token(settings["LocalMultiUserMode"], "Auto"),
-            Token(settings["LocalUnbanTokensMode"], "Auto"),
             Token(settings["OverrideMaxTokens"], string.Empty),
             Token(settings["LocalBatchSize"], string.Empty),
             Token(settings["LocalUbatchSize"], string.Empty),

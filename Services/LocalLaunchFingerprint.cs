@@ -26,7 +26,6 @@ public static class LocalLaunchFingerprint
             settings["LocalKvCacheTypeV"]?.ToString() ?? "Auto",
             settings["LocalChatTemplate"]?.ToString() ?? "Auto",
             settings["LocalMultiUserMode"]?.ToString() ?? "Auto",
-            settings["LocalUnbanTokensMode"]?.ToString() ?? "Auto",
             settings["LocalBatchSize"]?.ToString() ?? string.Empty,
             settings["LocalUbatchSize"]?.ToString() ?? string.Empty,
             settings["LocalSpecType"]?.ToString() ?? string.Empty,

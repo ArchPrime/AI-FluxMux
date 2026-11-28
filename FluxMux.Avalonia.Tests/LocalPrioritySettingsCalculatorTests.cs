@@ -86,7 +86,8 @@ public sealed class LocalPrioritySettingsCalculatorTests
         Assert.Equal("q8_0", settings["LocalKvCacheTypeK"]);
         Assert.Equal("q8_0", settings["LocalKvCacheTypeV"]);
         Assert.False(LocalPrioritySettingsCalculator.IsBelowMinimumKvCacheType(settings["LocalKvCacheTypeK"]));
-        Assert.Equal(fidelity == 0 || stability == 0 ? "0.2" : speed == 0 ? "0.4" : "0.3", settings["LocalTemperature"]);
+        // No recommendation in this advice: 0.3, or 60 % of it (0.2) with Fidelity or Stability first; Speed does not change it.
+        Assert.Equal(fidelity == 0 || stability == 0 ? "0.2" : "0.3", settings["LocalTemperature"]);
         // The priority order never changes the speculative method; the caller's choice is kept.
         Assert.Equal("ngram-simple", settings["LocalSpecType"]);
         Assert.Equal(thinking == 0 ? "On" : "Off", settings["LocalReasoning"]);
@@ -95,7 +96,6 @@ public sealed class LocalPrioritySettingsCalculatorTests
             reply == 0 ? "16384" : reply == 1 ? "8192" : reply == 2 ? "4096" : "2048",
             settings["OverrideMaxTokens"]);
         Assert.Equal("Disabled", settings["LocalVisionEnabled"]);
-        Assert.Equal("Enabled", settings["LocalUnbanTokensMode"]);
         Assert.Equal("Disabled", settings["LocalMultiUserMode"]);
         Assert.Equal("Enabled", settings["LocalFlashAttention"]);
 
@@ -347,7 +347,6 @@ public sealed class LocalPrioritySettingsCalculatorTests
             ["LocalReasoning"] = "On",
             ["LocalChatTemplate"] = "qwen",
             ["LocalChatParser"] = "Jinja",
-            ["LocalUnbanTokensMode"] = "Enabled",
             ["AutoCompressEnabled"] = "True"
         };
         var current = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -358,7 +357,6 @@ public sealed class LocalPrioritySettingsCalculatorTests
             ["LocalReasoning"] = "Off",
             ["LocalChatTemplate"] = "Auto",
             ["LocalChatParser"] = "Skip parsing",
-            ["LocalUnbanTokensMode"] = "Disabled",
             ["AutoCompressEnabled"] = "False"
         };
 
@@ -375,7 +373,6 @@ public sealed class LocalPrioritySettingsCalculatorTests
         Assert.Equal("Off", wizard["LocalReasoning"]);
         Assert.Equal("Auto", wizard["LocalChatTemplate"]);
         Assert.Equal("Skip parsing", wizard["LocalChatParser"]);
-        Assert.Equal("Disabled", wizard["LocalUnbanTokensMode"]);
         Assert.Equal("False", wizard["AutoCompressEnabled"]);
     }
 

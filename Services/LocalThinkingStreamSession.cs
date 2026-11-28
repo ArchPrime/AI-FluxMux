@@ -54,9 +54,14 @@ public sealed class LocalThinkingStreamSession
 
     public string? ReasoningMode { get; }
 
-    public LocalThinkingStreamSession(string? reasoningMode, int maxTokens = 0)
+    private readonly LocalChatTemplateTraits.Translator? _markers;
+
+    public LocalThinkingStreamSession(string? reasoningMode, int maxTokens = 0, LocalChatTemplateTraits? templateTraits = null)
     {
         ReasoningMode = reasoningMode;
+        // A model whose template marks thinking with its own tokens (Inkling 2 Mini) has them
+        // turned into <think> tags first, so the filters below see them (LocalChatTemplateTraits).
+        _markers = templateTraits is { TranslatesThinking: true } ? new LocalChatTemplateTraits.Translator(templateTraits) : null;
         _maxTokens = maxTokens;
         var mode = LocalReasoningLaunchPolicy.NormalizeMode(reasoningMode);
         // Thinking on (On / Low / Medium / XHigh): only empty blocks are cleaned
@@ -151,7 +156,7 @@ public sealed class LocalThinkingStreamSession
             && contentValue.TryGetValue<string>(out var content)
             && content.Length > 0)
         {
-            var filtered = FilterText(content);
+            var filtered = FilterText(_markers is null ? content : _markers.Translate(content));
             if (!string.Equals(filtered, content, StringComparison.Ordinal))
             {
                 message["content"] = filtered;

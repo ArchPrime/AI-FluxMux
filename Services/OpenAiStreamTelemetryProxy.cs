@@ -95,7 +95,7 @@ public static class OpenAiStreamTelemetryProxy
         var firstContentTokenFired = false;
         var firstReasoningTokenFired = false;
         LocalThinkingStreamSession? streamSession = sanitizeResponses
-            ? new LocalThinkingStreamSession(localReasoningMode, maxTokens)
+            ? new LocalThinkingStreamSession(localReasoningMode, maxTokens, LocalChatTemplateTraits.Current)
             : null;
 
         async Task WriteLineAsync(string text)

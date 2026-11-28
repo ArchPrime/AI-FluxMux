@@ -1756,7 +1756,7 @@ public partial class MainViewModel : ViewModelBase
         }
         else
         {
-            loadedReasoningOn = LocalVariantReasoning.Equals("On", StringComparison.OrdinalIgnoreCase);
+            loadedReasoningOn = LocalReasoningLaunchPolicy.IsThinkingEnabled(LocalVariantReasoning);
         }
 
         return DeepSeekHarnessSetup.ShouldAdvertiseCapability(
@@ -2640,8 +2640,6 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     public partial string LocalVariantMultiUserMode { get; set; } = "Disabled";
 
-    [ObservableProperty]
-    public partial string LocalVariantUnbanTokensMode { get; set; } = "Disabled";
 
     [ObservableProperty]
     public partial bool LocalVariantAutoCompressEnabled { get; set; } = true;
@@ -8929,7 +8927,7 @@ public partial class MainViewModel : ViewModelBase
     [ObservableProperty]
     private decimal _localMaxForwardedImages = 1;
     public ObservableCollection<string> LocalReasoningOptions { get; } =
-    ["Off", "On"];
+    ["Off", "On", "Low", "Medium", "XHigh"];
 
     public ObservableCollection<string> LocalChatParserOptions { get; } =
     ["Jinja", "No Jinja", "Skip parsing"];
@@ -10464,6 +10462,11 @@ public partial class MainViewModel : ViewModelBase
             // and hide the button when nothing smaller is left to offer.
             bool yarnProfile = LocalVariantExtendContextIntoRam;
             int nativeSmallerTokens = yarnProfile ? 0 : SuggestSmallerNativeContext((int)LocalVariantContext, advice.ContextSafeDefault);
+            // A model whose prompt-reading memory was learned to grow with micro-batch x Context
+            // (28 Nov, Inkling 2 Mini): offer the Context and micro-batch that fit, from the failed
+            // profile's own settings, instead of halving Context and keeping a micro-batch that
+            // still does not fit.
+            var learnedFit = yarnProfile ? null : LearnedFitForFailedLaunch(model, variant);
             if (yarnProfile && advice.ModelMaxCtx > 0)
             {
                 int ramBounded = LocalPrioritySettingsCalculator.RamBoundedYarnCeiling(
@@ -10475,12 +10478,14 @@ public partial class MainViewModel : ViewModelBase
                 else suggestedTarget = "Auto";
             }
 
-            var smallerContextLabel = !yarnProfile
+            var smallerContextLabel = learnedFit is { } fit
+                ? $"Use {fit.Context / 1024}K context, micro-batch {fit.Ubatch}"
+                : !yarnProfile
                 ? $"Use {nativeSmallerTokens / 1024}K context"
                 : suggestedTarget == "Auto"
                     ? "Use a smaller context"
                     : $"Use {suggestedTarget} context";
-            bool smallerContextAvailable = yarnProfile || nativeSmallerTokens > 0;
+            bool smallerContextAvailable = yarnProfile || nativeSmallerTokens > 0 || learnedFit is not null;
 
             string title;
             string message;
@@ -10532,7 +10537,11 @@ public partial class MainViewModel : ViewModelBase
             switch (action)
             {
                 case Views.LocalLaunchRecoveryAction.UseSmallerContext:
-                    if (yarnProfile)
+                    if (learnedFit is { } chosen)
+                    {
+                        await ApplyLearnedFitAndRelaunchAsync(model, variant, chosen.Context, chosen.Ubatch);
+                    }
+                    else if (yarnProfile)
                     {
                         await ApplySmallerContextAndRelaunchAsync(model, variant, suggestedTarget);
                     }
@@ -10587,6 +10596,88 @@ public partial class MainViewModel : ViewModelBase
     /// to a 4096-token multiple, floor 4096. Returns 0 when nothing smaller is possible,
     /// which hides the button rather than offering a "smaller" value that is not.
     /// </summary>
+    /// <summary>
+    /// The Context and micro-batch that fit for the profile that just failed to load, from its own
+    /// saved settings and the compute buffer learned for its model and K cache type; null when
+    /// nothing was learned or its settings already fit.
+    /// </summary>
+    private (int Context, int Ubatch)? LearnedFitForFailedLaunch(string model, string variant)
+    {
+        try
+        {
+            var settings = GetLiveLocalProfileSettings(variant, model);
+            if (settings is null)
+            {
+                return null;
+            }
+
+            string Get(string key, string fallback) => settings[key]?.ToString() is { Length: > 0 } value ? value : fallback;
+            var visionOn = Get("LocalVisionEnabled", "Disabled").Equals("Enabled", StringComparison.OrdinalIgnoreCase);
+            var advice = _runtimeService.GetLocalHardwareLaunchAdvice(
+                model,
+                LocalModelDirectory,
+                visionOn,
+                Get("LocalVisionProjectorPath", string.Empty),
+                ParseInt(Get("LocalVisionMaxImageEdge", string.Empty), LocalVramFootprintEstimate.ReferenceImageEdge));
+            var swaFull = !advice.SlidingWindowPattern && Get("LocalSwaFull", "Disabled").Equals("Enabled", StringComparison.OrdinalIgnoreCase);
+            var context = Get("OverrideContext", string.Empty);
+            var ubatch = Get("LocalUbatchSize", "512");
+            var (fitContext, fitUbatch, _) = LocalPrioritySettingsCalculator.FitToLearnedCompute(
+                advice,
+                context,
+                ubatch,
+                Get("LocalBatchSize", ubatch),
+                LearnedComputeBuffer.KvKey(Get("LocalKvCacheTypeK", "q8_0"), swaFull),
+                contextOutranksSpeed: true);
+            return fitContext == context && fitUbatch == ubatch
+                ? null
+                : (ParseInt(fitContext, 0), ParseInt(fitUbatch, 0));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// "Use … context, micro-batch …" after an out-of-memory launch: opens the failed profile in the
+    /// editor if another is shown, sets Context, micro-batch (batch kept at least as large) and, for
+    /// a sliding-window model, SWA full off; saves and relaunches.
+    /// </summary>
+    private async Task ApplyLearnedFitAndRelaunchAsync(string model, string variant, int contextTokens, int ubatch)
+    {
+        if (!SelectedLocalProfile.Equals(model, StringComparison.OrdinalIgnoreCase)
+            || !NormalizeVariantName(SelectedLocalVariant).Equals(NormalizeVariantName(variant), StringComparison.OrdinalIgnoreCase))
+        {
+            SelectedLocalProfile = model;
+            SelectedLocalVariant = variant;
+        }
+
+        if (!IsLocalVariantEditable)
+        {
+            StatusMessage = "This profile variant is locked. Make a new variant, then set Context " + contextTokens.ToString("N0")
+                + " and Micro-batch " + ubatch + " in the local model profile editor.";
+            return;
+        }
+
+        var ubText = ubatch.ToString(CultureInfo.InvariantCulture);
+        LocalVariantContext = contextTokens;
+        LocalVariantUbatchSize = ubText;
+        if (ParseInt(LocalVariantBatchSize, 0) < ubatch)
+        {
+            LocalVariantBatchSize = ubText;
+        }
+
+        if (CurrentLocalHardwareAdvice().SlidingWindowPattern)
+        {
+            LocalVariantSwaFull = "Disabled";
+        }
+
+        SaveLocalVariantSettings();
+        StatusMessage = $"Context set to {contextTokens:N0} and Micro-batch to {ubatch}, which fit this graphics card. Re-launching local model...";
+        await LaunchLocalRouteAsync("Smaller-context retry", model, variant);
+    }
+
     internal static int SuggestSmallerNativeContext(int currentContext, int safeDefault)
     {
         const int step = 4096;
@@ -15323,8 +15414,6 @@ public partial class MainViewModel : ViewModelBase
         => AcceptLocalComboChange("LocalChatTemplate", value, restored => LocalVariantChatTemplate = restored);
     partial void OnLocalVariantMultiUserModeChanged(string value)
         => AcceptLocalComboChange("LocalMultiUserMode", value, restored => LocalVariantMultiUserMode = restored);
-    partial void OnLocalVariantUnbanTokensModeChanged(string value)
-        => AcceptLocalComboChange("LocalUnbanTokensMode", value, restored => LocalVariantUnbanTokensMode = restored);
     partial void OnLocalVariantAutoCompressEnabledChanged(bool value) => HandleLocalDetailedSettingsChanged();
     partial void OnLocalVariantMaxTokensChanged(string value)
         => AcceptLocalComboChange("OverrideMaxTokens", value, restored => LocalVariantMaxTokens = restored);
@@ -15743,7 +15832,6 @@ public partial class MainViewModel : ViewModelBase
         Restore("LocalKvCacheTypeV", LocalVariantKvCacheTypeV, value => LocalVariantKvCacheTypeV = value);
         Restore("LocalChatTemplate", LocalVariantChatTemplate, value => LocalVariantChatTemplate = value);
         Restore("LocalMultiUserMode", LocalVariantMultiUserMode, value => LocalVariantMultiUserMode = value);
-        Restore("LocalUnbanTokensMode", LocalVariantUnbanTokensMode, value => LocalVariantUnbanTokensMode = value);
         Restore("OverrideMaxTokens", LocalVariantMaxTokens, value => LocalVariantMaxTokens = value);
         Restore("LocalBatchSize", LocalVariantBatchSize, value => LocalVariantBatchSize = value);
         Restore("LocalUbatchSize", LocalVariantUbatchSize, value => LocalVariantUbatchSize = value);
@@ -18719,6 +18807,25 @@ public partial class MainViewModel : ViewModelBase
     {
         if (!ReferenceEquals(slot, _activeQuickSelectSlot))
         {
+            // A local model started outside Quick Select (by AutoTune, Validate or Model Profiles)
+            // has no active row, so every Stop used to answer "not the active runtime slot" and
+            // leave it running — Inkling 2 Mini kept 28 GB of graphics memory after AutoTune
+            // (28 Nov). With no row active, a local row's Stop stops the running local model.
+            if (_activeQuickSelectSlot is null && slot.IsLocalRoute && _runtimeService.IsManagedLocalAlive())
+            {
+                var running = LocalReloadRouting.FormatPackLabel(_runningLocalModel, _runningLocalVariant);
+                await StopLocalRouteAsync($"Selection {slot.SlotNumber}");
+                if (_mountedRouteType.Equals("Local", StringComparison.OrdinalIgnoreCase))
+                {
+                    ClearMountedRoute();
+                }
+
+                CancelActiveEndpointHealthMonitor();
+                RefreshRouteSlotIndicators();
+                StatusMessage = "Stopped " + running + ". It was started outside Quick Select (by AutoTune, Validate or Model Profiles), so it had no row of its own.";
+                return;
+            }
+
             StatusMessage = $"Selection {slot.SlotNumber} is not the active runtime slot.";
             return;
         }
@@ -22314,7 +22421,6 @@ public partial class MainViewModel : ViewModelBase
         settings["LocalKvCacheTypeV"] = LocalVariantKvCacheTypeV;
         settings["LocalChatTemplate"] = LocalVariantChatTemplate = SanitizeLocalChatTemplate(LocalVariantChatTemplate);
         settings["LocalMultiUserMode"] = LocalVariantMultiUserMode;
-        settings["LocalUnbanTokensMode"] = LocalVariantUnbanTokensMode;
         settings["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled;
         settings["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled;
         settings["LocalAutoCompactMode"] = LocalAutoCompactMode;
@@ -22923,7 +23029,6 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantKvCacheTypeV = CoerceLocalOption(settings["LocalKvCacheTypeV"]?.ToString(), LocalKvCacheOptions, "q8_0");
         LocalVariantChatTemplate = CoerceLocalChatTemplate(settings["LocalChatTemplate"]?.ToString());
         LocalVariantMultiUserMode = CoerceOnOff(settings["LocalMultiUserMode"]?.ToString(), "Disabled");
-        LocalVariantUnbanTokensMode = CoerceOnOff(settings["LocalUnbanTokensMode"]?.ToString(), LocalVariantChatTemplate.Equals("qwen", StringComparison.OrdinalIgnoreCase) ? "Enabled" : "Disabled");
         LocalVariantAutoCompressEnabled = ParseBool(settings["AutoCompressEnabled"]?.ToString() ?? string.Empty, true);
         LocalAutoCompactEnabled = ParseBool(settings["LocalAutoCompactEnabled"]?.ToString() ?? string.Empty, true);
         LocalAutoCompactMode = CoerceLocalAutoCompactMode(settings["LocalAutoCompactMode"]?.ToString());
@@ -22946,12 +23051,8 @@ public partial class MainViewModel : ViewModelBase
             option.Equals(LocalVariantMaxTokens, StringComparison.OrdinalIgnoreCase)) ?? LocalVariantMaxTokens;
         LocalVariantBatchSize = CoerceLocalOption(settings["LocalBatchSize"]?.ToString(), LocalBatchSizeOptions, advice.BatchSize);
         LocalVariantUbatchSize = CoerceLocalOption(settings["LocalUbatchSize"]?.ToString(), LocalUbatchSizeOptions, advice.UbatchSize);
-        var specFallback = InferSpecTypeFromProfile();
-        if (string.IsNullOrWhiteSpace(specFallback) || specFallback.Equals("Auto", StringComparison.OrdinalIgnoreCase))
-        {
-            specFallback = advice.SpecType;
-        }
-
+        var specFallback = advice.SpecType;
+        RefreshLocalSpecTypeOptions(advice, FluxMuxRuntimeService.NormalizeLlamaSpecType(settings["LocalSpecType"]?.ToString()));
         LocalVariantSpecType = CoerceLocalOption(
             FluxMuxRuntimeService.NormalizeLlamaSpecType(settings["LocalSpecType"]?.ToString()),
             LocalSpecTypeOptions,
@@ -23342,12 +23443,31 @@ public partial class MainViewModel : ViewModelBase
         };
 
         // Micro-batch: measured per machine instead of trusting the fixed VRAM rule (which was
-        // measured on one 32 GB card only). A size that does not fit simply fails to load and is
-        // skipped. Batch is raised to at least the micro-batch, since llama-server needs b ≥ ub.
+        // measured on one 32 GB card only). Batch is raised to at least the micro-batch, since
+        // llama-server needs b ≥ ub. A size that does not fit cannot be relied on to fail: on
+        // Windows the NVIDIA driver spills the excess into system RAM, so it loads, runs slowly and
+        // can crash (28 Nov, Inkling 2 Mini at 395K: micro-batch 64 ran at 67.6 tok/s; 512 put
+        // ~31 GB in shared memory, ran at 18 tok/s and dropped the connection). So a size the
+        // learned compute buffer says will not fit at this Context is not tried.
         var currentUbatch = ParseInt(baseline.GetValueOrDefault("LocalUbatchSize"), 0);
         var currentBatch = ParseInt(baseline.GetValueOrDefault("LocalBatchSize"), 0);
+        var fitAdvice = CurrentLocalHardwareAdvice();
+        var trialContext = baseline.GetValueOrDefault("OverrideContext") ?? string.Empty;
+        var trialKv = LearnedComputeBuffer.KvKey(
+            baseline.GetValueOrDefault("LocalKvCacheTypeK") ?? "q8_0",
+            (baseline.GetValueOrDefault("LocalSwaFull") ?? string.Empty).Equals("Enabled", StringComparison.OrdinalIgnoreCase));
         foreach (var ubatch in MicroBatchTrialValues(currentUbatch))
         {
+            var ubText = ubatch.ToString(CultureInfo.InvariantCulture);
+            var (fitContext, fitUbatch, _) = LocalPrioritySettingsCalculator.FitToLearnedCompute(
+                fitAdvice, trialContext, ubText, ubText, trialKv, contextOutranksSpeed: false);
+            if (fitContext != trialContext || fitUbatch != ubText)
+            {
+                ReportTuneProgress("Micro-batch " + ubText + " not tried: at Context " + trialContext
+                    + " its prompt-reading memory would not fit this graphics card (learned from an earlier load of this model).");
+                continue;
+            }
+
             var extra = new Dictionary<string, string>(baseline, StringComparer.OrdinalIgnoreCase)
             {
                 ["LocalUbatchSize"] = ubatch.ToString(CultureInfo.InvariantCulture),
@@ -23371,11 +23491,11 @@ public partial class MainViewModel : ViewModelBase
         var specChoice = baseline.GetValueOrDefault("LocalSpecType");
         if (!string.Equals(specChoice, "Disabled", StringComparison.OrdinalIgnoreCase))
         {
-            var currentSpec = FluxMuxRuntimeService.NormalizeLlamaSpecType(specChoice ?? InferSpecTypeFromProfile());
+            var currentSpec = FluxMuxRuntimeService.NormalizeLlamaSpecType(specChoice ?? DetectedSpecType());
             if (string.IsNullOrWhiteSpace(currentSpec)
                 || currentSpec.Equals("Disabled", StringComparison.OrdinalIgnoreCase))
             {
-                currentSpec = InferSpecTypeFromProfile();
+                currentSpec = DetectedSpecType();
             }
 
             if (currentSpec.Equals("draft-mtp", StringComparison.OrdinalIgnoreCase))
@@ -23396,7 +23516,7 @@ public partial class MainViewModel : ViewModelBase
                         (int.TryParse(currentDraft, out var cd) && cd > 0 ? cd.ToString(CultureInfo.InvariantCulture) : "Auto (2)") + "."));
                 }
             }
-            else if (InferSpecTypeFromProfile().Equals("draft-mtp", StringComparison.OrdinalIgnoreCase))
+            else if (DetectedSpecType().Equals("draft-mtp", StringComparison.OrdinalIgnoreCase))
             {
                 // An MTP-capable model on ngram: try MTP. A model without MTP heads is never
                 // offered draft-mtp, since llama-server cannot load that combination.
@@ -23485,7 +23605,6 @@ public partial class MainViewModel : ViewModelBase
             ["LocalKvCacheTypeV"] = LocalVariantKvCacheTypeV,
             ["LocalChatTemplate"] = SanitizeLocalChatTemplate(LocalVariantChatTemplate),
             ["LocalMultiUserMode"] = LocalVariantMultiUserMode,
-            ["LocalUnbanTokensMode"] = LocalVariantUnbanTokensMode,
             ["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled.ToString(),
             ["OverrideMaxTokens"] = LocalVariantMaxTokens,
             ["LocalBatchSize"] = LocalVariantBatchSize,
@@ -24098,12 +24217,6 @@ public partial class MainViewModel : ViewModelBase
             scores["Speed"] -= 1;
         }
 
-        if (LocalVariantUnbanTokensMode == "Enabled" &&
-            LocalVariantChatTemplate.Equals("qwen", StringComparison.OrdinalIgnoreCase))
-        {
-            scores["Fidelity"] += 1;
-            scores["Stability"] += 1;
-        }
 
         // Speculative decoding is lossless (the model checks every drafted token), so turning it
         // off is NOT a Fidelity choice — that rule (+3 Fidelity for Disabled) taught the list
@@ -24145,9 +24258,10 @@ public partial class MainViewModel : ViewModelBase
         if (LocalVariantSwaFull == "Enabled")
             scores["Context length"] += 3;
 
-        if (LocalVariantReasoning == "On")
+        if (LocalReasoningLaunchPolicy.IsThinkingEnabled(LocalVariantReasoning))
         {
-            scores["Reasoning depth"] += 6;
+            // XHigh is what the wizard picks for Reasoning depth first; Medium for second.
+            scores["Reasoning depth"] += LocalVariantReasoning == "XHigh" ? 7 : LocalVariantReasoning == "Low" ? 4 : 6;
             scores["Speed"] -= 2;
         }
         else
@@ -24217,7 +24331,7 @@ public partial class MainViewModel : ViewModelBase
         }
 
         // Thinking budget only matters while Reasoning is on: a cap trades depth for a faster start.
-        if (LocalVariantReasoning == "On")
+        if (LocalReasoningLaunchPolicy.IsThinkingEnabled(LocalVariantReasoning))
         {
             if (int.TryParse(LocalVariantReasoningBudget, out var budget))
             {
@@ -24309,6 +24423,9 @@ public partial class MainViewModel : ViewModelBase
         return ApplyKvAdjustments(baseBytes);
     }
 
+    // The generic figure for q8_0, which a sliding-window model's own figure is scaled against.
+    private static readonly double GenericQ8KvBytesPerToken = ResolveKvBytesPerToken("q8_0", "q8_0");
+
     /// <summary>
     /// Computes the effective KV cache bytes per token for a specific KV type string
     /// (e.g. "q4_1"), adjusted for hybrid-KV and Flash Attention. Used when evaluating
@@ -24326,6 +24443,14 @@ public partial class MainViewModel : ViewModelBase
     private long ApplyKvAdjustments(double baseBytes)
     {
         var advice = CurrentLocalHardwareAdvice();
+
+        // A sliding-window model (28 Nov): its own per-token figure at q8_0 (full-attention layer
+        // passes only), scaled by the chosen KV type. The generic figure below treated Inkling 2
+        // Mini like Qwen (~73 KB/token against ~16 KB), so the form overstated its KV ~4.5 times.
+        if (advice.SlidingWindowPattern && advice.KvBytesPerToken > 0 && GenericQ8KvBytesPerToken > 0)
+        {
+            return Math.Max(1L, (long)(advice.KvBytesPerToken * (baseBytes / GenericQ8KvBytesPerToken)));
+        }
 
         // Hybrid-KV models (e.g. Qwen3.8) use ~38% of the full-attention KV per token.
         if (advice.HybridKv)
@@ -24379,7 +24504,7 @@ public partial class MainViewModel : ViewModelBase
         merged["LocalFlashAttention"] = advice.FlashAttention.Equals("Auto", StringComparison.OrdinalIgnoreCase)
             ? current.GetValueOrDefault("LocalFlashAttention", advice.FlashAttention)
             : advice.FlashAttention;
-        merged["LocalSwaFull"] = advice.EnableSwaFull ? "Enabled" : current.GetValueOrDefault("LocalSwaFull", "Disabled");
+        merged["LocalSwaFull"] = advice.SlidingWindowPattern ? "Disabled" : advice.EnableSwaFull ? "Enabled" : current.GetValueOrDefault("LocalSwaFull", "Disabled");
         Take("OverrideThreads");
         Take("LocalThreadsBatch");
 
@@ -24393,11 +24518,6 @@ public partial class MainViewModel : ViewModelBase
         var template = current.GetValueOrDefault("LocalChatTemplate", canonical["LocalChatTemplate"]);
         merged["LocalChatTemplate"] = SanitizeLocalChatTemplate(
             string.IsNullOrWhiteSpace(template) ? canonical["LocalChatTemplate"] : template);
-        if (merged["LocalChatTemplate"].Equals("qwen", StringComparison.OrdinalIgnoreCase) &&
-            !current.GetValueOrDefault("LocalUnbanTokensMode", "").Equals("Enabled", StringComparison.OrdinalIgnoreCase))
-        {
-            merged["LocalUnbanTokensMode"] = "Enabled";
-        }
 
         merged["AutoCompressEnabled"] = current.GetValueOrDefault("AutoCompressEnabled", canonical["AutoCompressEnabled"]);
 
@@ -24551,7 +24671,6 @@ public partial class MainViewModel : ViewModelBase
             ["LocalKvCacheTypeV"] = LocalVariantKvCacheTypeV,
             ["LocalChatTemplate"] = SanitizeLocalChatTemplate(LocalVariantChatTemplate),
             ["LocalMultiUserMode"] = LocalVariantMultiUserMode,
-            ["LocalUnbanTokensMode"] = LocalVariantUnbanTokensMode,
             ["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled.ToString(),
             ["OverrideMaxTokens"] = LocalVariantMaxTokens,
             ["LocalBatchSize"] = LocalVariantBatchSize,
@@ -24613,15 +24732,11 @@ public partial class MainViewModel : ViewModelBase
             settings["LocalFlashAttention"] = advice.FlashAttention;
         if (settings["LocalMultiUserMode"].Equals("Auto", StringComparison.OrdinalIgnoreCase))
             settings["LocalMultiUserMode"] = "Disabled";
-        if (settings["LocalUnbanTokensMode"].Equals("Auto", StringComparison.OrdinalIgnoreCase))
-            settings["LocalUnbanTokensMode"] = settings["LocalChatTemplate"].Equals("qwen", StringComparison.OrdinalIgnoreCase)
-                ? "Enabled"
-                : "Disabled";
 
         SetIfMissingOrAuto(settings, "OverrideMaxTokens", advice.MaxTokens);
         SetIfMissingOrAuto(settings, "LocalBatchSize", advice.BatchSize);
         SetIfMissingOrAuto(settings, "LocalUbatchSize", advice.UbatchSize);
-        var inferredSpec = InferSpecTypeFromProfile();
+        var inferredSpec = DetectedSpecType();
         SetIfMissingOrAuto(
             settings,
             "LocalSpecType",
@@ -24669,7 +24784,6 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantKvCacheTypeV = settings["LocalKvCacheTypeV"];
         LocalVariantChatTemplate = SanitizeLocalChatTemplate(settings["LocalChatTemplate"]);
         LocalVariantMultiUserMode = settings["LocalMultiUserMode"];
-        LocalVariantUnbanTokensMode = settings["LocalUnbanTokensMode"];
         LocalVariantAutoCompressEnabled = ParseBool(settings["AutoCompressEnabled"], LocalVariantAutoCompressEnabled);
         LocalVariantMaxTokens = settings.GetValueOrDefault("OverrideMaxTokens", LocalVariantMaxTokens);
         LocalVariantBatchSize = settings.GetValueOrDefault("LocalBatchSize", LocalVariantBatchSize);
@@ -24677,7 +24791,7 @@ public partial class MainViewModel : ViewModelBase
         LocalVariantSpecType = CoerceLocalOption(
             FluxMuxRuntimeService.NormalizeLlamaSpecType(settings.GetValueOrDefault("LocalSpecType", LocalVariantSpecType)),
             LocalSpecTypeOptions,
-            InferSpecTypeFromProfile());
+            DetectedSpecType());
         LocalVariantSpecDraftNMax = settings.GetValueOrDefault("LocalSpecDraftNMax", LocalVariantSpecDraftNMax);
         LocalVariantReasoningBudget = settings.GetValueOrDefault("LocalReasoningBudget", LocalVariantReasoningBudget);
         LocalVariantTopK = settings.GetValueOrDefault("LocalTopK", LocalVariantTopK);
@@ -25019,7 +25133,6 @@ public partial class MainViewModel : ViewModelBase
             ["LocalKvCacheTypeV"] = LocalVariantKvCacheTypeV,
             ["LocalChatTemplate"] = SanitizeLocalChatTemplate(LocalVariantChatTemplate),
             ["LocalMultiUserMode"] = LocalVariantMultiUserMode,
-            ["LocalUnbanTokensMode"] = LocalVariantUnbanTokensMode,
             ["AutoCompressEnabled"] = LocalVariantAutoCompressEnabled,
             ["LocalAutoCompactEnabled"] = LocalAutoCompactEnabled,
             ["LocalAutoCompactMode"] = LocalAutoCompactMode,
@@ -25069,7 +25182,6 @@ public partial class MainViewModel : ViewModelBase
             ["flash"] = LocalVariantFlashAttention,
             ["template"] = LocalVariantChatTemplate,
             ["slots"] = LocalVariantMultiUserMode,
-            ["unban"] = LocalVariantUnbanTokensMode,
             ["maxtok"] = LocalVariantMaxTokens,
             ["b"] = LocalVariantBatchSize,
             ["ub"] = LocalVariantUbatchSize,
@@ -25127,7 +25239,6 @@ public partial class MainViewModel : ViewModelBase
         ("LocalSpecDraftNMax", "Draft length"),
         ("LocalChatTemplate", "Template"),
         ("LocalChatParser", "Chat parser"),
-        ("LocalUnbanTokensMode", "Unban tokens"),
         ("LocalReasoningBudget", "Thinking budget"),
         ("LocalTemperature", "Temperature"),
         ("OverrideMaxTokens", "Max tokens"),
@@ -25449,16 +25560,45 @@ public partial class MainViewModel : ViewModelBase
             return current;
         }
 
-        var inferred = InferSpecTypeFromProfile();
+        var inferred = DetectedSpecType();
         return string.IsNullOrWhiteSpace(inferred) || inferred.Equals("Auto", StringComparison.OrdinalIgnoreCase)
             ? CurrentLocalHardwareAdvice().SpecType
             : inferred;
     }
 
-    private string InferSpecTypeFromProfile()
+    /// <summary>The speculative type the model's file suggests (MTP heads: draft-mtp), not its name.</summary>
+    private string DetectedSpecType() => CurrentLocalHardwareAdvice().SpecType;
+
+    /// <summary>
+    /// Offers the speculative types this llama-server build and model support (28 Nov), changing the
+    /// list in place and never removing the current choice, so the selection is not cleared.
+    /// </summary>
+    private void RefreshLocalSpecTypeOptions(FluxMuxRuntimeService.LocalHardwareLaunchAdvice advice, string? keep)
     {
-        var lowered = (SelectedLocalProfile ?? string.Empty).ToLowerInvariant();
-        return lowered.Contains("qwen3") ? "draft-mtp" : "ngram-simple";
+        var wanted = _runtimeService.GetSpeculativeTypesFor(advice).ToList();
+        if (!string.IsNullOrWhiteSpace(keep) && !wanted.Contains(keep, StringComparer.OrdinalIgnoreCase))
+        {
+            wanted.Add(keep);
+        }
+
+        foreach (var stale in LocalSpecTypeOptions.Where(option => !wanted.Contains(option, StringComparer.OrdinalIgnoreCase)
+                     && !option.Equals(LocalVariantSpecType, StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            LocalSpecTypeOptions.Remove(stale);
+        }
+
+        for (var i = 0; i < wanted.Count; i++)
+        {
+            var existing = LocalSpecTypeOptions.IndexOf(LocalSpecTypeOptions.FirstOrDefault(option => option.Equals(wanted[i], StringComparison.OrdinalIgnoreCase)) ?? string.Empty);
+            if (existing < 0)
+            {
+                LocalSpecTypeOptions.Insert(Math.Min(i, LocalSpecTypeOptions.Count), wanted[i]);
+            }
+            else if (existing != i && i < LocalSpecTypeOptions.Count)
+            {
+                LocalSpecTypeOptions.Move(existing, i);
+            }
+        }
     }
 
     private static string DefaultLocalThreadCount() =>
